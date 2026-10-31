@@ -164,6 +164,27 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
       - `rest`: this function's `cyclomatic`, `cognitive` and `lines`
         after, the call a line of its own.
 
+## Files
+
+`--files` lists files rather than functions: what each imports, and
+what imports it. An `@import` of a string ending in `.zig` or `.zon` is
+a file, relative to the importing one; anything else is a module (`std`,
+`builtin`, a build option, a named module), which the source alone
+cannot place, and which gnarl lists rather than follows.
+
+- `schema`, `gnarl`, `errors`, `notes`: as in the report.
+- `files`: each file read, the most coupled first (the most imports in
+  and out, then out, then by path):
+  - `path`: as gnarl prints paths.
+  - `fan_out`: how many files it imports.
+  - `fan_in`: how many of the files read import it.
+  - `imports`: the files it imports, each once.
+  - `imported_by`: the files read that import it.
+  - `modules`: the modules it imports, each once.
+
+In csv and tsv, the columns are `path`, `fan_out`, `fan_in`, and the
+lists `imports`, `imported_by` and `modules`, each separated by spaces.
+
 ## A diff
 
 - `schema`, `gnarl`, `thresholds`, `errors`, `notes`: as in the report.

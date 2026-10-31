@@ -11,6 +11,7 @@ const baseline = @import("baseline.zig");
 const config = @import("config.zig");
 const diff = @import("diff.zig");
 const explain = @import("explain.zig");
+const fan = @import("fan.zig");
 const measure = @import("measure.zig");
 const messages = @import("messages.zig");
 const report = @import("report.zig");
@@ -91,6 +92,11 @@ const usage =
     \\                    numbers before and after: worse first, then mixed
     \\                    (some up, some down), added, the same, better and
     \\                    removed.
+    \\  --files           Rather than report functions, list each file: the
+    \\                    files it imports (fan-out), the files read that
+    \\                    import it (fan-in), and the modules it imports,
+    \\                    which gnarl does not follow; the most coupled
+    \\                    first. Takes --top.
     \\  --format <format> text (the default, a table); md (a Markdown table,
     \\                    for a review); json or xml (every field and all
     \\                    that stderr says, versioned); csv or tsv (a header,
@@ -138,6 +144,7 @@ pub fn main(init: std.process.Init) !u8 {
     };
     if (run.diff) |ref| return runDiff(c, ref);
     if (run.explain.len > 0) return runExplain(c);
+    if (run.files) return runFiles(c);
     return runReport(c);
 }
 
@@ -292,6 +299,29 @@ const ReportSink = struct {
         for (s.rows.items[first..]) |*row| row.class = .forFunction(class, row.kind == .@"test");
     }
 };
+
+/// What `readFiles` hands each tree to for --files: what each file
+/// imports.
+const FanSink = struct {
+    files: *std.ArrayList(fan.File),
+    arena: std.mem.Allocator,
+
+    pub fn file(s: FanSink, _: std.mem.Allocator, path: []const u8, tree: *const Ast, _: Class) !void {
+        try s.files.append(s.arena, try fan.of(s.arena, path, tree));
+    }
+};
+
+/// `--files`: each file's imports, and the files read that import it.
+fn runFiles(c: Context) !u8 {
+    const files = try collectFiles(c, &.{});
+    var found: std.ArrayList(fan.File) = .empty;
+    _ = try readFiles(c, files, FanSink{ .files = &found, .arena = c.arena });
+    try fan.link(c.arena, found.items);
+    fan.sort(found.items);
+    const status = c.exitStatus(0);
+    fan.write(c.out(), c.run.format, found.items, .{ .version = build_options.version, .top = c.run.top, .messages = c.said.items.items }) catch |err| return closedEarly(err, c.stdout_writer, status);
+    return c.finish(status);
+}
 
 /// `--explain`: why each function named scores what it does.
 fn runExplain(c: Context) !u8 {
@@ -601,6 +631,8 @@ const Run = struct {
     update_baseline: bool = false,
     /// The commit to diff the work tree against, if one is given.
     diff: ?[]const u8 = null,
+    /// List files and their imports rather than functions.
+    files: bool = false,
 
     /// Whether an option only the report takes is given.
     fn reportOnly(r: Run) bool {
@@ -620,13 +652,20 @@ const Run = struct {
         if (r.diff != null and (r.reportOnly() or r.baselineFlags() or r.explain.len > 0)) {
             return "--diff takes paths, --exclude, --config and --format; not --check, --explain, the baseline flags, --all, --top or --function";
         }
+        if (r.files and r.notForFiles()) {
+            return "--files takes paths, --exclude, --no-ignore, --config, --format and --top; not --check, --explain, --diff, the baseline flags, --all or --function";
+        }
         if (r.baseline != null and !r.check and !r.update_baseline) return "--baseline is for --check or --update-baseline";
         return null;
+    }
+
+    fn notForFiles(r: Run) bool {
+        return r.check or r.all or r.functions.len > 0 or r.baselineFlags() or r.explain.len > 0 or r.diff != null;
     }
 };
 
 /// The options that stand alone.
-const Flag = enum { @"--json", @"--check", @"--all", @"--no-ignore", @"--update-baseline" };
+const Flag = enum { @"--json", @"--check", @"--all", @"--no-ignore", @"--update-baseline", @"--files" };
 
 /// The options that take a value, as `--top 5` or `--top=5`.
 const Option = enum { @"--exclude", @"--top", @"--function", @"--explain", @"--diff", @"--baseline", @"--config", @"--format" };
@@ -646,6 +685,7 @@ const Parsing = struct {
             .@"--all" => p.run.all = true,
             .@"--no-ignore" => p.run.no_ignore = true,
             .@"--update-baseline" => p.run.update_baseline = true,
+            .@"--files" => p.run.files = true,
         }
     }
 
@@ -1506,6 +1546,7 @@ test {
     _ = @import("diff.zig");
     _ = @import("docs.zig");
     _ = @import("explain.zig");
+    _ = @import("fan.zig");
     _ = @import("formats.zig");
     _ = @import("cyclomatic.zig");
     _ = @import("functions.zig");

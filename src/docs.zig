@@ -125,6 +125,19 @@ test "docs/output.md lists every field of a diff, and no other" {
     try expectSame(arena, doc, "## A diff", "## The report", out.written());
 }
 
+test "docs/output.md lists every field of a files document, and no other" {
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const doc = try std.Io.Dir.cwd().readFileAlloc(io, doc_path, arena, .limited(1 << 20));
+    const fan = @import("fan.zig");
+    const files = [_]fan.File{.{ .path = "a.zig", .imports = &.{"b.zig"}, .imported_by = &.{"c.zig"}, .modules = &.{"std"} }};
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try fan.write(&out.writer, .json, &files, .{ .version = "0.0.0", .messages = &said });
+    try expectSame(arena, doc, "## Files", "## The report", out.written());
+}
+
 test "docs/output.md lists every field of an explanation, and no other" {
     const io = std.testing.io;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);

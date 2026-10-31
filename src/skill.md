@@ -37,6 +37,12 @@ as often as it helps.
 4. `gnarl --check src` in CI exits 1 when a function is over a critical
    threshold, and names the `--explain` to run for the worst.
 
+`gnarl --files src` lists files rather than functions: the files each
+imports (fan-out), the files read that import it (fan-in), and the
+modules it imports (`std`, named modules), which gnarl does not follow;
+the most coupled first. A file many import is risky to change; one that
+imports many knows too much.
+
 On code with debt already, `gnarl --update-baseline src` writes
 `complexity.baseline` (commit it): the functions over a critical
 threshold now, with their numbers. From then on `--check` holds to it
