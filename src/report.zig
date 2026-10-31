@@ -5,14 +5,21 @@ const std = @import("std");
 const Writer = std.Io.Writer;
 const Allocator = std.mem.Allocator;
 
+const formats = @import("formats.zig");
 const functions = @import("functions.zig");
+const messages = @import("messages.zig");
+const Message = messages.Message;
 const thresholds = @import("thresholds.zig");
 const Class = thresholds.Class;
 const Classes = thresholds.Classes;
 const Metric = thresholds.Metric;
 const Trip = thresholds.Trip;
 
-pub const Format = enum { text, json, md };
+pub const Format = enum { text, md, json, xml, csv, tsv };
+
+/// The version of the shape of the json and xml documents. It goes up
+/// when a field is renamed, moved or taken away; one added leaves it.
+pub const schema = 1;
 
 pub const Row = struct {
     path: []const u8,
@@ -138,23 +145,150 @@ pub fn list(arena: Allocator, ranked: []const Row, listing: Listing) Allocator.E
     return .{ .rows = rows.items, .not_listed = not_listed, .top = listing.top };
 }
 
-/// Writes `listed`, of the ranked `rows`, in `format`. `files` is how many
-/// files the rows came from, and `classes` the thresholds they were
-/// ranked against.
-pub fn write(w: *Writer, format: Format, rows: []const Row, listed: Listed, files: usize, classes: Classes) Writer.Error!void {
+pub const Check = struct {
+    /// Whether --check was given.
+    asked: bool = false,
+    /// Whether it fails the run: asked, and a function is over a critical
+    /// threshold.
+    failed: bool = false,
+    /// How many functions are over a critical threshold, asked or not.
+    critical: usize = 0,
+};
+
+/// What a report says besides its rows.
+pub const Context = struct {
+    /// gnarl's own version.
+    version: []const u8,
+    /// How many files the rows came from.
+    files: usize,
+    /// The thresholds the rows were ranked against.
+    classes: Classes,
+    check: Check = .{},
+    /// Everything said on stderr, for the documents that carry it.
+    messages: []const Message = &.{},
+};
+
+/// Writes `listed`, of the ranked `rows`, in `format`.
+pub fn write(w: *Writer, format: Format, rows: []const Row, listed: Listed, context: Context) Writer.Error!void {
     switch (format) {
-        .text => try writeText(w, rows, listed, files, classes),
-        .md => try writeMarkdown(w, rows, listed, files, classes),
-        .json => {
-            try std.json.Stringify.value(.{
-                .functions = listed.rows,
-                .measured = rows.len,
-                .not_listed = listed.not_listed,
-                .files = files,
-                .thresholds = classes,
-            }, .{ .whitespace = .indent_2 }, w);
-            try w.writeByte('\n');
-        },
+        .text => try writeText(w, rows, listed, context.files, context.classes),
+        .md => try writeMarkdown(w, rows, listed, context.files, context.classes),
+        .json => try writeJson(w, rows, listed, context),
+        .xml => try writeXml(w, rows, listed, context),
+        .csv => try writeDelimited(w, .csv, listed.rows),
+        .tsv => try writeDelimited(w, .tsv, listed.rows),
+    }
+}
+
+/// One document, compact, the functions last and one to a line, so a
+/// reader can stop early or take a line at a time.
+fn writeJson(w: *Writer, rows: []const Row, listed: Listed, c: Context) Writer.Error!void {
+    try w.print("{{\"schema\":{d},\"gnarl\":", .{schema});
+    try std.json.Stringify.value(c.version, .{}, w);
+    try w.print(",\"files\":{d},\"measured\":{d},\"not_listed\":", .{ c.files, rows.len });
+    try std.json.Stringify.value(listed.not_listed, .{}, w);
+    try w.writeAll(",\"check\":");
+    try std.json.Stringify.value(c.check, .{}, w);
+    try w.writeAll(",\"thresholds\":");
+    try std.json.Stringify.value(c.classes, .{}, w);
+    try messages.writeJson(w, c.messages);
+    try w.writeAll(",\"functions\":[");
+    for (listed.rows, 0..) |row, i| {
+        try w.writeAll(if (i == 0) "\n" else ",\n");
+        try std.json.Stringify.value(row, .{}, w);
+    }
+    try w.writeAll(if (listed.rows.len > 0) "\n]}\n" else "]}\n");
+}
+
+/// The json document's fields as elements and attributes.
+fn writeXml(w: *Writer, rows: []const Row, listed: Listed, c: Context) Writer.Error!void {
+    try w.writeAll("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<gnarl");
+    try formats.attrInt(w, "schema", schema);
+    try formats.attr(w, "version", c.version);
+    try formats.attrInt(w, "files", c.files);
+    try formats.attrInt(w, "measured", rows.len);
+    try w.writeAll(">\n  <not_listed");
+    try formats.attrInt(w, "within_limits", listed.not_listed.within_limits);
+    try formats.attrInt(w, "past_top", listed.not_listed.past_top);
+    try formats.attrInt(w, "not_selected", listed.not_listed.not_selected);
+    try w.writeAll("/>\n  <check");
+    try formats.attrBool(w, "asked", c.check.asked);
+    try formats.attrBool(w, "failed", c.check.failed);
+    try formats.attrInt(w, "critical", c.check.critical);
+    try w.writeAll("/>\n  <thresholds>\n");
+    for (std.enums.values(Class)) |class| {
+        try w.writeAll("    <class");
+        try formats.attr(w, "name", @tagName(class));
+        try w.writeAll(">\n");
+        const limits = c.classes.get(class);
+        for (std.enums.values(Metric)) |metric| {
+            const limit = limits.of(metric);
+            if (limit.warning == null and limit.critical == null) continue;
+            try w.writeAll("      <limit");
+            try formats.attr(w, "metric", @tagName(metric));
+            if (limit.warning) |n| try formats.attrInt(w, "warning", n);
+            if (limit.critical) |n| try formats.attrInt(w, "critical", n);
+            try w.writeAll("/>\n");
+        }
+        try w.writeAll("    </class>\n");
+    }
+    try w.writeAll("  </thresholds>\n");
+    try messages.writeXml(w, c.messages);
+    try w.writeAll("  <functions>\n");
+    for (listed.rows) |row| {
+        try w.writeAll("    <function");
+        try formats.attr(w, "path", row.path);
+        try formats.attrInt(w, "line", row.line);
+        try formats.attrInt(w, "end_line", row.end_line);
+        try formats.attrInt(w, "column", row.column);
+        try formats.attr(w, "name", row.name);
+        try formats.attr(w, "kind", @tagName(row.kind));
+        try formats.attr(w, "class", @tagName(row.class));
+        inline for (comptime std.enums.values(Metric)) |metric| {
+            try formats.attrInt(w, @tagName(metric), @field(row, @tagName(metric)));
+        }
+        if (row.trips.len == 0) {
+            try w.writeAll("/>\n");
+            continue;
+        }
+        try w.writeAll(">\n");
+        for (row.trips) |trip| {
+            try w.writeAll("      <trip");
+            try formats.attr(w, "metric", @tagName(trip.metric));
+            try formats.attr(w, "level", @tagName(trip.level));
+            try formats.attrInt(w, "limit", trip.limit);
+            try w.writeAll("/>\n");
+        }
+        try w.writeAll("    </function>\n");
+    }
+    try w.writeAll("  </functions>\n</gnarl>\n");
+}
+
+pub const delimited_columns = [_][]const u8{
+    "path",       "line",  "end_line", "column", "name",            "kind", "class",
+    "cyclomatic", "lines", "nesting",  "params", "params_weighted", "over",
+};
+
+/// A header row, then a row per function listed. `over` holds each limit
+/// passed as `metric:level:limit`, separated by spaces.
+fn writeDelimited(w: *Writer, kind: formats.Delimited, rows: []const Row) Writer.Error!void {
+    try formats.header(w, kind, &delimited_columns);
+    for (rows) |row| {
+        try formats.field(w, kind, true, row.path);
+        try formats.fieldInt(w, kind, false, row.line);
+        try formats.fieldInt(w, kind, false, row.end_line);
+        try formats.fieldInt(w, kind, false, row.column);
+        try formats.field(w, kind, false, row.name);
+        try formats.field(w, kind, false, @tagName(row.kind));
+        try formats.field(w, kind, false, @tagName(row.class));
+        inline for (comptime std.enums.values(Metric)) |metric| {
+            try formats.fieldInt(w, kind, false, @field(row, @tagName(metric)));
+        }
+        var buffer: [256]u8 = undefined;
+        var over: Writer = .fixed(&buffer);
+        for (row.trips, 0..) |trip, i| over.print("{s}{t}:{t}:{d}", .{ if (i == 0) "" else " ", trip.metric, trip.level, trip.limit }) catch unreachable;
+        try formats.field(w, kind, false, over.buffered());
+        try w.writeByte('\n');
     }
 }
 
@@ -341,7 +475,7 @@ fn expectWritten(format: Format, listing: Listing, expected: []const u8) !void {
     const arena = arena_state.allocator();
     var out: Writer.Allocating = .init(arena);
     const rows = try sampleRows(arena);
-    try write(&out.writer, format, rows, try list(arena, rows, listing), 2, .defaults);
+    try write(&out.writer, format, rows, try list(arena, rows, listing), .{ .version = "0.0.0", .files = 2, .classes = .defaults });
     try std.testing.expectEqualStrings(expected, out.written());
 }
 
@@ -471,11 +605,29 @@ test "write: JSON" {
     const arena = arena_state.allocator();
     var out: Writer.Allocating = .init(arena);
     const rows = try sampleRows(arena);
-    try write(&out.writer, .json, rows, try list(arena, rows, .{ .all = true, .top = 3 }), 2, .defaults);
+    try write(&out.writer, .json, rows, try list(arena, rows, .{ .all = true, .top = 3 }), sampleContext());
 
-    // Read back, it says what the table says.
-    const Doc = struct { functions: []const Row, measured: usize, not_listed: NotListed, files: usize, thresholds: Classes };
+    // Read back, it says what the table says, and what stderr said.
+    const Doc = struct {
+        schema: u32,
+        gnarl: []const u8,
+        files: usize,
+        measured: usize,
+        not_listed: NotListed,
+        check: Check,
+        thresholds: Classes,
+        errors: []const JsonMessage,
+        notes: []const JsonMessage,
+        functions: []const Row,
+    };
     const doc = try std.json.parseFromSliceLeaky(Doc, arena, out.written(), .{});
+    try std.testing.expectEqual(schema, doc.schema);
+    try std.testing.expectEqualStrings("0.0.0", doc.gnarl);
+    try std.testing.expectEqual(Check{ .asked = true, .failed = true, .critical = 1 }, doc.check);
+    try std.testing.expectEqualStrings("bad.zig", doc.errors[0].path);
+    try std.testing.expectEqual(3, doc.errors[0].line.?);
+    try std.testing.expectEqual(null, doc.notes[0].line);
+    try std.testing.expectEqualStrings("a.zig:1  f", doc.notes[0].more[0]);
     try std.testing.expectEqual(3, doc.functions.len);
     try std.testing.expectEqual(4, doc.measured);
     try std.testing.expectEqual(NotListed{ .past_top = 1 }, doc.not_listed);
@@ -488,7 +640,67 @@ test "write: JSON" {
     try std.testing.expectEqual(null, doc.thresholds.normal.nesting.critical);
     try std.testing.expectEqual(20, doc.thresholds.cold.cyclomatic.critical);
     try std.testing.expectEqual(.normal, doc.functions[0].class);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"params_weighted\": 3") != null);
+    // One function to a line, the functions last.
+    try std.testing.expectEqual(5, std.mem.countScalar(u8, out.written(), '\n'));
+    try std.testing.expect(std.mem.startsWith(u8, out.written(), "{\"schema\":1,\"gnarl\":\"0.0.0\",\"files\":2,"));
+    try std.testing.expect(std.mem.endsWith(u8, out.written(), "}\n]}\n"));
+}
+
+const JsonMessage = struct { path: []const u8, line: ?u32, column: ?u32, text: []const u8, more: []const []const u8 };
+
+fn sampleContext() Context {
+    return .{
+        .version = "0.0.0",
+        .files = 2,
+        .classes = .defaults,
+        .check = .{ .asked = true, .failed = true, .critical = 1 },
+        .messages = &.{
+            .{ .level = .@"error", .path = "bad.zig", .line = 3, .column = 7, .text = "expected ';' after statement" },
+            .{ .level = .note, .path = "f", .text = "explained the function of exactly that name; 1 more ends with it:", .more = &.{"a.zig:1  f"} },
+        },
+    };
+}
+
+test "write: xml says what json does, and reads back" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: Writer.Allocating = .init(arena);
+    const rows = try sampleRows(arena);
+    try write(&out.writer, .xml, rows, try list(arena, rows, .{}), sampleContext());
+
+    const doc = try formats.readXml(arena, out.written());
+    try std.testing.expectEqualStrings("gnarl", doc.name);
+    try std.testing.expectEqualStrings("1", doc.get("schema").?);
+    try std.testing.expectEqualStrings("4", doc.get("measured").?);
+    try std.testing.expectEqualStrings("2", doc.child("not_listed").?.get("within_limits").?);
+    try std.testing.expectEqualStrings("true", doc.child("check").?.get("failed").?);
+    try std.testing.expectEqual(3, doc.child("thresholds").?.children.len);
+    try std.testing.expectEqualStrings("3", doc.child("errors").?.children[0].get("line").?);
+    try std.testing.expectEqualStrings("a.zig:1  f", doc.child("notes").?.children[0].children[0].get("text").?);
+    const listed = doc.child("functions").?.children;
+    try std.testing.expectEqual(2, listed.len);
+    try std.testing.expectEqualStrings("Parser.next", listed[0].get("name").?);
+    try std.testing.expectEqualStrings("22", listed[0].get("cyclomatic").?);
+    try std.testing.expectEqualStrings("critical", listed[0].children[0].get("level").?);
+}
+
+test "write: csv and tsv, a header and a row per function listed, read back" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const rows = try sampleRows(arena);
+    for ([_]Format{ .csv, .tsv }) |format| {
+        var out: Writer.Allocating = .init(arena);
+        try write(&out.writer, format, rows, try list(arena, rows, .{ .all = true }), sampleContext());
+        const table = try formats.readDelimited(arena, if (format == .csv) .csv else .tsv, out.written());
+        try std.testing.expectEqual(5, table.len);
+        for (delimited_columns, table[0]) |want, got| try std.testing.expectEqualStrings(want, got);
+        try std.testing.expectEqualStrings("Parser.next", table[1][4]);
+        try std.testing.expectEqualStrings("cyclomatic:critical:15 lines:critical:100 nesting:warning:4", table[1][12]);
+        try std.testing.expectEqualStrings("test \"a|b\"", table[3][4]);
+        try std.testing.expectEqualStrings("", table[3][12]);
+    }
 }
 
 test "writeCode: a backtick in the text takes a longer fence" {

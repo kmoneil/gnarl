@@ -8,7 +8,11 @@ const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 
 const cyclomatic = @import("cyclomatic.zig");
+const formats = @import("formats.zig");
 const functions = @import("functions.zig");
+const messages = @import("messages.zig");
+const Message = messages.Message;
+const Messages = messages.Messages;
 const lines = @import("lines.zig");
 const nesting = @import("nesting.zig");
 const params = @import("params.zig");
@@ -195,9 +199,10 @@ pub const Search = struct {
         };
     }
 
-    /// The one explanation each selector found, in selector order. Says on
-    /// stderr why a selector found none, or more than one.
-    pub fn results(s: Search, arena: Allocator) Allocator.Error!struct { explanations: []const Explanation, all_found: bool } {
+    /// The one explanation each selector found, in selector order. Says in
+    /// `said` why a selector found none, or more than one, and which longer
+    /// names a whole name passed over.
+    pub fn results(s: Search, arena: Allocator, said: *Messages) Allocator.Error!struct { explanations: []const Explanation, all_found: bool } {
         var out: std.ArrayList(Explanation) = .empty;
         var all_found = true;
         for (s.selectors, s.found, s.texts) |selector, found, text| {
@@ -207,8 +212,12 @@ pub const Search = struct {
                 // A whole name wins, but say which longer ones it hid.
                 if (selector == .name and found.exact.items.len == 1 and found.partial.items.len > 0) {
                     const n = found.partial.items.len;
-                    std.debug.print("gnarl: {s}: explained the function of exactly that name; {d} more end{s} with it:\n", .{ text, n, if (n == 1) "s" else "" });
-                    for (found.partial.items) |m| std.debug.print("  {s}:{d}  {s}\n", .{ m.path, m.line, m.name });
+                    try said.add(.{
+                        .level = .note,
+                        .path = text,
+                        .text = try std.fmt.allocPrint(arena, "explained the function of exactly that name; {d} more end{s} with it:", .{ n, if (n == 1) "s" else "" }),
+                        .more = try places(arena, found.partial.items),
+                    });
                 }
                 continue;
             }
@@ -216,20 +225,39 @@ pub const Search = struct {
             if (matches.len == 0) {
                 switch (selector) {
                     // A file that could not be read has been said already.
-                    .at => if (found.read) std.debug.print("gnarl: {s}: no function at or around that line\n", .{text}),
-                    .name => std.debug.print("gnarl: {s}: no function by that name in the files read\n", .{text}),
+                    .at => |at| if (found.read) try said.add(.{ .level = .@"error", .path = at.path, .line = at.line, .text = "no function at or around that line" }),
+                    .name => try said.fail(text, "no function by that name in the files read", .{}),
                 }
                 continue;
             }
-            std.debug.print("gnarl: {s}: {d} functions answer to that name; name one by path:line:\n", .{ text, matches.len });
-            for (matches) |m| std.debug.print("  {s}:{d}  {s}\n", .{ m.path, m.line, m.name });
+            try said.add(.{
+                .level = .@"error",
+                .path = text,
+                .text = try std.fmt.allocPrint(arena, "{d} functions answer to that name; name one by path:line:", .{matches.len}),
+                .more = try places(arena, matches),
+            });
         }
         return .{ .explanations = out.items, .all_found = all_found };
     }
 };
 
+/// `path:line  name` for each of `explanations`.
+fn places(arena: Allocator, explanations: []const Explanation) Allocator.Error![]const []const u8 {
+    const out = try arena.alloc([]const u8, explanations.len);
+    for (explanations, out) |e, *line| line.* = try std.fmt.allocPrint(arena, "{s}:{d}  {s}", .{ e.path, e.line, e.name });
+    return out;
+}
+
+/// What an explanation document says besides the explanations.
+pub const Context = struct {
+    /// gnarl's own version.
+    version: []const u8,
+    /// Everything said on stderr, for the documents that carry it.
+    messages: []const Message = &.{},
+};
+
 /// Writes `explanations` in `format`.
-pub fn write(w: *Writer, format: report.Format, explanations: []const Explanation) Writer.Error!void {
+pub fn write(w: *Writer, format: report.Format, explanations: []const Explanation, context: Context) Writer.Error!void {
     switch (format) {
         .text => for (explanations, 0..) |e, i| {
             if (i > 0) try w.writeByte('\n');
@@ -239,12 +267,133 @@ pub fn write(w: *Writer, format: report.Format, explanations: []const Explanatio
             if (i > 0) try w.writeByte('\n');
             try writeMarkdown(w, e);
         },
-        .json => {
-            try std.json.Stringify.value(.{ .explanations = explanations }, .{ .whitespace = .indent_2 }, w);
-            try w.writeByte('\n');
-        },
+        .json => try writeJson(w, explanations, context),
+        .xml => try writeXml(w, explanations, context),
+        .csv => try writeDelimited(w, .csv, explanations),
+        .tsv => try writeDelimited(w, .tsv, explanations),
     }
 }
+
+/// One document, compact, an explanation to a line, as the report's.
+fn writeJson(w: *Writer, explanations: []const Explanation, c: Context) Writer.Error!void {
+    try w.print("{{\"schema\":{d},\"gnarl\":", .{report.schema});
+    try std.json.Stringify.value(c.version, .{}, w);
+    try messages.writeJson(w, c.messages);
+    try w.writeAll(",\"explanations\":[");
+    for (explanations, 0..) |e, i| {
+        try w.writeAll(if (i == 0) "\n" else ",\n");
+        try std.json.Stringify.value(e, .{}, w);
+    }
+    try w.writeAll(if (explanations.len > 0) "\n]}\n" else "]}\n");
+}
+
+/// The json document's fields as elements and attributes.
+fn writeXml(w: *Writer, explanations: []const Explanation, c: Context) Writer.Error!void {
+    try w.writeAll("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<gnarl");
+    try formats.attrInt(w, "schema", report.schema);
+    try formats.attr(w, "version", c.version);
+    try w.writeAll(">\n");
+    try messages.writeXml(w, c.messages);
+    try w.writeAll("  <explanations>\n");
+    for (explanations) |e| {
+        try w.writeAll("    <explanation");
+        try formats.attr(w, "path", e.path);
+        try formats.attrInt(w, "line", e.line);
+        try formats.attrInt(w, "column", e.column);
+        try formats.attr(w, "name", e.name);
+        try formats.attr(w, "kind", @tagName(e.kind));
+        try formats.attr(w, "class", @tagName(e.class));
+        try w.writeAll(">\n");
+        for (e.trips) |trip| {
+            try w.writeAll("      <trip");
+            try formats.attr(w, "metric", @tagName(trip.metric));
+            try formats.attr(w, "level", @tagName(trip.level));
+            try formats.attrInt(w, "limit", trip.limit);
+            try w.writeAll("/>\n");
+        }
+        try w.print("      <cyclomatic value=\"{d}\">\n", .{e.cyclomatic.value});
+        for (e.cyclomatic.branches) |b| {
+            try w.writeAll("        <branch");
+            try formats.attrInt(w, "line", b.line);
+            try formats.attrInt(w, "column", b.column);
+            try formats.attr(w, "construct", b.construct);
+            try formats.attrInt(w, "adds", b.adds);
+            try formats.attr(w, "why", b.why);
+            try w.writeAll("/>\n");
+        }
+        try w.print("      </cyclomatic>\n      <nesting value=\"{d}\">\n", .{e.nesting.value});
+        for (e.nesting.chain) |l| {
+            try w.writeAll("        <level");
+            try formats.attrInt(w, "line", l.line);
+            try formats.attrInt(w, "column", l.column);
+            try formats.attr(w, "construct", l.construct);
+            try formats.attrInt(w, "level", l.level);
+            try w.writeAll("/>\n");
+        }
+        try w.writeAll("      </nesting>\n      <lines");
+        inline for (.{ "value", "span", "blank", "comment", "closer", "nested" }) |field| try formats.attrInt(w, field, @field(e.lines, field));
+        try w.print("/>\n      <params value=\"{d}\" weighted=\"{d}\">\n", .{ e.params.value, e.params.weighted });
+        for (e.params.each) |p| {
+            try w.writeAll("        <param");
+            try formats.attr(w, "name", p.name);
+            try formats.attr(w, "type", p.type);
+            try formats.attrInt(w, "weight", p.weight);
+            try formats.attr(w, "why", p.why);
+            try w.writeAll("/>\n");
+        }
+        try w.writeAll("      </params>\n    </explanation>\n");
+    }
+    try w.writeAll("  </explanations>\n</gnarl>\n");
+}
+
+pub const delimited_columns = [_][]const u8{ "path", "line", "name", "metric", "item", "at", "value", "why" };
+
+/// A header row, then a row per item: for each metric its total, then
+/// what makes it, so a metric's rows other than `total` add up to it
+/// (`base` 1 for cyclomatic; the line kinds for lines, `span` aside).
+fn writeDelimited(w: *Writer, kind: formats.Delimited, explanations: []const Explanation) Writer.Error!void {
+    try formats.header(w, kind, &delimited_columns);
+    for (explanations) |e| {
+        const row: Item = .{ .w = w, .kind = kind, .e = e };
+        try row.put("cyclomatic", "total", "", e.cyclomatic.value, "");
+        try row.put("cyclomatic", "base", "", 1, "");
+        for (e.cyclomatic.branches) |b| try row.putAt("cyclomatic", b.construct, b.line, b.column, b.adds, b.why);
+        try row.put("nesting", "total", "", e.nesting.value, "");
+        for (e.nesting.chain) |l| try row.putAt("nesting", l.construct, l.line, l.column, l.level, "");
+        try row.put("lines", "total", "", e.lines.value, "");
+        inline for (.{ "span", "blank", "comment", "closer", "nested" }) |field| try row.put("lines", field, "", @field(e.lines, field), "");
+        try row.put("params", "total", "", e.params.value, "");
+        try row.put("params", "weighted", "", e.params.weighted, "");
+        for (e.params.each) |p| {
+            var buffer: [512]u8 = undefined;
+            const item = std.fmt.bufPrint(&buffer, "{s}: {s}", .{ p.name, p.type }) catch p.name;
+            try row.put("params", item, "", p.weight, p.why);
+        }
+    }
+}
+
+const Item = struct {
+    w: *Writer,
+    kind: formats.Delimited,
+    e: Explanation,
+
+    fn put(r: Item, metric: []const u8, item: []const u8, at: []const u8, value: u32, why: []const u8) Writer.Error!void {
+        try formats.field(r.w, r.kind, true, r.e.path);
+        try formats.fieldInt(r.w, r.kind, false, r.e.line);
+        try formats.field(r.w, r.kind, false, r.e.name);
+        try formats.field(r.w, r.kind, false, metric);
+        try formats.field(r.w, r.kind, false, item);
+        try formats.field(r.w, r.kind, false, at);
+        try formats.fieldInt(r.w, r.kind, false, value);
+        try formats.field(r.w, r.kind, false, why);
+        try r.w.writeByte('\n');
+    }
+
+    fn putAt(r: Item, metric: []const u8, item: []const u8, line: u32, column: u32, value: u32, why: []const u8) Writer.Error!void {
+        var buffer: [24]u8 = undefined;
+        try r.put(metric, item, std.fmt.bufPrint(&buffer, "{d}:{d}", .{ line, column }) catch unreachable, value, why);
+    }
+};
 
 /// `, over the warning limit (10)` for a metric over one, else nothing.
 fn writeOver(w: *Writer, e: Explanation, metric: Metric) Writer.Error!void {
@@ -417,7 +566,8 @@ fn explainSample(arena: Allocator, texts: []const []const u8) !struct { explanat
     defer tree.deinit(gpa);
     var search: Search = try .init(arena, texts);
     try search.file(arena, arena, "a.zig", &tree, .normal, thresholds.Classes.defaults.normal);
-    const r = try search.results(arena);
+    var said: Messages = .{ .arena = arena, .echo = false };
+    const r = try search.results(arena, &said);
     return .{ .explanations = r.explanations, .all_found = r.all_found };
 }
 
@@ -451,7 +601,7 @@ test "write: text" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var out: Writer.Allocating = .init(arena);
-    try write(&out.writer, .text, (try explainSample(arena, &.{"pick"})).explanations);
+    try write(&out.writer, .text, (try explainSample(arena, &.{"pick"})).explanations, .{ .version = "0.0.0" });
     try std.testing.expectEqualStrings(
         \\a.zig:2  S.pick  (normal code)
         \\
@@ -480,7 +630,7 @@ test "write: Markdown and JSON" {
     const arena = arena_state.allocator();
     const explanations = (try explainSample(arena, &.{"other"})).explanations;
     var md: Writer.Allocating = .init(arena);
-    try write(&md.writer, .md, explanations);
+    try write(&md.writer, .md, explanations, .{ .version = "0.0.0" });
     try std.testing.expectEqualStrings(
         \\### `other` at `a.zig:12` (normal code)
         \\
@@ -495,12 +645,74 @@ test "write: Markdown and JSON" {
     , md.written());
 
     var json: Writer.Allocating = .init(arena);
-    try write(&json.writer, .json, (try explainSample(arena, &.{"pick"})).explanations);
-    const Doc = struct { explanations: []const Explanation };
+    const said = [_]Message{.{ .level = .@"error", .path = "nope", .text = "no function by that name in the files read" }};
+    try write(&json.writer, .json, (try explainSample(arena, &.{"pick"})).explanations, .{ .version = "0.0.0", .messages = &said });
+    const JsonMessage = struct { path: []const u8, line: ?u32, column: ?u32, text: []const u8, more: []const []const u8 };
+    const Doc = struct { schema: u32, gnarl: []const u8, errors: []const JsonMessage, notes: []const JsonMessage, explanations: []const Explanation };
     const doc = try std.json.parseFromSliceLeaky(Doc, arena, json.written(), .{});
+    try std.testing.expectEqual(report.schema, doc.schema);
+    try std.testing.expectEqualStrings("nope", doc.errors[0].path);
+    try std.testing.expectEqual(0, doc.notes.len);
     try std.testing.expectEqualStrings("S.pick", doc.explanations[0].name);
     try std.testing.expectEqual(5, doc.explanations[0].cyclomatic.branches.len);
     try std.testing.expectEqualStrings("a leading self", doc.explanations[0].params.each[0].why);
+}
+
+test "write: xml, csv and tsv say what json does" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const explanations = (try explainSample(arena, &.{"pick"})).explanations;
+
+    var xml: Writer.Allocating = .init(arena);
+    try write(&xml.writer, .xml, explanations, .{ .version = "0.0.0" });
+    const doc = try formats.readXml(arena, xml.written());
+    const e = doc.child("explanations").?.children[0];
+    try std.testing.expectEqualStrings("S.pick", e.get("name").?);
+    try std.testing.expectEqualStrings("5", e.child("cyclomatic").?.get("value").?);
+    try std.testing.expectEqual(5, e.child("cyclomatic").?.children.len);
+    try std.testing.expectEqualStrings("3", e.child("nesting").?.children[2].get("level").?);
+    try std.testing.expectEqualStrings("9", e.child("lines").?.get("span").?);
+    try std.testing.expectEqualStrings("Allocator", e.child("params").?.children[1].get("type").?);
+
+    for ([_]report.Format{ .csv, .tsv }) |format| {
+        var out: Writer.Allocating = .init(arena);
+        try write(&out.writer, format, explanations, .{ .version = "0.0.0" });
+        const table = try formats.readDelimited(arena, if (format == .csv) .csv else .tsv, out.written());
+        for (delimited_columns, table[0]) |want, got| try std.testing.expectEqualStrings(want, got);
+        // The rows say what the totals are made of: cyclomatic's items add
+        // up to it, nesting's deepest level is it, and params counts the
+        // parameters that weigh anything.
+        const metrics = [_][]const u8{ "cyclomatic", "nesting", "lines", "params" };
+        var totals: [metrics.len]u32 = @splat(0);
+        var cyclomatic_sum: u32 = 0;
+        var deepest: u32 = 0;
+        var counted: u32 = 0;
+        for (table[1..]) |row| {
+            const m = for (metrics, 0..) |name, i| {
+                if (std.mem.eql(u8, row[3], name)) break i;
+            } else return error.UnknownMetric;
+            const value = try std.fmt.parseInt(u32, row[6], 10);
+            if (std.mem.eql(u8, row[4], "total")) {
+                totals[m] = value;
+                continue;
+            }
+            switch (m) {
+                0 => cyclomatic_sum += value,
+                1 => deepest = @max(deepest, value),
+                3 => if (!std.mem.eql(u8, row[4], "weighted")) {
+                    counted += @intFromBool(value > 0);
+                },
+                else => {},
+            }
+        }
+        try std.testing.expectEqual(totals[0], cyclomatic_sum);
+        try std.testing.expectEqual(totals[1], deepest);
+        try std.testing.expectEqual(totals[3], counted);
+        try std.testing.expectEqualStrings("cyclomatic", table[3][3]);
+        try std.testing.expectEqualStrings("if", table[3][4]);
+        try std.testing.expectEqualStrings("3:9", table[3][5]);
+    }
 }
 
 test "every golden fixture function: the explanation agrees with its golden row" {

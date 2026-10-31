@@ -10,6 +10,7 @@ const test_options = @import("test_options");
 const config = @import("config.zig");
 const explain = @import("explain.zig");
 const measure = @import("measure.zig");
+const messages = @import("messages.zig");
 const report = @import("report.zig");
 const select = @import("select.zig");
 const Classes = @import("thresholds.zig").Classes;
@@ -55,8 +56,10 @@ const usage =
     \\                    name or the end of it (record for Validator.record),
     \\                    looked for in the paths given, or the current
     \\                    directory if none. May be given more than once.
-    \\  --format <format> text (the default, a table), json, or md (a
-    \\                    Markdown table, for a review).
+    \\  --format <format> text (the default, a table); md (a Markdown table,
+    \\                    for a review); json or xml (every field and all
+    \\                    that stderr says, versioned); csv or tsv (a header,
+    \\                    then a row per function, or per explained item).
     \\  --json            The same as --format json.
     \\
     \\Exit status: 0 if every file was read (and, with --check, no function
@@ -103,7 +106,26 @@ pub fn main(init: std.process.Init) !u8 {
     };
 
     const cwd = Io.Dir.cwd();
-    const settings = try loadConfig(gpa, arena, io, cwd, run.config) orelse return 2;
+    // Everything said on stderr, kept for the documents that carry it.
+    var said: messages.Messages = .{ .arena = arena };
+    const settings = try loadConfig(gpa, arena, io, cwd, run.config, &said) orelse {
+        // A document that carries everything says so on stdout too.
+        const status: u8 = 2;
+        if (run.format == .json or run.format == .xml) {
+            if (run.explain.len > 0) {
+                explain.write(out, run.format, &.{}, .{ .version = build_options.version, .messages = said.items.items }) catch |err| return closedEarly(err, &stdout_writer, status);
+            } else {
+                report.write(out, run.format, &.{}, .{ .rows = &.{} }, .{
+                    .version = build_options.version,
+                    .files = 0,
+                    .classes = .defaults,
+                    .messages = said.items.items,
+                }) catch |err| return closedEarly(err, &stdout_writer, status);
+            }
+            out.flush() catch |err| return closedEarly(err, &stdout_writer, status);
+        }
+        return status;
+    };
     var search: ?explain.Search = if (run.explain.len > 0) try .init(arena, run.explain) else null;
     const picks = try arena.alloc(select.Selector, run.functions.len);
     for (run.functions, picks) |text, *p| p.* = try select.Selector.parse(arena, text);
@@ -120,23 +142,20 @@ pub fn main(init: std.process.Init) !u8 {
         .at => |at| try paths.append(arena, at.path),
         .name => {},
     };
-    var unreadable = false;
     var files: std.ArrayList([]const u8) = .empty;
     for (paths.items) |arg| {
         const before = files.items.len;
         walk.collect(arena, io, cwd, arg, run.excludes, &files) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             else => {
-                std.debug.print("gnarl: {s}: {t}\n", .{ arg, err });
-                unreadable = true;
+                try said.fail(arg, "{t}", .{err});
                 continue;
             },
         };
         // Listing nothing would read exactly like a directory with no
         // functions in it.
         if (files.items.len == before) {
-            std.debug.print("gnarl: {s}: no .zig file to read (hidden files and directories, zig-out, zig-pkg and excluded paths are skipped)\n", .{arg});
-            unreadable = true;
+            try said.fail(arg, "no .zig file to read (hidden files and directories, zig-out, zig-pkg and excluded paths are skipped)", .{});
         }
     }
     walk.sortUnique(&files);
@@ -152,8 +171,7 @@ pub fn main(init: std.process.Init) !u8 {
         const source = cwd.readFileAllocOptions(io, path, gpa, .limited(max_source_bytes), .of(u8), 0) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             else => {
-                std.debug.print("gnarl: {s}: {t}\n", .{ path, err });
-                unreadable = true;
+                try said.fail(path, "{t}", .{err});
                 continue;
             },
         };
@@ -161,8 +179,7 @@ pub fn main(init: std.process.Init) !u8 {
         var tree = try Ast.parse(gpa, source, .{});
         defer tree.deinit(gpa);
         if (tree.errors.len > 0) {
-            try printParseErrors(file_arena.allocator(), path, &tree);
-            unreadable = true;
+            try sayParseErrors(&said, path, &tree);
             continue;
         }
         measured += 1;
@@ -176,9 +193,9 @@ pub fn main(init: std.process.Init) !u8 {
         for (rows.items[first..]) |*row| row.class = class;
     }
     if (search) |s| {
-        const found = try s.results(arena);
-        const status: u8 = if (unreadable or !found.all_found) 2 else 0;
-        explain.write(out, run.format, found.explanations) catch |err| return closedEarly(err, &stdout_writer, status);
+        const found = try s.results(arena, &said);
+        const status: u8 = if (said.errors() > 0) 2 else 0;
+        explain.write(out, run.format, found.explanations, .{ .version = build_options.version, .messages = said.items.items }) catch |err| return closedEarly(err, &stdout_writer, status);
         out.flush() catch |err| return closedEarly(err, &stdout_writer, status);
         return status;
     }
@@ -189,21 +206,23 @@ pub fn main(init: std.process.Init) !u8 {
         for (picked.unmatched) |s| switch (picks[s]) {
             // A file that could not be read has been said already.
             .at => |at| if (contains(files.items, at.path)) {
-                std.debug.print("gnarl: {s}: no function at or around that line\n", .{run.functions[s]});
-                unreadable = true;
+                try said.add(.{ .level = .@"error", .path = at.path, .line = at.line, .text = "no function at or around that line" });
             },
-            .name => {
-                std.debug.print("gnarl: {s}: no function by that name in the files read\n", .{run.functions[s]});
-                unreadable = true;
-            },
+            .name => try said.fail(run.functions[s], "no function by that name in the files read", .{}),
         };
         listing.picked = picked.picked;
     }
     const listed = try report.list(arena, rows.items, listing);
     const critical = report.countCritical(rows.items);
     const failed = run.check and critical > 0;
-    const status: u8 = if (unreadable) 2 else if (failed) 1 else 0;
-    report.write(out, run.format, rows.items, listed, measured, settings.classes) catch |err| return closedEarly(err, &stdout_writer, status);
+    const status: u8 = if (said.errors() > 0) 2 else if (failed) 1 else 0;
+    report.write(out, run.format, rows.items, listed, .{
+        .version = build_options.version,
+        .files = measured,
+        .classes = settings.classes,
+        .check = .{ .asked = run.check, .failed = failed, .critical = critical },
+        .messages = said.items.items,
+    }) catch |err| return closedEarly(err, &stdout_writer, status);
     out.flush() catch |err| return closedEarly(err, &stdout_writer, status);
     // The rows run worst first, so the first is the one to look at.
     if (failed) std.debug.print("gnarl: --check: {d} function{s} over a critical threshold; gnarl --explain {s}:{d} says why the worst scores what it does\n", .{
@@ -218,15 +237,15 @@ fn contains(items: []const []const u8, item: []const u8) bool {
 }
 
 /// The configuration in the file `named`, or in complexity.zon if there is
-/// one, or the defaults. Null when the file cannot be used: why is said
-/// on stderr.
-fn loadConfig(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: Io, dir: Io.Dir, named: ?[]const u8) std.mem.Allocator.Error!?config.Config {
+/// one, or the defaults. Null when the file cannot be used: why is said in
+/// `said`.
+fn loadConfig(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: Io, dir: Io.Dir, named: ?[]const u8, said: *messages.Messages) std.mem.Allocator.Error!?config.Config {
     const path = named orelse config.default_path;
     const source = dir.readFileAllocOptions(io, path, arena, .limited(1 << 20), .of(u8), 0) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         else => {
             if (err == error.FileNotFound and named == null) return .{};
-            std.debug.print("gnarl: {s}: {t}\n", .{ path, err });
+            try said.fail(path, "{t}", .{err});
             return null;
         },
     };
@@ -235,11 +254,16 @@ fn loadConfig(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: Io, dir: Io.
     return config.parse(gpa, arena, source, &diagnostics, &problem) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         error.ParseZon => {
-            std.debug.print("gnarl: {f}", .{diagnostics.fmt(path)});
+            for (diagnostics.errors) |e| {
+                try said.add(.{ .level = .@"error", .path = path, .line = @intCast(e.loc.line + 1), .column = @intCast(e.loc.column + 1), .text = e.msg });
+                for (e.notes) |note| {
+                    try said.add(.{ .level = .note, .path = path, .line = @intCast(note.loc.line + 1), .column = @intCast(note.loc.column + 1), .text = note.msg });
+                }
+            }
             return null;
         },
         error.Invalid => {
-            std.debug.print("gnarl: {s}: {s}\n", .{ path, problem.message });
+            try said.fail(path, "{s}", .{problem.message});
             return null;
         },
     };
@@ -254,14 +278,19 @@ fn closedEarly(err: Io.Writer.Error, stdout_writer: *const Io.File.Writer, statu
     return cause;
 }
 
-/// Says on stderr where `tree` does not parse and why.
-fn printParseErrors(arena: std.mem.Allocator, path: []const u8, tree: *const Ast) std.mem.Allocator.Error!void {
-    var message: Io.Writer.Allocating = .init(arena);
+/// Says in `said` where `tree` does not parse and why.
+fn sayParseErrors(said: *messages.Messages, path: []const u8, tree: *const Ast) std.mem.Allocator.Error!void {
     for (tree.errors) |parse_error| {
-        message.clearRetainingCapacity();
+        var message: Io.Writer.Allocating = .init(said.arena);
         tree.renderError(parse_error, &message.writer) catch return error.OutOfMemory;
         const loc = tree.tokenLocation(0, parse_error.token);
-        std.debug.print("gnarl: {s}:{d}:{d}: {s}\n", .{ path, loc.line + 1, loc.column + tree.errorOffset(parse_error) + 1, message.written() });
+        try said.add(.{
+            .level = .@"error",
+            .path = path,
+            .line = @intCast(loc.line + 1),
+            .column = @intCast(loc.column + tree.errorOffset(parse_error) + 1),
+            .text = message.written(),
+        });
     }
 }
 
@@ -334,7 +363,7 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
             config_path = path;
         } else if (optionValue(args, &i, "--format")) |name| {
             format = std.meta.stringToEnum(report.Format, name) orelse
-                return .{ .usage_error = try arena.print("--format takes text, json or md, not '{s}'", .{name}) };
+                return .{ .usage_error = try arena.print("--format takes text, md, json, xml, csv or tsv, not '{s}'", .{name}) };
         } else if (arg.len > 1 and arg[0] == '-') {
             return .{ .usage_error = try arena.print("unknown option '{s}'", .{arg}) };
         } else try paths.append(arena, arg);
@@ -455,8 +484,7 @@ test "--json: the same rows, for a program to read" {
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
-    const Doc = struct { functions: []const report.Row, measured: usize, not_listed: report.NotListed, files: usize, thresholds: Classes };
-    const doc = try std.json.parseFromSlice(Doc, gpa, result.stdout, .{});
+    const doc = try std.json.parseFromSlice(Document, gpa, result.stdout, .{});
     defer doc.deinit();
     try std.testing.expectEqual(1, doc.value.functions.len);
     try std.testing.expectEqual(1, doc.value.measured);
@@ -579,7 +607,7 @@ test "--explain: by path:line or by name; a name that fits none or several is an
         try std.testing.expect(std.mem.startsWith(u8, result.stdout, "sub" ++ std.fs.path.sep_str ++ "b.zig:2  S.f  (normal code)\n"));
     }
     // The whole name wins over S.f, and says S.f was there.
-    try expectRun(tmp.dir, &.{ "--explain", "f" }, 0, one, "gnarl: f: explained the function of exactly that name; 1 more ends with it:\n  sub" ++ std.fs.path.sep_str ++ "b.zig:2  S.f\n");
+    try expectRun(tmp.dir, &.{ "--explain", "f" }, 0, one, "gnarl: f: note: explained the function of exactly that name; 1 more ends with it:\n  sub" ++ std.fs.path.sep_str ++ "b.zig:2  S.f\n");
     try expectRun(tmp.dir, &.{ "--explain", "nope" }, 2, "", "gnarl: nope: no function by that name in the files read\n");
     try expectRun(tmp.dir, &.{ "--explain", "a.zig:9" }, 2, "", "gnarl: a.zig:9: no function at or around that line\n");
     try tmp.dir.writeFile(io, .{ .sub_path = "c.zig", .data = "fn f() void {}\n" });
@@ -602,10 +630,80 @@ test "a configuration that cannot be used is an error, and nothing is measured" 
     try expectRun(tmp.dir, &.{ "--config", "nope.zon", "." }, 2, "", "gnarl: nope.zon: FileNotFound\n");
     try expectRun(tmp.dir, &.{ "--config=limits.zon", "." }, 2, "", "gnarl: limits.zon: thresholds.hot.lines: the warning limit, 9, is not below the critical one, 9\n");
     try expectRun(tmp.dir, &.{ "--config", "typo.zon", "." }, 2, "",
-        \\gnarl: typo.zon:1:5: error: unexpected field 'hott'
-        \\typo.zon:1:5: note: supported: 'hot', 'cold', 'thresholds'
+        \\gnarl: typo.zon:1:5: unexpected field 'hott'
+        \\gnarl: typo.zon:1:5: note: supported: 'hot', 'cold', 'thresholds'
         \\
     );
+
+    // The documents that carry everything carry this too.
+    const result = try runGnarl(tmp.dir, &.{ "--json", "--config", "typo.zon", "." });
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 2 }, result.term);
+    const doc = try std.json.parseFromSlice(Document, std.testing.allocator, result.stdout, .{});
+    defer doc.deinit();
+    try std.testing.expectEqual(0, doc.value.functions.len);
+    try std.testing.expectEqualStrings("unexpected field 'hott'", doc.value.errors[0].text);
+    try std.testing.expectEqual(5, doc.value.errors[0].column.?);
+    try std.testing.expectEqualStrings("supported: 'hot', 'cold', 'thresholds'", doc.value.notes[0].text);
+}
+
+/// The report's json document, read back whole: an unknown field is an
+/// error, so a field added without the tests knowing fails them.
+const Document = struct {
+    schema: u32,
+    gnarl: []const u8,
+    files: usize,
+    measured: usize,
+    not_listed: report.NotListed,
+    check: report.Check,
+    thresholds: Classes,
+    errors: []const Said,
+    notes: []const Said,
+    functions: []const report.Row,
+};
+const Said = struct { path: []const u8, line: ?u32, column: ?u32, text: []const u8, more: []const []const u8 };
+
+test "--json says what stderr says: a file that does not parse, a missing path" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "bad.zig", .data = "fn f( {}\n" });
+    const result = try runGnarl(tmp.dir, &.{ "--json", "--check", "bad.zig", "nope" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 2 }, result.term);
+    const doc = try std.json.parseFromSlice(Document, gpa, result.stdout, .{});
+    defer doc.deinit();
+    try std.testing.expectEqual(2, doc.value.errors.len);
+    try std.testing.expectEqualStrings("nope", doc.value.errors[0].path);
+    try std.testing.expectEqualStrings("FileNotFound", doc.value.errors[0].text);
+    try std.testing.expectEqualStrings("bad.zig", doc.value.errors[1].path);
+    try std.testing.expectEqual(7, doc.value.errors[1].column.?);
+    try std.testing.expectEqual(report.Check{ .asked = true }, doc.value.check);
+    try std.testing.expectEqual(report.schema, doc.value.schema);
+}
+
+test "--format csv and tsv: a header, then a row per function listed" {
+    const io = std.testing.io;
+    const formats = @import("formats.zig");
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = "fn f() void {}\ntest \"x, \\\"y\\\"\" {}\n" });
+    for ([_][]const u8{ "csv", "tsv" }) |format| {
+        const result = try runGnarl(tmp.dir, &.{ "--format", format, "--all", "a.zig" });
+        defer std.testing.allocator.free(result.stdout);
+        defer std.testing.allocator.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+        const table = try formats.readDelimited(arena, if (format[0] == 'c') .csv else .tsv, result.stdout);
+        try std.testing.expectEqual(3, table.len);
+        try std.testing.expectEqualStrings("path", table[0][0]);
+        try std.testing.expectEqualStrings("test \"x, \\\"y\\\"\"", table[2][4]);
+    }
 }
 
 test "a file that does not parse is reported and the rest still listed" {
@@ -722,8 +820,10 @@ test "parseArgs: --format and --json" {
     try std.testing.expectEqual(.md, (try parseArgs(arena, &.{ "--format", "md", "src" })).run.format);
     try std.testing.expectEqual(.json, (try parseArgs(arena, &.{ "src", "--format=json" })).run.format);
     try std.testing.expectEqual(.json, (try parseArgs(arena, &.{ "src", "--json" })).run.format);
-    try std.testing.expectEqualStrings("--format takes text, json or md, not 'xml'", (try parseArgs(arena, &.{ "--format", "xml", "src" })).usage_error);
-    try std.testing.expectEqualStrings("--format takes text, json or md, not ''", (try parseArgs(arena, &.{ "src", "--format" })).usage_error);
+    try std.testing.expectEqual(.xml, (try parseArgs(arena, &.{ "--format", "xml", "src" })).run.format);
+    try std.testing.expectEqual(.tsv, (try parseArgs(arena, &.{ "--format=tsv", "src" })).run.format);
+    try std.testing.expectEqualStrings("--format takes text, md, json, xml, csv or tsv, not 'yaml'", (try parseArgs(arena, &.{ "--format", "yaml", "src" })).usage_error);
+    try std.testing.expectEqualStrings("--format takes text, md, json, xml, csv or tsv, not ''", (try parseArgs(arena, &.{ "src", "--format" })).usage_error);
     try std.testing.expectEqualStrings("unknown option '--formats'", (try parseArgs(arena, &.{ "--formats", "src" })).usage_error);
 }
 
@@ -745,13 +845,16 @@ test "parseArgs: help, version and usage errors" {
 test {
     _ = @import("children.zig");
     _ = @import("config.zig");
+    _ = @import("docs.zig");
     _ = @import("explain.zig");
+    _ = @import("formats.zig");
     _ = @import("cyclomatic.zig");
     _ = @import("functions.zig");
     _ = @import("glob.zig");
     _ = @import("golden.zig");
     _ = @import("lines.zig");
     _ = @import("measure.zig");
+    _ = @import("messages.zig");
     _ = @import("nesting.zig");
     _ = @import("params.zig");
     _ = @import("report.zig");
