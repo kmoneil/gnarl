@@ -10,9 +10,6 @@ src/formats.zig	XmlReader.element	14	27	30	3	0	0
 src/formats.zig	readDelimited	23	29	35	4	2	2
 src/glob.zig	match	21	25	17	3	2	2
 src/lines.zig	explain	17	22	46	2	2	2
-src/main.zig	main	61	89	131	4	1	1
-src/main.zig	parseArgs	55	84	88	3	1	1
-src/main.zig	runDiff	18	31	55	3	7	7
 src/messages.zig	writeXml	11	39	25	6	2	2
 src/nesting.zig	Walk.visit	24	31	75	3	1	1
 src/params.zig	walk	14	32	26	4	3	3

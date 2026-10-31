@@ -16,6 +16,7 @@ const messages = @import("messages.zig");
 const report = @import("report.zig");
 const select = @import("select.zig");
 const skill = @import("skill.zig");
+const Class = @import("thresholds.zig").Class;
 const Classes = @import("thresholds.zig").Classes;
 const walk = @import("walk.zig");
 
@@ -109,176 +110,267 @@ const usage =
 const max_source_bytes = std.math.maxInt(u32);
 
 pub fn main(init: std.process.Init) !u8 {
-    const gpa = init.gpa;
     const arena = init.arena.allocator();
-    const io = init.io;
-
     // Streaming, so that when stdout is a file the shell has already
     // written to, the report lands after what is there rather than over it.
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer: Io.File.Writer = .initStreaming(.stdout(), io, &stdout_buffer);
-    const out = &stdout_writer.interface;
+    var stdout_writer: Io.File.Writer = .initStreaming(.stdout(), init.io, &stdout_buffer);
 
     const args = (try init.minimal.args.toSlice(arena))[1..];
     const run = switch (try parseArgs(arena, args)) {
         .run => |run| run,
-        .help => {
-            try out.writeAll(usage);
-            try out.flush();
-            return 0;
-        },
-        .version => {
-            try out.print("gnarl {s}\n", .{build_options.version});
-            try out.flush();
-            return 0;
-        },
-        .skill => |install_dir| {
-            if (install_dir) |dir| {
-                const path = skill.install(arena, io, dir) catch |err| {
-                    std.debug.print("gnarl: {s}: {t}\n", .{ dir, err });
-                    return 2;
-                };
-                try out.print("{s}\n", .{path});
-            } else try out.writeAll(skill.text);
-            out.flush() catch |err| return closedEarly(err, &stdout_writer, 0);
-            return 0;
-        },
+        else => |command| return answer(arena, init.io, &stdout_writer, command),
+    };
+    const cwd = Io.Dir.cwd();
+    // Everything said on stderr, kept for the documents that carry it.
+    var said: messages.Messages = .{ .arena = arena };
+    const settings = try loadConfig(init.gpa, arena, init.io, cwd, run.config, &said) orelse
+        return stopEarly(&stdout_writer, run, said.items.items);
+    const c: Context = .{
+        .gpa = init.gpa,
+        .arena = arena,
+        .io = init.io,
+        .cwd = cwd,
+        .run = run,
+        .settings = settings,
+        .said = &said,
+        .stdout_writer = &stdout_writer,
+    };
+    if (run.diff) |ref| return runDiff(c, ref);
+    if (run.explain.len > 0) return runExplain(c);
+    return runReport(c);
+}
+
+/// A command that is not a run: the usage, the version, the skill, or why
+/// the command line cannot be run.
+fn answer(arena: std.mem.Allocator, io: Io, stdout_writer: *Io.File.Writer, command: Command) !u8 {
+    const out = &stdout_writer.interface;
+    switch (command) {
+        .run => unreachable,
+        .help => try out.writeAll(usage),
+        .version => try out.print("gnarl {s}\n", .{build_options.version}),
+        .skill => |install_dir| if (install_dir) |dir| {
+            const path = skill.install(arena, io, dir) catch |err| {
+                std.debug.print("gnarl: {s}: {t}\n", .{ dir, err });
+                return 2;
+            };
+            try out.print("{s}\n", .{path});
+        } else try out.writeAll(skill.text),
         .usage_error => |message| {
             if (message.len > 0) std.debug.print("gnarl: {s}\n\n", .{message});
             std.debug.print("{s}", .{usage});
             return 2;
         },
-    };
+    }
+    out.flush() catch |err| return closedEarly(err, stdout_writer, 0);
+    return 0;
+}
 
-    const cwd = Io.Dir.cwd();
-    // Everything said on stderr, kept for the documents that carry it.
-    var said: messages.Messages = .{ .arena = arena };
-    const settings = try loadConfig(gpa, arena, io, cwd, run.config, &said) orelse
-        return stopEarly(out, &stdout_writer, run, said.items.items);
-    if (run.diff) |ref| return runDiff(gpa, arena, io, cwd, run, ref, settings, &said, out, &stdout_writer);
-    // A baseline is read only to check against it.
-    const held: ?Held = if (run.check) switch (try loadBaseline(arena, io, cwd, run.baseline, &said)) {
-        .none => null,
-        .held => |h| h,
-        .failed => return stopEarly(out, &stdout_writer, run, said.items.items),
-    } else null;
-    var search: ?explain.Search = if (run.explain.len > 0) try .init(arena, run.explain) else null;
-    const picks = try arena.alloc(select.Selector, run.functions.len);
-    for (run.functions, picks) |text, *p| p.* = try select.Selector.parse(arena, text);
-    // With no path, gnarl reads the current directory; but a function
-    // named by path:line needs no path besides, so --explain and
-    // --function naming only those read only their files.
+/// What every kind of run reads from and writes to.
+const Context = struct {
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    io: Io,
+    cwd: Io.Dir,
+    run: Run,
+    settings: config.Config,
+    /// Everything said on stderr, kept for the documents that carry it.
+    said: *messages.Messages,
+    stdout_writer: *Io.File.Writer,
+
+    fn out(c: Context) *Io.Writer {
+        return &c.stdout_writer.interface;
+    }
+
+    /// Flushes what was written, and returns `status`: a reader that
+    /// stopped early is no failure.
+    fn finish(c: Context, status: u8) !u8 {
+        c.out().flush() catch |err| return closedEarly(err, c.stdout_writer, status);
+        return status;
+    }
+
+    /// 2 when anything went wrong, else `otherwise`.
+    fn exitStatus(c: Context, otherwise: u8) u8 {
+        return if (c.said.errors() > 0) 2 else otherwise;
+    }
+
+    /// `source` parsed, or null when it does not parse: where and why is
+    /// said, under `label`.
+    fn parse(c: Context, label: []const u8, source: [:0]const u8) !?Ast {
+        var tree = try Ast.parse(c.gpa, source, .{});
+        if (tree.errors.len == 0) return tree;
+        try sayParseErrors(c.said, label, &tree);
+        tree.deinit(c.gpa);
+        return null;
+    }
+
+    /// The file at `path`, read into `scratch` and parsed; null when it
+    /// cannot be read or does not parse, which is said.
+    fn readTree(c: Context, scratch: std.mem.Allocator, path: []const u8) !?Ast {
+        const source = c.cwd.readFileAllocOptions(c.io, path, scratch, .limited(max_source_bytes), .of(u8), 0) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            else => {
+                try c.said.fail(path, "{t}", .{err});
+                return null;
+            },
+        };
+        return c.parse(path, source);
+    }
+};
+
+/// The files the paths name, or, with none, the current directory's; and
+/// the file of each function named by `path:line`, which needs no path
+/// besides. Sorted, each once; what cannot be read is said.
+fn collectFiles(c: Context, selectors: []const select.Selector) ![]const []const u8 {
     var paths: std.ArrayList([]const u8) = .empty;
-    try paths.appendSlice(arena, run.paths);
-    const selectors = if (search) |s| s.selectors else picks;
+    try paths.appendSlice(c.arena, c.run.paths);
     const by_name = for (selectors) |s| {
         if (s == .name) break true;
     } else false;
-    if (paths.items.len == 0 and (selectors.len == 0 or by_name)) try paths.append(arena, ".");
+    if (paths.items.len == 0 and (selectors.len == 0 or by_name)) try paths.append(c.arena, ".");
     for (selectors) |s| switch (s) {
-        .at => |at| try paths.append(arena, at.path),
+        .at => |at| try paths.append(c.arena, at.path),
         .name => {},
     };
     var files: std.ArrayList([]const u8) = .empty;
-    for (paths.items) |arg| {
-        const before = files.items.len;
-        walk.collect(arena, io, cwd, arg, .{ .paths = run.excludes, .globs = settings.exclude }, &files, .{ .git = !run.no_ignore }) catch |err| switch (err) {
-            error.OutOfMemory => |e| return e,
-            else => {
-                try said.fail(arg, "{t}", .{err});
-                continue;
-            },
-        };
-        // Listing nothing would read exactly like a directory with no
-        // functions in it.
-        if (files.items.len == before) {
-            try said.fail(arg, "no .zig file to read (hidden files and directories, zig-out, zig-pkg, excluded paths and what git ignores are skipped)", .{});
-        }
-    }
+    for (paths.items) |arg| try collectPath(c, arg, &files);
     walk.sortUnique(&files);
+    return files.items;
+}
 
-    // What one file needs is freed before the next is read; the rows are
-    // kept for the whole run.
-    var file_arena: std.heap.ArenaAllocator = .init(gpa);
+fn collectPath(c: Context, arg: []const u8, files: *std.ArrayList([]const u8)) !void {
+    const before = files.items.len;
+    walk.collect(c.arena, c.io, c.cwd, arg, .{ .paths = c.run.excludes, .globs = c.settings.exclude }, files, .{ .git = !c.run.no_ignore }) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        else => return c.said.fail(arg, "{t}", .{err}),
+    };
+    // Listing nothing would read exactly like a directory with no
+    // functions in it.
+    if (files.items.len == before) {
+        try c.said.fail(arg, "no .zig file to read (hidden files and directories, zig-out, zig-pkg, excluded paths and what git ignores are skipped)", .{});
+    }
+}
+
+/// Reads and parses each of `files` and hands each tree to `sink.file`,
+/// with the file's class and memory freed before the next file is read.
+/// Returns how many files were measured.
+fn readFiles(c: Context, files: []const []const u8, sink: anytype) !usize {
+    var file_arena: std.heap.ArenaAllocator = .init(c.gpa);
     defer file_arena.deinit();
-    var rows: std.ArrayList(report.Row) = .empty;
     var measured: usize = 0;
-    for (files.items) |path| {
+    for (files) |path| {
         _ = file_arena.reset(.retain_capacity);
-        const source = cwd.readFileAllocOptions(io, path, gpa, .limited(max_source_bytes), .of(u8), 0) catch |err| switch (err) {
-            error.OutOfMemory => |e| return e,
-            else => {
-                try said.fail(path, "{t}", .{err});
-                continue;
-            },
-        };
-        defer gpa.free(source);
-        var tree = try Ast.parse(gpa, source, .{});
-        defer tree.deinit(gpa);
-        if (tree.errors.len > 0) {
-            try sayParseErrors(&said, path, &tree);
-            continue;
-        }
+        var tree = try c.readTree(file_arena.allocator(), path) orelse continue;
+        defer tree.deinit(c.gpa);
         measured += 1;
-        const class = settings.classOf(path);
-        if (search) |*s| {
-            try s.file(arena, file_arena.allocator(), path, &tree, class, settings.classes);
-            continue;
-        }
-        const first = rows.items.len;
-        try measure.file(arena, file_arena.allocator(), path, &tree, &rows);
-        for (rows.items[first..]) |*row| row.class = .forFunction(class, row.kind == .@"test");
+        try sink.file(file_arena.allocator(), path, &tree, c.settings.classOf(path));
     }
-    if (search) |s| {
-        const found = try s.results(arena, &said);
-        const status: u8 = if (said.errors() > 0) 2 else 0;
-        explain.write(out, run.format, found.explanations, .{ .version = build_options.version, .messages = said.items.items }) catch |err| return closedEarly(err, &stdout_writer, status);
-        out.flush() catch |err| return closedEarly(err, &stdout_writer, status);
-        return status;
+    return measured;
+}
+
+/// What `readFiles` hands each tree to for --explain: the search for the
+/// functions named.
+const ExplainSink = struct {
+    search: *explain.Search,
+    arena: std.mem.Allocator,
+    classes: Classes,
+
+    pub fn file(s: ExplainSink, scratch: std.mem.Allocator, path: []const u8, tree: *const Ast, class: Class) !void {
+        try s.search.file(s.arena, scratch, path, tree, class, s.classes);
     }
-    try report.rank(arena, rows.items, settings.classes);
-    var listing: report.Listing = .{ .all = run.all, .top = run.top };
-    if (picks.len > 0) {
-        const picked = try select.pick(arena, rows.items, picks);
-        for (picked.unmatched) |s| switch (picks[s]) {
-            // A file that could not be read has been said already.
-            .at => |at| if (contains(files.items, at.path)) {
-                try said.add(.{ .level = .@"error", .path = at.path, .line = at.line, .text = "no function at or around that line" });
-            },
-            .name => try said.fail(run.functions[s], "no function by that name in the files read", .{}),
-        };
-        listing.picked = picked.picked;
+};
+
+/// What `readFiles` hands each tree to for the report: a row per
+/// function, each held to its class.
+const ReportSink = struct {
+    rows: *std.ArrayList(report.Row),
+    arena: std.mem.Allocator,
+
+    pub fn file(s: ReportSink, scratch: std.mem.Allocator, path: []const u8, tree: *const Ast, class: Class) !void {
+        const first = s.rows.items.len;
+        try measure.file(s.arena, scratch, path, tree, s.rows);
+        for (s.rows.items[first..]) |*row| row.class = .forFunction(class, row.kind == .@"test");
     }
-    const listed = try report.list(arena, rows.items, listing);
-    var check: report.Check = .{ .asked = run.check, .critical = report.countCritical(rows.items) };
-    if (run.check) {
-        const r = try baseline.ratchet(arena, rows.items, settings.classes, if (held) |h| h.base else null, files.items);
-        check.failed = r.failures.len > 0;
-        check.failures = r.failures;
-        check.improved = r.improved;
-        check.gone = r.gone;
-        if (held) |h| {
-            check.baseline = h.path;
-            if (r.improved > 0) try said.add(.{ .level = .note, .path = h.path, .text = try std.fmt.allocPrint(arena, "{d} baselined function{s} {s} under the baseline's numbers now; gnarl --update-baseline tightens it", .{
-                r.improved, plural(r.improved), if (r.improved == 1) "is" else "are",
-            }) });
-            if (r.gone > 0) try said.add(.{ .level = .note, .path = h.path, .text = try std.fmt.allocPrint(arena, "{d} baselined function{s} {s} gone (renamed, moved or deleted); gnarl --update-baseline drops {s}", .{
-                r.gone, plural(r.gone), if (r.gone == 1) "is" else "are", if (r.gone == 1) "it" else "them",
-            }) });
-        }
-    }
-    if (run.update_baseline) try updateBaseline(arena, io, cwd, run.baseline orelse baseline.default_path, rows.items, &said);
-    const status: u8 = if (said.errors() > 0) 2 else if (check.failed) 1 else 0;
-    report.write(out, run.format, rows.items, listed, .{
+};
+
+/// `--explain`: why each function named scores what it does.
+fn runExplain(c: Context) !u8 {
+    var search: explain.Search = try .init(c.arena, c.run.explain);
+    const files = try collectFiles(c, search.selectors);
+    _ = try readFiles(c, files, ExplainSink{ .search = &search, .arena = c.arena, .classes = c.settings.classes });
+    const found = try search.results(c.arena, c.said);
+    const status = c.exitStatus(0);
+    explain.write(c.out(), c.run.format, found.explanations, .{ .version = build_options.version, .messages = c.said.items.items }) catch |err| return closedEarly(err, c.stdout_writer, status);
+    return c.finish(status);
+}
+
+/// The report: a row per function, worst first, and with --check, whether
+/// any is over what it may be.
+fn runReport(c: Context) !u8 {
+    // A baseline is read only to check against it.
+    const held: ?Held = if (c.run.check) switch (try loadBaseline(c.arena, c.io, c.cwd, c.run.baseline, c.said)) {
+        .none => null,
+        .held => |h| h,
+        .failed => return stopEarly(c.stdout_writer, c.run, c.said.items.items),
+    } else null;
+    const picks = try c.arena.alloc(select.Selector, c.run.functions.len);
+    for (c.run.functions, picks) |text, *p| p.* = try select.Selector.parse(c.arena, text);
+    const files = try collectFiles(c, picks);
+    var rows: std.ArrayList(report.Row) = .empty;
+    const measured = try readFiles(c, files, ReportSink{ .rows = &rows, .arena = c.arena });
+    try report.rank(c.arena, rows.items, c.settings.classes);
+    const listed = try report.list(c.arena, rows.items, try listing(c, rows.items, picks, files));
+    const check = try runCheck(c, rows.items, held, files);
+    if (c.run.update_baseline) try updateBaseline(c.arena, c.io, c.cwd, c.run.baseline orelse baseline.default_path, rows.items, c.said);
+    const status = c.exitStatus(if (check.failed) 1 else 0);
+    report.write(c.out(), c.run.format, rows.items, listed, .{
         .version = build_options.version,
         .files = measured,
-        .classes = settings.classes,
+        .classes = c.settings.classes,
         .check = check,
-        .messages = said.items.items,
-    }) catch |err| return closedEarly(err, &stdout_writer, status);
-    out.flush() catch |err| return closedEarly(err, &stdout_writer, status);
+        .messages = c.said.items.items,
+    }) catch |err| return closedEarly(err, c.stdout_writer, status);
+    c.out().flush() catch |err| return closedEarly(err, c.stdout_writer, status);
     if (check.failed) sayFailures(check);
     return status;
+}
+
+/// Which of the ranked `rows` the report lists: --all, --top, and the
+/// functions --function picks, saying which pick none.
+fn listing(c: Context, rows: []const report.Row, picks: []const select.Selector, files: []const []const u8) !report.Listing {
+    var l: report.Listing = .{ .all = c.run.all, .top = c.run.top };
+    if (picks.len == 0) return l;
+    const picked = try select.pick(c.arena, rows, picks);
+    for (picked.unmatched) |s| switch (picks[s]) {
+        // A file that could not be read has been said already.
+        .at => |at| if (contains(files, at.path)) {
+            try c.said.add(.{ .level = .@"error", .path = at.path, .line = at.line, .text = at.missing() });
+        },
+        .name => try c.said.fail(c.run.functions[s], "no function by that name in the files read", .{}),
+    };
+    l.picked = picked.picked;
+    return l;
+}
+
+/// What --check finds, held to the baseline if there is one; with no
+/// --check, only how many functions are over a critical threshold.
+fn runCheck(c: Context, rows: []const report.Row, held: ?Held, files: []const []const u8) !report.Check {
+    var check: report.Check = .{ .asked = c.run.check, .critical = report.countCritical(rows) };
+    if (!c.run.check) return check;
+    const r = try baseline.ratchet(c.arena, rows, c.settings.classes, if (held) |h| h.base else null, files);
+    check.failed = r.failures.len > 0;
+    check.failures = r.failures;
+    check.improved = r.improved;
+    check.gone = r.gone;
+    const h = held orelse return check;
+    check.baseline = h.path;
+    if (r.improved > 0) try c.said.add(.{ .level = .note, .path = h.path, .text = try std.fmt.allocPrint(c.arena, "{d} baselined function{s} {s} under the baseline's numbers now; gnarl --update-baseline tightens it", .{
+        r.improved, plural(r.improved), if (r.improved == 1) "is" else "are",
+    }) });
+    if (r.gone > 0) try c.said.add(.{ .level = .note, .path = h.path, .text = try std.fmt.allocPrint(c.arena, "{d} baselined function{s} {s} gone (renamed, moved or deleted); gnarl --update-baseline drops {s}", .{
+        r.gone, plural(r.gone), if (r.gone == 1) "is" else "are", if (r.gone == 1) "it" else "them",
+    }) });
+    return check;
 }
 
 fn plural(n: usize) []const u8 {
@@ -286,88 +378,61 @@ fn plural(n: usize) []const u8 {
 }
 
 /// `--diff ref`: each function the change touched, before and after.
-fn runDiff(
-    gpa: std.mem.Allocator,
-    arena: std.mem.Allocator,
-    io: Io,
-    cwd: Io.Dir,
-    run: Run,
-    ref: []const u8,
-    settings: config.Config,
-    said: *messages.Messages,
-    out: *Io.Writer,
-    stdout_writer: *const Io.File.Writer,
-) !u8 {
-    const paths: []const []const u8 = if (run.paths.len > 0) run.paths else &.{"."};
-    const changed = try diff.changedFiles(arena, io, ref, paths, .{ .paths = run.excludes, .globs = settings.exclude }, said) orelse &.{};
-    var file_arena: std.heap.ArenaAllocator = .init(gpa);
+fn runDiff(c: Context, ref: []const u8) !u8 {
+    const paths: []const []const u8 = if (c.run.paths.len > 0) c.run.paths else &.{"."};
+    const changed = try diff.changedFiles(c.arena, c.io, ref, paths, .{ .paths = c.run.excludes, .globs = c.settings.exclude }, c.said) orelse &.{};
+    var file_arena: std.heap.ArenaAllocator = .init(c.gpa);
     defer file_arena.deinit();
     var touched: std.ArrayList(diff.Touched) = .empty;
     for (changed) |file| {
         _ = file_arena.reset(.retain_capacity);
-        const scratch = file_arena.allocator();
-        var before: ?Ast = null;
-        defer if (before) |*t| t.deinit(gpa);
-        if (file.status != .added) {
-            const source = try diff.oldSource(scratch, io, ref, file) orelse {
-                try said.fail(file.path, "git could not show it as it was at {s}", .{ref});
-                continue;
-            };
-            before = try Ast.parse(gpa, source, .{});
-            if (before.?.errors.len > 0) {
-                try sayParseErrors(said, try std.fmt.allocPrint(arena, "{s}:{s}", .{ ref, file.path }), &before.?);
-                continue;
-            }
-        }
-        var after: ?Ast = null;
-        defer if (after) |*t| t.deinit(gpa);
-        if (file.status != .removed) {
-            const source = cwd.readFileAllocOptions(io, file.path, scratch, .limited(max_source_bytes), .of(u8), 0) catch |err| switch (err) {
-                error.OutOfMemory => |e| return e,
-                else => {
-                    try said.fail(file.path, "{t}", .{err});
-                    continue;
-                },
-            };
-            after = try Ast.parse(gpa, source, .{});
-            if (after.?.errors.len > 0) {
-                try sayParseErrors(said, file.path, &after.?);
-                continue;
-            }
-        }
-        const class = settings.classOf(file.path);
-        try diff.compareFile(arena, scratch, file.path, if (before) |*t| t else null, if (after) |*t| t else null, class, settings.classes, &touched);
+        try diffFile(c, file_arena.allocator(), ref, file, &touched);
     }
     diff.sort(touched.items);
-    const status: u8 = if (said.errors() > 0) 2 else 0;
-    diff.write(out, run.format, touched.items, .{
+    const status = c.exitStatus(0);
+    diff.write(c.out(), c.run.format, touched.items, .{
         .version = build_options.version,
         .ref = ref,
         .files = changed.len,
-        .classes = settings.classes,
-        .messages = said.items.items,
-    }) catch |err| return closedEarly(err, stdout_writer, status);
-    out.flush() catch |err| return closedEarly(err, stdout_writer, status);
-    return status;
+        .classes = c.settings.classes,
+        .messages = c.said.items.items,
+    }) catch |err| return closedEarly(err, c.stdout_writer, status);
+    return c.finish(status);
+}
+
+/// The functions `file` had at `ref` and has now, compared, appended to
+/// `touched`; nothing when a side cannot be read or parsed, which is said.
+fn diffFile(c: Context, scratch: std.mem.Allocator, ref: []const u8, file: diff.File, touched: *std.ArrayList(diff.Touched)) !void {
+    var before: ?Ast = null;
+    defer if (before) |*t| t.deinit(c.gpa);
+    if (file.status != .added) {
+        const source = try diff.oldSource(scratch, c.io, ref, file) orelse
+            return c.said.fail(file.path, "git could not show it as it was at {s}", .{ref});
+        before = try c.parse(try std.fmt.allocPrint(c.arena, "{s}:{s}", .{ ref, file.path }), source) orelse return;
+    }
+    var after: ?Ast = null;
+    defer if (after) |*t| t.deinit(c.gpa);
+    if (file.status != .removed) after = try c.readTree(scratch, file.path) orelse return;
+    try diff.compareFile(c.arena, scratch, file.path, if (before) |*t| t else null, if (after) |*t| t else null, c.settings.classOf(file.path), c.settings.classes, touched);
 }
 
 /// When a configuration or baseline cannot be used, a document that
 /// carries everything still says so on stdout, with nothing measured.
-fn stopEarly(out: *Io.Writer, stdout_writer: *const Io.File.Writer, run: Run, said: []const messages.Message) !u8 {
+fn stopEarly(stdout_writer: *Io.File.Writer, run: Run, said: []const messages.Message) !u8 {
     const status: u8 = 2;
-    if (run.format == .json or run.format == .xml) {
-        if (run.explain.len > 0) {
-            explain.write(out, run.format, &.{}, .{ .version = build_options.version, .messages = said }) catch |err| return closedEarly(err, stdout_writer, status);
-        } else {
-            report.write(out, run.format, &.{}, .{ .rows = &.{} }, .{
-                .version = build_options.version,
-                .files = 0,
-                .classes = .defaults,
-                .messages = said,
-            }) catch |err| return closedEarly(err, stdout_writer, status);
-        }
-        out.flush() catch |err| return closedEarly(err, stdout_writer, status);
+    if (run.format != .json and run.format != .xml) return status;
+    const out = &stdout_writer.interface;
+    if (run.explain.len > 0) {
+        explain.write(out, run.format, &.{}, .{ .version = build_options.version, .messages = said }) catch |err| return closedEarly(err, stdout_writer, status);
+    } else {
+        report.write(out, run.format, &.{}, .{ .rows = &.{} }, .{
+            .version = build_options.version,
+            .files = 0,
+            .classes = .defaults,
+            .messages = said,
+        }) catch |err| return closedEarly(err, stdout_writer, status);
     }
+    out.flush() catch |err| return closedEarly(err, stdout_writer, status);
     return status;
 }
 
@@ -506,130 +571,161 @@ const Command = union(enum) {
 };
 
 const Run = struct {
-    paths: []const []const u8,
+    paths: []const []const u8 = &.{},
     /// Cleaned, as `walk.collect` cleans the paths it lists.
-    excludes: []const []const u8,
-    format: report.Format,
+    excludes: []const []const u8 = &.{},
+    format: report.Format = .text,
     /// The configuration file named, if one is.
-    config: ?[]const u8,
-    check: bool,
+    config: ?[]const u8 = null,
+    check: bool = false,
     /// The functions to explain, as given; none for a report.
-    explain: []const []const u8,
-    all: bool,
-    top: ?usize,
+    explain: []const []const u8 = &.{},
+    all: bool = false,
+    top: ?usize = null,
     /// Read what git ignores too.
-    no_ignore: bool,
+    no_ignore: bool = false,
     /// The functions the report is to list, as given; none for all.
-    functions: []const []const u8,
+    functions: []const []const u8 = &.{},
     /// The baseline file named, if one is.
-    baseline: ?[]const u8,
-    update_baseline: bool,
+    baseline: ?[]const u8 = null,
+    update_baseline: bool = false,
     /// The commit to diff the work tree against, if one is given.
-    diff: ?[]const u8,
+    diff: ?[]const u8 = null,
+
+    /// Whether an option only the report takes is given.
+    fn reportOnly(r: Run) bool {
+        return r.check or r.all or r.top != null or r.functions.len > 0;
+    }
+
+    fn baselineFlags(r: Run) bool {
+        return r.baseline != null or r.update_baseline;
+    }
+
+    /// Why the options given cannot go together, if they cannot.
+    fn conflict(r: Run) ?[]const u8 {
+        if (r.explain.len > 0 and (r.reportOnly() or r.baselineFlags())) {
+            return "--check, --all, --top, --function, --baseline and --update-baseline are for the report, not --explain";
+        }
+        if (r.check and r.update_baseline) return "--update-baseline writes the baseline and --check holds to it: one at a time";
+        if (r.diff != null and (r.reportOnly() or r.baselineFlags() or r.explain.len > 0)) {
+            return "--diff takes paths, --exclude, --config and --format; not --check, --explain, the baseline flags, --all, --top or --function";
+        }
+        if (r.baseline != null and !r.check and !r.update_baseline) return "--baseline is for --check or --update-baseline";
+        return null;
+    }
 };
+
+/// The options that stand alone.
+const Flag = enum { @"--json", @"--check", @"--all", @"--no-ignore", @"--update-baseline" };
+
+/// The options that take a value, as `--top 5` or `--top=5`.
+const Option = enum { @"--exclude", @"--top", @"--function", @"--explain", @"--diff", @"--baseline", @"--config", @"--format" };
+
+/// A run as the command line builds it, its lists still growing.
+const Parsing = struct {
+    run: Run = .{},
+    paths: std.ArrayList([]const u8) = .empty,
+    excludes: std.ArrayList([]const u8) = .empty,
+    explain: std.ArrayList([]const u8) = .empty,
+    functions: std.ArrayList([]const u8) = .empty,
+
+    fn flag(p: *Parsing, f: Flag) void {
+        switch (f) {
+            .@"--json" => p.run.format = .json,
+            .@"--check" => p.run.check = true,
+            .@"--all" => p.run.all = true,
+            .@"--no-ignore" => p.run.no_ignore = true,
+            .@"--update-baseline" => p.run.update_baseline = true,
+        }
+    }
+
+    /// Takes `option`'s `value`; returns why it will not do, if it will
+    /// not.
+    fn option(p: *Parsing, arena: std.mem.Allocator, o: Option, value: []const u8) std.mem.Allocator.Error!?[]const u8 {
+        if (value.len == 0) if (needs(o)) |message| return message;
+        switch (o) {
+            .@"--exclude" => try p.excludes.append(arena, try std.fs.path.resolveAlloc(arena, &.{value})),
+            .@"--top" => {
+                p.run.top = std.fmt.parseInt(usize, value, 10) catch 0;
+                if (p.run.top == 0) return try arena.print("--top takes how many functions to list, 1 or more, not '{s}'", .{value});
+            },
+            .@"--function" => try p.functions.append(arena, value),
+            .@"--explain" => try p.explain.append(arena, value),
+            .@"--diff" => p.run.diff = value,
+            .@"--baseline" => p.run.baseline = value,
+            .@"--config" => p.run.config = value,
+            .@"--format" => p.run.format = std.meta.stringToEnum(report.Format, value) orelse
+                return try arena.print("--format takes text, md, json, xml, csv or tsv, not '{s}'", .{value}),
+        }
+        return null;
+    }
+
+    fn done(p: Parsing) Run {
+        var run = p.run;
+        run.paths = p.paths.items;
+        run.excludes = p.excludes.items;
+        run.explain = p.explain.items;
+        run.functions = p.functions.items;
+        return run;
+    }
+};
+
+/// What to say when `o` is given no value; null for the options whose
+/// own message says what they take.
+fn needs(o: Option) ?[]const u8 {
+    return switch (o) {
+        .@"--exclude" => "--exclude needs a path",
+        .@"--function" => "--function needs a function: path:line, or a name",
+        .@"--explain" => "--explain needs a function: path:line, or a name",
+        .@"--diff" => "--diff needs a commit: HEAD, main, a hash",
+        .@"--baseline" => "--baseline needs a file",
+        .@"--config" => "--config needs a file",
+        .@"--top", .@"--format" => null,
+    };
+}
 
 /// `-h` and `--help`, `--version`, and an unknown option take effect where
 /// they stand; anything after them is not read.
 fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocator.Error!Command {
     // A path named skill is ./skill.
-    if (args.len > 0 and std.mem.eql(u8, args[0], "skill")) {
-        if (args.len == 1) return .{ .skill = null };
-        var i: usize = 1;
-        if (optionValue(args, &i, "--install")) |dir| {
-            if (dir.len == 0) return .{ .usage_error = "--install needs a directory" };
-            if (i + 1 == args.len) return .{ .skill = dir };
-        }
-        return .{ .usage_error = "gnarl skill takes --install <dir>, or nothing" };
-    }
-    var paths: std.ArrayList([]const u8) = .empty;
-    var excludes: std.ArrayList([]const u8) = .empty;
-    var format: report.Format = .text;
-    var config_path: ?[]const u8 = null;
-    var check = false;
-    var to_explain: std.ArrayList([]const u8) = .empty;
-    var all = false;
-    var top: ?usize = null;
-    var no_ignore = false;
-    var baseline_path: ?[]const u8 = null;
-    var update_baseline = false;
-    var diff_ref: ?[]const u8 = null;
-    var to_list: std.ArrayList([]const u8) = .empty;
+    if (args.len > 0 and std.mem.eql(u8, args[0], "skill")) return parseSkill(args[1..]);
+    var p: Parsing = .{};
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) return .help;
         if (std.mem.eql(u8, arg, "--version")) return .version;
-        if (std.mem.eql(u8, arg, "--json")) {
-            format = .json;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--check")) {
-            check = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--all")) {
-            all = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--no-ignore")) {
-            no_ignore = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--update-baseline")) {
-            update_baseline = true;
-            continue;
-        }
-        if (optionValue(args, &i, "--exclude")) |path| {
-            if (path.len == 0) return .{ .usage_error = "--exclude needs a path" };
-            try excludes.append(arena, try std.fs.path.resolveAlloc(arena, &.{path}));
-        } else if (optionValue(args, &i, "--top")) |n| {
-            top = std.fmt.parseInt(usize, n, 10) catch 0;
-            if (top == 0) return .{ .usage_error = try arena.print("--top takes how many functions to list, 1 or more, not '{s}'", .{n}) };
-        } else if (optionValue(args, &i, "--function")) |function| {
-            if (function.len == 0) return .{ .usage_error = "--function needs a function: path:line, or a name" };
-            try to_list.append(arena, function);
-        } else if (optionValue(args, &i, "--explain")) |function| {
-            if (function.len == 0) return .{ .usage_error = "--explain needs a function: path:line, or a name" };
-            try to_explain.append(arena, function);
-        } else if (optionValue(args, &i, "--diff")) |ref| {
-            if (ref.len == 0) return .{ .usage_error = "--diff needs a commit: HEAD, main, a hash" };
-            diff_ref = ref;
-        } else if (optionValue(args, &i, "--baseline")) |path| {
-            if (path.len == 0) return .{ .usage_error = "--baseline needs a file" };
-            baseline_path = path;
-        } else if (optionValue(args, &i, "--config")) |path| {
-            if (path.len == 0) return .{ .usage_error = "--config needs a file" };
-            config_path = path;
-        } else if (optionValue(args, &i, "--format")) |name| {
-            format = std.meta.stringToEnum(report.Format, name) orelse
-                return .{ .usage_error = try arena.print("--format takes text, md, json, xml, csv or tsv, not '{s}'", .{name}) };
+        if (std.meta.stringToEnum(Flag, arg)) |f| {
+            p.flag(f);
+        } else if (optionAt(args, &i)) |given| {
+            if (try p.option(arena, given[0], given[1])) |message| return .{ .usage_error = message };
         } else if (arg.len > 1 and arg[0] == '-') {
             return .{ .usage_error = try arena.print("unknown option '{s}'", .{arg}) };
-        } else try paths.append(arena, arg);
+        } else try p.paths.append(arena, arg);
     }
-    if (to_explain.items.len > 0 and (check or all or top != null or to_list.items.len > 0 or baseline_path != null or update_baseline)) {
-        return .{ .usage_error = "--check, --all, --top, --function, --baseline and --update-baseline are for the report, not --explain" };
+    const run = p.done();
+    if (run.conflict()) |message| return .{ .usage_error = message };
+    return .{ .run = run };
+}
+
+/// `gnarl skill`, given what follows `skill`.
+fn parseSkill(args: []const []const u8) Command {
+    if (args.len == 0) return .{ .skill = null };
+    var i: usize = 0;
+    if (optionValue(args, &i, "--install")) |dir| {
+        if (dir.len == 0) return .{ .usage_error = "--install needs a directory" };
+        if (i + 1 == args.len) return .{ .skill = dir };
     }
-    if (check and update_baseline) return .{ .usage_error = "--update-baseline writes the baseline and --check holds to it: one at a time" };
-    if (diff_ref != null and (check or update_baseline or baseline_path != null or all or top != null or to_list.items.len > 0 or to_explain.items.len > 0)) {
-        return .{ .usage_error = "--diff takes paths, --exclude, --config and --format; not --check, --explain, the baseline flags, --all, --top or --function" };
+    return .{ .usage_error = "gnarl skill takes --install <dir>, or nothing" };
+}
+
+/// The option `args[i.*]` is, and its value, moving `i` past a value given
+/// on its own.
+fn optionAt(args: []const []const u8, i: *usize) ?struct { Option, []const u8 } {
+    inline for (comptime std.enums.values(Option)) |o| {
+        if (optionValue(args, i, @tagName(o))) |value| return .{ o, value };
     }
-    if (baseline_path != null and !check and !update_baseline) return .{ .usage_error = "--baseline is for --check or --update-baseline" };
-    return .{ .run = .{
-        .paths = paths.items,
-        .excludes = excludes.items,
-        .format = format,
-        .config = config_path,
-        .check = check,
-        .explain = to_explain.items,
-        .all = all,
-        .top = top,
-        .no_ignore = no_ignore,
-        .baseline = baseline_path,
-        .update_baseline = update_baseline,
-        .diff = diff_ref,
-        .functions = to_list.items,
-    } };
+    return null;
 }
 
 /// The value of option `name` if `args[i.*]` is it, given as `name value`
