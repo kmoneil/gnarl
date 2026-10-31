@@ -215,11 +215,32 @@ A `--diff` document has `ref`, `changes` (how many `worse`, `mixed`,
 request comment, `gnarl --diff origin/main --format md`.
 
 An `--explain` document has
-`explanations` instead, each with `cyclomatic.branches`,
+`explanations` instead, each with `line` and `end_line` (the lines it
+spans), `cyclomatic.branches`,
 `cognitive.costs` (each with its `depth`), `nesting.chain`, the `lines`
 breakdown and `params.each`. csv and tsv
 carry the rows alone, errors on stderr only; their `over` column lists
 each limit passed as `metric:level:limit`, separated by spaces.
+
+To replace a function whole with `hunk quote`, take its lines from the
+report's tsv, naming the function by `path:line`. That picks exactly one,
+the innermost function around the line; a name picks every function that
+ends with it, and the first row would be a guess.
+
+```sh
+gnarl --function src/cli.zig:384 --format tsv \
+  | awk -F'\t' 'NR == 2 { print $1, $2, $3 }' \
+  | { read -r file first last && hunk quote "$file" "$first" "$last" --new new.zig; } \
+  | hunk --dry-run
+```
+
+`new.zig` holds the function as it is to stand, indented as the old one
+is: hunk puts it in as written. `line` is the `fn` line, so a doc comment
+above stays out of the quote, which is right for replacing a function
+and wrong for deleting or moving one: its comment is left behind. Not
+`path` for the variable: in zsh it is `PATH`. `--explain` gives the same
+`line` and `end_line` in its json, and refuses a name more than one
+function answers to.
 
 The summary counts every function measured, whatever is listed: with
 `--function` or `--top` the table has fewer rows than the summary

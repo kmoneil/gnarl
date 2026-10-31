@@ -1495,7 +1495,9 @@ test "the skill names every flag gnarl takes, and no other" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const in_usage = try flags(arena, usage);
-    const in_skill = try flags(arena, skill.text);
+    // A line that runs hunk, in the recipe that hands it a function's
+    // lines, takes hunk's flags.
+    const in_skill = try flags(arena, try linesWithout(arena, skill.text, "hunk "));
     var ok = true;
     for (in_usage.keys()) |flag| if (!in_skill.contains(flag)) {
         std.debug.print("{s} is in --help but not in the skill\n", .{flag});
@@ -1510,6 +1512,17 @@ test "the skill names every flag gnarl takes, and no other" {
 }
 
 /// Every `--flag` in `text`.
+/// `text` without the lines that hold `needle`.
+fn linesWithout(arena: std.mem.Allocator, text: []const u8, needle: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| if (std.mem.find(u8, line, needle) == null) {
+        try out.appendSlice(arena, line);
+        try out.append(arena, '\n');
+    };
+    return out.items;
+}
+
 fn flags(arena: std.mem.Allocator, text: []const u8) !std.StringArrayHashMapUnmanaged(void) {
     var out: std.StringArrayHashMapUnmanaged(void) = .empty;
     var i: usize = 0;

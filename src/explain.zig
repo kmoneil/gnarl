@@ -40,6 +40,9 @@ pub const Level = struct { line: u32, column: u32, construct: []const u8, level:
 pub const Explanation = struct {
     path: []const u8,
     line: u32,
+    /// The line of its closing brace: from `line` to here is the function
+    /// whole, its doc comment aside, as an edit that replaces it wants.
+    end_line: u32,
     column: u32,
     name: []const u8,
     kind: functions.Kind,
@@ -209,6 +212,7 @@ fn build(
     var e: Explanation = .{
         .path = path,
         .line = function.line,
+        .end_line = index.ofToken(tree, tree.lastToken(function.node)).line,
         .column = function.column,
         .name = try arena.dupe(u8, function.name),
         .kind = function.kind,
@@ -548,6 +552,7 @@ fn writeXml(w: *Writer, explanations: []const Explanation, c: Context) Writer.Er
         try w.writeAll("    <explanation");
         try formats.attr(w, "path", e.path);
         try formats.attrInt(w, "line", e.line);
+        try formats.attrInt(w, "end_line", e.end_line);
         try formats.attrInt(w, "column", e.column);
         try formats.attr(w, "name", e.name);
         try formats.attr(w, "kind", @tagName(e.kind));
@@ -1222,6 +1227,12 @@ test "Search: by the line the report prints, by any line inside, by a name or it
     try std.testing.expect(r.all_found);
     for (r.explanations[0..4]) |e| try std.testing.expectEqualStrings("S.pick", e.name);
     try std.testing.expectEqualStrings("other", r.explanations[4].name);
+    // Its lines, signature to closing brace, the same span lines counts.
+    const pick = r.explanations[0];
+    try std.testing.expectEqual(2, pick.line);
+    try std.testing.expectEqual(10, pick.end_line);
+    try std.testing.expectEqual(pick.lines.span, pick.end_line - pick.line + 1);
+    try std.testing.expectEqual(12, r.explanations[4].end_line);
 }
 
 test "the reasons add up to the numbers" {
