@@ -205,6 +205,12 @@ const Scan = struct {
     }
 };
 
+/// Whether a parameter typed `type_text` is context the parameter count
+/// leaves out: an Allocator or an Io.
+pub fn isContext(type_text: []const u8) bool {
+    return std.mem.endsWith(u8, type_text, "Allocator") or std.mem.eql(u8, type_text, "Io") or std.mem.endsWith(u8, type_text, ".Io");
+}
+
 /// Whether a `|` after a token so tagged opens a capture.
 fn opensCapture(before: std.zig.Token.Tag) bool {
     return switch (before) {

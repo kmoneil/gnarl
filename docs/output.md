@@ -150,6 +150,11 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
     - `unknown`: what the source cannot show, each said in a sentence:
       the members of an inferred error set, how many times a generic
       function is instantiated, what an anytype must provide.
+  - `suggestions`: for a function over a limit, at most three ranges
+    worth lifting into functions of their own, none overlapping another,
+    best first (the one that leaves the larger of the two functions least
+    complex, a range a jump leaves after every other), each with the
+    fields of `range`; empty for a function within its limits.
   - `regions`: where the numbers come from: the signature, then each
     statement of the body, each construct, logical line and level in the
     region that holds it, so the regions add up to the totals

@@ -31,6 +31,9 @@ as often as it helps.
    and names each return, break or continue that leaves them, and what
    the new function would take (the names the lines read from the rest)
    and give back (the names they assign or declare that are read after).
+   For a function over a limit, `--explain` ends with the ranges worth
+   lifting out, best first, each estimated so: the loop is explain, lift
+   the first, `--diff HEAD`.
 3. Change the code, then `gnarl --diff HEAD` lists each function the
    change touched (uncommitted edits and new files included) with its
    numbers before and after: worse first, then mixed (some numbers up and

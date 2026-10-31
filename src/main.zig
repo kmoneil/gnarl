@@ -1550,6 +1550,7 @@ test {
     _ = @import("explain.zig");
     _ = @import("fan.zig");
     _ = @import("flow.zig");
+    _ = @import("suggest.zig");
     _ = @import("formats.zig");
     _ = @import("cyclomatic.zig");
     _ = @import("functions.zig");

@@ -22,6 +22,7 @@ const params = @import("params.zig");
 const regions = @import("regions.zig");
 const report = @import("report.zig");
 const select = @import("select.zig");
+const suggest = @import("suggest.zig");
 const thresholds = @import("thresholds.zig");
 const Class = thresholds.Class;
 const Metric = thresholds.Metric;
@@ -61,6 +62,9 @@ pub const Explanation = struct {
     regions: []const Region,
     /// For `path:A-B`, what those lines cost; null otherwise.
     range: ?Range = null,
+    /// For a function over a limit, the ranges worth lifting into
+    /// functions of their own, best first, each as `range` would say it.
+    suggestions: []const Range = &.{},
 };
 
 pub const TallyItem = struct { line: u32, column: u32, construct: []const u8 };
@@ -384,7 +388,19 @@ const Reading = struct {
     listed: []const functions.Function,
 
     fn explain(r: Reading, function: functions.Function) Allocator.Error!Explanation {
-        return build(r.arena, r.scratch, r.tree, r.index, r.path, function, r.class, r.classes);
+        var e = try build(r.arena, r.scratch, r.tree, r.index, r.path, function, r.class, r.classes);
+        e.suggestions = try r.suggestions(function, e);
+        return e;
+    }
+
+    /// For a function over a limit, the best three ranges to lift out, each
+    /// as a range of its lines would be explained.
+    fn suggestions(r: Reading, function: functions.Function, e: Explanation) Allocator.Error![]const Range {
+        if (e.trips.len == 0) return &.{};
+        const found = try suggest.best(r.scratch, r.tree, function, .{ .cyclomatic = e.cyclomatic.value, .cognitive = e.cognitive.value, .lines = e.lines.value }, 3);
+        const out = try r.arena.alloc(Range, found.len);
+        for (found, out) |c, *o| o.* = try r.range(function, e, r.index.ofToken(r.tree, c.first).line, r.index.ofToken(r.tree, c.last).line);
+        return out;
     }
 
     /// The function `at` names: the one whose line it is, or the innermost
@@ -437,7 +453,7 @@ const Reading = struct {
         var params_count: u32 = 0;
         for (f.needs, needs) |n, *o| {
             o.* = .{ .name = try r.arena.dupe(u8, n.name), .type = try r.arena.dupe(u8, n.type) };
-            params_count += @intFromBool(!isContext(n.type));
+            params_count += @intFromBool(!flow.isContext(n.type));
         }
         const gives = try r.arena.alloc(flow.Given, f.gives.len);
         for (f.gives, gives) |g, *o| o.* = .{ .name = try r.arena.dupe(u8, g.name), .type = try r.arena.dupe(u8, g.type), .why = g.why };
@@ -479,11 +495,6 @@ const Reading = struct {
     }
 };
 
-/// Whether a parameter typed `type_text` is context the parameter count
-/// leaves out: an Allocator or an Io.
-fn isContext(type_text: []const u8) bool {
-    return std.mem.endsWith(u8, type_text, "Allocator") or std.mem.eql(u8, type_text, "Io") or std.mem.endsWith(u8, type_text, ".Io");
-}
 
 /// What a range's lines would take and give back, moved out.
 fn writeFlow(w: *Writer, r: Range) Writer.Error!void {
@@ -705,14 +716,21 @@ fn putRegions(row: Item, e: Explanation) Writer.Error!void {
         const at = std.fmt.bufPrint(&buffer, "{d}-{d}", .{ r.first_line, r.last_line }) catch unreachable;
         inline for (.{ "cyclomatic", "cognitive", "lines", "nesting" }) |field| try row.put("region", field, at, @field(r, field), r.text);
     }
-    const range = e.range orelse return;
+    if (e.range) |range| try putRange(row, "range", range);
+    for (e.suggestions) |s| try putRange(row, "suggestion", s);
+}
+
+/// A range's rows, under `metric`: `range` for lines asked about,
+/// `suggestion` for one worth lifting out.
+fn putRange(row: Item, metric: []const u8, range: Range) Writer.Error!void {
+    var buffer: [24]u8 = undefined;
     const at = std.fmt.bufPrint(&buffer, "{d}-{d}", .{ range.first_line, range.last_line }) catch unreachable;
-    inline for (.{ "cyclomatic", "cognitive", "depth", "lines", "nesting" }) |field| try row.put("range", field, at, @field(range, field), "");
-    for (range.leaving) |l| try row.putAt("range", l.construct, l.line, l.column, 1, "leaves the lines");
-    for (range.needs) |n| try row.put("range", "needs", at, 1, n.name);
-    for (range.gives) |g| try row.put("range", "gives", at, 1, g.name);
-    inline for (.{ "cyclomatic", "cognitive", "nesting", "params" }) |field| try row.put("range", "helper." ++ field, at, @field(range.extracted.helper, field), "");
-    inline for (.{ "cyclomatic", "cognitive", "lines" }) |field| try row.put("range", "rest." ++ field, at, @field(range.extracted.rest, field), "");
+    inline for (.{ "cyclomatic", "cognitive", "depth", "lines", "nesting" }) |field| try row.put(metric, field, at, @field(range, field), "");
+    for (range.leaving) |l| try row.putAt(metric, l.construct, l.line, l.column, 1, "leaves the lines");
+    for (range.needs) |n| try row.put(metric, "needs", at, 1, n.name);
+    for (range.gives) |g| try row.put(metric, "gives", at, 1, g.name);
+    inline for (.{ "cyclomatic", "cognitive", "nesting", "params" }) |field| try row.put(metric, "helper." ++ field, at, @field(range.extracted.helper, field), "");
+    inline for (.{ "cyclomatic", "cognitive", "lines" }) |field| try row.put(metric, "rest." ++ field, at, @field(range.extracted.rest, field), "");
 }
 
 /// The `<regions>` element, and `<range>` when lines were asked about.
@@ -725,35 +743,74 @@ fn writeRegionsXml(w: *Writer, e: Explanation) Writer.Error!void {
         try w.writeAll("/>\n");
     }
     try w.writeAll("      </regions>\n");
-    const range = e.range orelse return;
-    try w.writeAll("      <range");
+    if (e.range) |range| try writeRangeXml(w, "range", range, "      ");
+    if (e.suggestions.len == 0) return;
+    try w.writeAll("      <suggestions>\n");
+    for (e.suggestions) |s| try writeRangeXml(w, "suggestion", s, "        ");
+    try w.writeAll("      </suggestions>\n");
+}
+
+/// A range as the element `name`, its attributes the json's numbers, its
+/// children the lists and the estimate.
+fn writeRangeXml(w: *Writer, name: []const u8, range: Range, indent: []const u8) Writer.Error!void {
+    try w.print("{s}<{s}", .{ indent, name });
     inline for (.{ "first_line", "last_line", "cyclomatic", "cognitive", "depth", "lines", "nesting" }) |field| try formats.attrInt(w, field, @field(range, field));
     try w.writeAll(">\n");
     for (range.leaving) |l| {
-        try w.writeAll("        <leaving");
+        try w.print("{s}  <leaving", .{indent});
         try formats.attrInt(w, "line", l.line);
         try formats.attrInt(w, "column", l.column);
         try formats.attr(w, "construct", l.construct);
         try w.writeAll("/>\n");
     }
     for (range.needs) |n| {
-        try w.writeAll("        <needs");
+        try w.print("{s}  <needs", .{indent});
         try formats.attr(w, "name", n.name);
         try formats.attr(w, "type", n.type);
         try w.writeAll("/>\n");
     }
     for (range.gives) |g| {
-        try w.writeAll("        <gives");
+        try w.print("{s}  <gives", .{indent});
         try formats.attr(w, "name", g.name);
         try formats.attr(w, "type", g.type);
         try formats.attr(w, "why", g.why);
         try w.writeAll("/>\n");
     }
-    try w.writeAll("        <extracted>\n          <helper");
+    try w.print("{s}  <extracted>\n{s}    <helper", .{ indent, indent });
     inline for (.{ "cyclomatic", "cognitive", "nesting", "params" }) |field| try formats.attrInt(w, field, @field(range.extracted.helper, field));
-    try w.writeAll("/>\n          <rest");
+    try w.print("/>\n{s}    <rest", .{indent});
     inline for (.{ "cyclomatic", "cognitive", "lines" }) |field| try formats.attrInt(w, field, @field(range.extracted.rest, field));
-    try w.writeAll("/>\n        </extracted>\n      </range>\n");
+    try w.print("/>\n{s}  </extracted>\n{s}</{s}>\n", .{ indent, indent, name });
+}
+
+/// The ranges worth lifting out, a line each.
+fn writeSuggestionsText(w: *Writer, e: Explanation) Writer.Error!void {
+    if (e.suggestions.len == 0) return;
+    try w.writeAll("worth lifting out, best first; --explain path:A-B says more of each:\n");
+    for (e.suggestions) |s| {
+        try w.print("  {d}-{d}  ", .{ s.first_line, s.last_line });
+        try writeSuggestion(w, e, s);
+        try w.writeByte('\n');
+    }
+}
+
+fn writeSuggestionsMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
+    if (e.suggestions.len == 0) return;
+    try w.writeAll("\n**worth lifting out**, best first; `--explain path:A-B` says more of each:\n\n");
+    for (e.suggestions) |s| {
+        try w.print("- lines {d}-{d}: ", .{ s.first_line, s.last_line });
+        try writeSuggestion(w, e, s);
+        try w.writeAll(".\n");
+    }
+}
+
+/// A suggestion's estimate, what it would give back, and the jumps that
+/// leave it.
+fn writeSuggestion(w: *Writer, e: Explanation, s: Range) Writer.Error!void {
+    const x = s.extracted;
+    try w.print("a function of cyclomatic {d}, cognitive {d}, params {d}; {s} keeps cyclomatic {d}, cognitive {d}", .{ x.helper.cyclomatic, x.helper.cognitive, x.helper.params, e.name, x.rest.cyclomatic, x.rest.cognitive });
+    for (s.gives, 0..) |g, i| try w.print("{s}{s}", .{ if (i == 0) "; gives back " else ", ", g.name });
+    if (s.leaving.len > 0) try w.print("; {d} jump{s} leave{s} it", .{ s.leaving.len, if (s.leaving.len == 1) "" else "s", if (s.leaving.len == 1) "s" else "" });
 }
 
 /// The regions as a report lists them: each that adds something, and
@@ -1007,6 +1064,7 @@ fn writeText(w: *Writer, e: Explanation) Writer.Error!void {
     }
     try writeTallyText(w, e);
     try writeRegionsText(w, e);
+    try writeSuggestionsText(w, e);
 }
 
 fn writeCognitiveText(w: *Writer, e: Explanation, ws: Widths) Writer.Error!void {
@@ -1111,6 +1169,7 @@ fn writeMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
     }
     try writeTallyMarkdown(w, e);
     try writeRegionsMarkdown(w, e);
+    try writeSuggestionsMarkdown(w, e);
 }
 
 fn writeCognitiveMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
@@ -1286,6 +1345,49 @@ test "regions: each that adds a row, the runs between that add nothing one" {
         \\  8      +0          +0         1        0        return 0;
         \\
     , text[std.mem.find(u8, text, "regions:").?..]);
+}
+
+test "suggestions: for a function over a limit, the cuts worth making, best first" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const gpa = std.testing.allocator;
+    var tree = try Ast.parse(gpa,
+        \\fn route(xs: []const u8, c: bool) u8 {
+        \\    var n: u8 = 0;
+        \\    for (xs) |x| {
+        \\        if (x > 0) {
+        \\            if (c) {
+        \\                if (x > 9) n += 2 else n += 1;
+        \\            }
+        \\        }
+        \\    }
+        \\    return n;
+        \\}
+    , .{});
+    defer tree.deinit(gpa);
+    var search: Search = try .init(arena, &.{"route"});
+    var classes: thresholds.Classes = .defaults;
+    classes.normal.cognitive = .{ .warning = 5 };
+    try search.file(arena, arena, "a.zig", &tree, .normal, classes);
+    var said: Messages = .{ .arena = arena, .echo = false };
+    const found = try search.results(arena, &said);
+    const e = found.explanations[0];
+    // for 1, if 2, if 3, if 4, its else free (both branches expressions):
+    // 10. The cut that leaves both sides smallest is the if (c) (5-7): a
+    // function of if 1, if 2, and route keeps for 1, if 2. The cuts
+    // around it or inside it overlap it, so are not named.
+    try std.testing.expectEqual(10, e.cognitive.value);
+    try std.testing.expectEqual(1, e.suggestions.len);
+    const best = e.suggestions[0];
+    try std.testing.expectEqual(5, best.first_line);
+    try std.testing.expectEqual(7, best.last_line);
+    try std.testing.expectEqual(3, best.extracted.helper.cognitive);
+    try std.testing.expectEqual(3, best.extracted.rest.cognitive);
+    try std.testing.expectEqualStrings("n", best.gives[0].name);
+    var out: Writer.Allocating = .init(arena);
+    try write(&out.writer, .text, found.explanations, .{ .version = "0.0.0" });
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "worth lifting out, best first; --explain path:A-B says more of each:\n  5-7  a function of cyclomatic 3, cognitive 3, params 3; route keeps cyclomatic 3, cognitive 3; gives back n\n") != null);
 }
 
 test "write: Markdown and JSON" {
