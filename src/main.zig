@@ -25,16 +25,16 @@ const usage =
     \\Usage: gnarl [--exclude <path>]... [--config <file>] [--check]
     \\             [--baseline <file>] [--update-baseline]
     \\             [--all] [--top <n>] [--function <function>]... [--no-ignore]
-    \\             [--format <format>] [--json] [<path>...]
+    \\             [--format <format>] [--json] <path>...
     \\       gnarl --explain <function>... [<path>...]
     \\       gnarl --diff <ref> [<path>...]
-    \\       gnarl --files [--top <n>] [<path>...]
+    \\       gnarl --files [--top <n>] <path>...
     \\       gnarl skill [--install <dir>]
     \\       gnarl --version | --help
     \\
     \\Measures every function and test block in each file named, and in
-    \\every .zig file under each directory named (the current directory
-    \\when none is): cyclomatic complexity, cognitive complexity (how hard
+    \\every .zig file under each directory named (. for the current
+    \\directory): cyclomatic complexity, cognitive complexity (how hard
     \\it is to follow: each structure 1, and 1 more for each level it sits
     \\in), logical lines, nesting depth and parameters (plain, and weighted
     \\with a type parameter and an anytype counted twice). One row per
@@ -43,6 +43,11 @@ const usage =
     \\one !!. Hidden files and directories, zig-out and zig-pkg are
     \\skipped, and in a git work tree what git ignores, unless the file or
     \\directory is named outright.
+    \\
+    \\gnarl reads only the paths it is given; with none, it prints this.
+    \\Two need no path: a function named as path:line, which reads its own
+    \\file, and --diff, which reads the files git says changed, in the
+    \\whole work tree when no path is given.
     \\
     \\gnarl skill prints what an AI agent needs to work with gnarl: the
     \\loop, the rules with examples, the output; --install <dir> writes it
@@ -84,17 +89,16 @@ const usage =
     \\                    lifting out. The function is path:line as the
     \\                    report prints it (or any line inside it), or its
     \\                    name or the end of it (record for Validator.record),
-    \\                    looked for in the paths given, or the current
-    \\                    directory if none. path:A-B says what lines A to B
-    \\                    of the function around them cost, and about what
-    \\                    moving them into a function of their own would
-    \\                    leave. May be given more than once.
+    \\                    looked for in the paths given. path:A-B says what
+    \\                    lines A to B of the function around them cost, and
+    \\                    about what moving them into a function of their own
+    \\                    would leave. May be given more than once.
     \\  --diff <ref>      Rather than report, list each function the change
     \\                    from the commit <ref> to the work tree touched,
     \\                    uncommitted edits and new files included, with its
     \\                    numbers before and after: worse first, then mixed
     \\                    (some up, some down), added, the same, better and
-    \\                    removed.
+    \\                    removed. With no path, the whole work tree.
     \\  --files           Rather than report functions, list each file: the
     \\                    files it imports (fan-out), the files read that
     \\                    import it (fan-in), and the modules it imports,
@@ -229,16 +233,12 @@ const Context = struct {
     }
 };
 
-/// The files the paths name, or, with none, the current directory's; and
-/// the file of each function named by `path:line`, which needs no path
-/// besides. Sorted, each once; what cannot be read is said.
+/// The files the paths name, and the file of each function named by
+/// `path:line`, which needs no path besides. Sorted, each once; what
+/// cannot be read is said.
 fn collectFiles(c: Context, selectors: []const select.Selector) ![]const []const u8 {
     var paths: std.ArrayList([]const u8) = .empty;
     try paths.appendSlice(c.arena, c.run.paths);
-    const by_name = for (selectors) |s| {
-        if (s == .name) break true;
-    } else false;
-    if (paths.items.len == 0 and (selectors.len == 0 or by_name)) try paths.append(c.arena, ".");
     for (selectors) |s| switch (s) {
         .at => |at| try paths.append(c.arena, at.path),
         .name => {},
@@ -421,7 +421,8 @@ fn plural(n: usize) []const u8 {
     return if (n == 1) "" else "s";
 }
 
-/// `--diff ref`: each function the change touched, before and after.
+/// `--diff ref`: each function the change touched, before and after. With
+/// no path, git's whole work tree: what git lists is all that is read.
 fn runDiff(c: Context, ref: []const u8) !u8 {
     const paths: []const []const u8 = if (c.run.paths.len > 0) c.run.paths else &.{"."};
     const changed = try diff.changedFiles(c.arena, c.io, ref, paths, .{ .paths = c.run.excludes, .globs = c.settings.exclude }, c.said) orelse &.{};
@@ -666,7 +667,21 @@ const Run = struct {
     fn notForFiles(r: Run) bool {
         return r.check or r.all or r.functions.len > 0 or r.baselineFlags() or r.explain.len > 0 or r.diff != null;
     }
+
+    /// Whether the run needs a path it was not given. gnarl reads only
+    /// what it is named, so every run needs one, but for --diff, which
+    /// reads what git says changed, and functions named as `path:line`,
+    /// each of which names its file.
+    fn wantsPath(r: Run, arena: std.mem.Allocator) std.mem.Allocator.Error!bool {
+        if (r.paths.len > 0 or r.diff != null) return false;
+        const named = if (r.explain.len > 0) r.explain else r.functions;
+        for (named) |text| if (try select.Selector.parse(arena, text) == .name) return true;
+        return named.len == 0;
+    }
 };
+
+/// Why a run that names no path is not run.
+const no_path = "no path to read: name the files and directories to measure, or . for the current directory";
 
 /// The options that stand alone.
 const Flag = enum { @"--json", @"--check", @"--all", @"--no-ignore", @"--update-baseline", @"--files" };
@@ -741,8 +756,10 @@ fn needs(o: Option) ?[]const u8 {
 /// `-h` and `--help`, `--version`, and an unknown option take effect where
 /// they stand; anything after them is not read.
 fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocator.Error!Command {
+    // Nothing at all: the usage, and nothing read.
+    if (args.len == 0) return .{ .usage_error = "" };
     // A path named skill is ./skill.
-    if (args.len > 0 and std.mem.eql(u8, args[0], "skill")) return parseSkill(args[1..]);
+    if (std.mem.eql(u8, args[0], "skill")) return parseSkill(args[1..]);
     var p: Parsing = .{};
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -759,6 +776,7 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
     }
     const run = p.done();
     if (run.conflict()) |message| return .{ .usage_error = message };
+    if (try run.wantsPath(arena)) return .{ .usage_error = no_path };
     return .{ .run = run };
 }
 
@@ -865,14 +883,14 @@ test "in a git work tree, what git ignores is not read; --no-ignore reads it" {
 
     // gnarl walks its own current directory here, as a person running it
     // in a repository does.
-    try expectRun(proj, &.{"--all"}, 0,
+    try expectRun(proj, &.{ "--all", "." }, 0,
         \\cyclomatic  cognitive  lines  nesting  params  weighted  location  function
         \\       1          0      1        0       0         0    a.zig:1   a
         \\
         \\1 function in 1 file: 0 over a critical threshold (!!), 0 more over a warning one (!).
         \\
     ++ thresholds_line, "");
-    const all = try runGnarl(proj, &.{ "--all", "--no-ignore" });
+    const all = try runGnarl(proj, &.{ "--all", "--no-ignore", "." });
     defer std.testing.allocator.free(all.stdout);
     defer std.testing.allocator.free(all.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 2 }, all.term);
@@ -1101,8 +1119,8 @@ test "by default only what is over a threshold; --top, and --function to pick" {
         \\
     ;
     try expectRun(tmp.dir, &.{"a.zig"}, 0, f_row ++ "1 within limits is not listed; --all lists every function.\n" ++ thresholds_line, "");
-    // No path reads the current directory.
-    try expectRun(tmp.dir, &.{}, 0, f_row ++ "1 within limits is not listed; --all lists every function.\n" ++ thresholds_line, "");
+    // . is the current directory.
+    try expectRun(tmp.dir, &.{"."}, 0, f_row ++ "1 within limits is not listed; --all lists every function.\n" ++ thresholds_line, "");
     try expectRun(tmp.dir, &.{ "--all", "--top", "1", "a.zig" }, 0, f_row ++ "1 more is not listed: --top 1 keeps the worst 1.\n" ++ thresholds_line, "");
     // Picked by a line inside it, with no path besides.
     try expectRun(tmp.dir, &.{ "--function", "a.zig:3" }, 0, f_row ++ "1 not picked by --function is not listed.\n" ++ thresholds_line, "");
@@ -1213,18 +1231,18 @@ test "--explain: by path:line or by name; a name that fits none or several is an
     // A whole name beats the end of a longer one.
     try expectRun(tmp.dir, &.{ "--explain", "f", "a.zig" }, 0, one, "");
     {
-        const result = try runGnarl(tmp.dir, &.{ "--explain", "S.f" });
+        const result = try runGnarl(tmp.dir, &.{ "--explain", "S.f", "." });
         defer gpa.free(result.stdout);
         defer gpa.free(result.stderr);
         try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
         try std.testing.expect(std.mem.startsWith(u8, result.stdout, "sub" ++ std.fs.path.sep_str ++ "b.zig:2  S.f  (normal code)\n"));
     }
     // The whole name wins over S.f, and says S.f was there.
-    try expectRun(tmp.dir, &.{ "--explain", "f" }, 0, one, "gnarl: f: note: explained the function of exactly that name; 1 more ends with it:\n  sub" ++ std.fs.path.sep_str ++ "b.zig:2  S.f\n");
-    try expectRun(tmp.dir, &.{ "--explain", "nope" }, 2, "", "gnarl: nope: no function by that name in the files read\n");
+    try expectRun(tmp.dir, &.{ "--explain", "f", "." }, 0, one, "gnarl: f: note: explained the function of exactly that name; 1 more ends with it:\n  sub" ++ std.fs.path.sep_str ++ "b.zig:2  S.f\n");
+    try expectRun(tmp.dir, &.{ "--explain", "nope", "." }, 2, "", "gnarl: nope: no function by that name in the files read\n");
     try expectRun(tmp.dir, &.{ "--explain", "a.zig:9" }, 2, "", "gnarl: a.zig:9: no function at or around that line\n");
     try tmp.dir.writeFile(io, .{ .sub_path = "c.zig", .data = "fn f() void {}\n" });
-    try expectRun(tmp.dir, &.{ "--explain", "f" }, 2, "",
+    try expectRun(tmp.dir, &.{ "--explain", "f", "." }, 2, "",
         \\gnarl: f: 2 functions answer to that name; name one by path:line:
         \\  a.zig:1  f
         \\  c.zig:1  f
@@ -1362,8 +1380,21 @@ test "--version, --help and usage errors" {
     defer tmp.cleanup();
     try expectRun(tmp.dir, &.{"--version"}, 0, "gnarl " ++ build_options.version ++ "\n", "");
     try expectRun(tmp.dir, &.{"--help"}, 0, usage, "");
-    // No path is the current directory: here, one with no .zig file.
-    try expectRun(tmp.dir, &.{}, 2, "0 functions in 0 files: 0 over a critical threshold (!!), 0 more over a warning one (!).\n", "gnarl: .: no .zig file to read (hidden files and directories, zig-out, zig-pkg, excluded paths and what git ignores are skipped)\n");
+    // Nothing at all: the usage, on stderr, and nothing read, wherever it
+    // is run.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.zig", .data = "fn a() void {}\n" });
+    try expectRun(tmp.dir, &.{}, 2, "", usage);
+    // Options with no path: why, and the usage.
+    try expectRun(tmp.dir, &.{"--check"}, 2, "", "gnarl: " ++ no_path ++ "\n\n" ++ usage);
+    try expectRun(tmp.dir, &.{ "--explain", "a" }, 2, "", "gnarl: " ++ no_path ++ "\n\n" ++ usage);
+    // . is the current directory, named.
+    try expectRun(tmp.dir, &.{ "--all", "." }, 0,
+        \\cyclomatic  cognitive  lines  nesting  params  weighted  location  function
+        \\       1          0      1        0       0         0    a.zig:1   a
+        \\
+        \\1 function in 1 file: 0 over a critical threshold (!!), 0 more over a warning one (!).
+        \\
+    ++ thresholds_line, "");
     try expectRun(tmp.dir, &.{ "src", "--frobnicate" }, 2, "", "gnarl: unknown option '--frobnicate'\n\n" ++ usage);
 }
 
@@ -1385,7 +1416,7 @@ test "parseArgs: paths and excludes, in any order" {
     try std.testing.expect(!run.all);
     try std.testing.expectEqual(null, run.top);
     try std.testing.expect(!run.no_ignore);
-    try std.testing.expect((try parseArgs(arena, &.{"--no-ignore"})).run.no_ignore);
+    try std.testing.expect((try parseArgs(arena, &.{ "--no-ignore", "." })).run.no_ignore);
 }
 
 test "parseArgs: --all, --top and --function" {
@@ -1393,11 +1424,11 @@ test "parseArgs: --all, --top and --function" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const run = (try parseArgs(arena, &.{ "--all", "--top=5", "--function", "a.zig:3", "--function=parse" })).run;
+    const run = (try parseArgs(arena, &.{ "--all", "--top=5", "--function", "a.zig:3", "--function=parse", "src" })).run;
     try std.testing.expect(run.all);
     try std.testing.expectEqual(5, run.top.?);
     try std.testing.expectEqual(2, run.functions.len);
-    try std.testing.expectEqual(0, run.paths.len);
+    try std.testing.expectEqual(1, run.paths.len);
     try std.testing.expectEqualStrings("--top takes how many functions to list, 1 or more, not '0'", (try parseArgs(arena, &.{ "--top", "0", "src" })).usage_error);
     try std.testing.expectEqualStrings("--top takes how many functions to list, 1 or more, not 'x'", (try parseArgs(arena, &.{ "src", "--top=x" })).usage_error);
     try std.testing.expectEqualStrings("--function needs a function: path:line, or a name", (try parseArgs(arena, &.{ "src", "--function" })).usage_error);
@@ -1470,9 +1501,9 @@ test "parseArgs: --baseline and --update-baseline" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const run = (try parseArgs(arena, &.{ "--check", "--baseline", "ci.baseline" })).run;
+    const run = (try parseArgs(arena, &.{ "--check", "--baseline", "ci.baseline", "." })).run;
     try std.testing.expectEqualStrings("ci.baseline", run.baseline.?);
-    try std.testing.expect((try parseArgs(arena, &.{"--update-baseline"})).run.update_baseline);
+    try std.testing.expect((try parseArgs(arena, &.{ "--update-baseline", "." })).run.update_baseline);
     try std.testing.expectEqualStrings("--update-baseline writes the baseline and --check holds to it: one at a time", (try parseArgs(arena, &.{ "--check", "--update-baseline" })).usage_error);
     try std.testing.expectEqualStrings("--baseline is for --check or --update-baseline", (try parseArgs(arena, &.{ "--baseline", "b" })).usage_error);
     try std.testing.expectEqualStrings("--baseline needs a file", (try parseArgs(arena, &.{ "--check", "--baseline" })).usage_error);
@@ -1500,15 +1531,15 @@ test "parseArgs: gnarl skill" {
     try std.testing.expectEqualStrings("./skill", (try parseArgs(arena, &.{"./skill"})).run.paths[0]);
 }
 
-test "parseArgs: --explain, more than once, with or without paths" {
+test "parseArgs: --explain, more than once" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const run = (try parseArgs(arena, &.{ "--explain", "a.zig:3", "--explain=Parser.next" })).run;
+    const run = (try parseArgs(arena, &.{ "--explain", "a.zig:3", "--explain=Parser.next", "src" })).run;
     try std.testing.expectEqual(2, run.explain.len);
     try std.testing.expectEqualStrings("Parser.next", run.explain[1]);
-    try std.testing.expectEqual(0, run.paths.len);
+    try std.testing.expectEqual(1, run.paths.len);
     try std.testing.expectEqualStrings("--explain needs a function: path:line, or a name", (try parseArgs(arena, &.{"--explain"})).usage_error);
     try std.testing.expectEqualStrings("--check, --all, --top, --function, --baseline and --update-baseline are for the report, not --explain", (try parseArgs(arena, &.{ "--check", "--explain", "f" })).usage_error);
 }
@@ -1539,8 +1570,33 @@ test "parseArgs: help, version and usage errors" {
     try std.testing.expectEqualStrings("--exclude needs a path", (try parseArgs(arena, &.{ "src", "--exclude" })).usage_error);
     try std.testing.expectEqualStrings("--exclude needs a path", (try parseArgs(arena, &.{ "src", "--exclude=" })).usage_error);
     try std.testing.expectEqualStrings("unknown option '-x'", (try parseArgs(arena, &.{ "-x", "--help" })).usage_error);
-    try std.testing.expectEqual(0, (try parseArgs(arena, &.{})).run.paths.len);
-    try std.testing.expectEqual(1, (try parseArgs(arena, &.{ "--exclude", "src" })).run.excludes.len);
+    try std.testing.expectEqual(1, (try parseArgs(arena, &.{ "--exclude", "src", "." })).run.excludes.len);
+}
+
+test "parseArgs: a path is needed, but for --diff and functions named path:line" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Nothing at all is the usage alone; options with no path say why.
+    try std.testing.expectEqualStrings("", (try parseArgs(arena, &.{})).usage_error);
+    for ([_][]const []const u8{
+        &.{"--check"},
+        &.{"--update-baseline"},
+        &.{ "--files", "--top", "3" },
+        &.{ "--exclude", "src" },
+        &.{ "--explain", "record" },
+        &.{ "--explain", "a.zig:3", "--explain", "record" },
+        &.{ "--function", "parse" },
+    }) |args| try std.testing.expectEqualStrings(no_path, (try parseArgs(arena, args)).usage_error);
+
+    // Each function named by its line names its file.
+    try std.testing.expectEqual(0, (try parseArgs(arena, &.{ "--explain", "a.zig:3" })).run.paths.len);
+    try std.testing.expectEqual(0, (try parseArgs(arena, &.{ "--explain", "a.zig:3-9" })).run.paths.len);
+    try std.testing.expectEqual(0, (try parseArgs(arena, &.{ "--function", "a.zig:3" })).run.paths.len);
+    // --diff reads what git lists.
+    try std.testing.expectEqualStrings("HEAD", (try parseArgs(arena, &.{ "--diff", "HEAD" })).run.diff.?);
+    try std.testing.expectEqual(1, (try parseArgs(arena, &.{"."})).run.paths.len);
 }
 
 test {

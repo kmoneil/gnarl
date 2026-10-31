@@ -66,9 +66,12 @@ critical limit, or one above its number there. A function is known by
 its path and name, so a rename or a move is a new function: update the
 baseline in the same change. `--baseline <file>` names another file.
 
-Paths are optional: with none, gnarl reads the current directory. A
-function given to `--explain` or `--function` as `path:line` needs no
-path besides, and then only its file is read.
+gnarl reads only the paths it is given, `.` for the current directory;
+with none, it prints its usage and exits 2. A function given to
+`--explain` or `--function` as `path:line` needs no path besides, and
+then only its file is read; one given by name is looked for in the paths
+given. `--diff` with no path reads what git says changed in the whole
+work tree.
 
 ## What it counts
 

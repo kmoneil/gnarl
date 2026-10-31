@@ -39,7 +39,7 @@ debt you have cannot grow.
 ## A quick look
 
 ```console
-$ gnarl
+$ gnarl .
 cyclomatic  cognitive  lines  nesting  params  weighted  location     function
       11!        33!!   23        5!      4         4    tally.zig:7  tally
 
@@ -47,7 +47,7 @@ cyclomatic  cognitive  lines  nesting  params  weighted  location     function
 ```
 
 ```console
-$ gnarl --explain tally
+$ gnarl --explain tally .
 ...
 worth lifting out, best first; --explain path:A-B says more of each:
   24-34  a function of cyclomatic 5, cognitive 8, params 4; tally keeps cyclomatic 7, cognitive 19; gives back total
@@ -79,10 +79,10 @@ cp zig-out/bin/gnarl ~/.local/bin/   # or anywhere on your PATH
 Then, in any Zig project:
 
 ```sh
-gnarl                      # what is over a limit, worst first
-gnarl --explain <function> # why, construct by construct, and where to cut
-gnarl --diff HEAD          # after a change: what it did, function by function
-gnarl --check              # in CI: exit 1 on what is new or worse
+gnarl .                         # what is over a limit, worst first
+gnarl --explain <function> .    # why, construct by construct, and where to cut
+gnarl --diff HEAD               # after a change: what it did, function by function
+gnarl --check .                 # in CI: exit 1 on what is new or worse
 ```
 
 {: .tip }

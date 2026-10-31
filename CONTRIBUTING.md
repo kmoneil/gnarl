@@ -17,10 +17,10 @@ and ReleaseFast, and `zig build lint` clean.
 
 ## gnarl is held to itself
 
-`zig build test` runs `gnarl --check` over gnarl's own source against
+`zig build test` runs `gnarl --check .` over gnarl's own source against
 `complexity.baseline`. A new function over a critical limit fails it, and
 so does a frozen one that gets worse. When a change makes a frozen function
-better, `--check` says so: run `gnarl --update-baseline` and commit the
+better, `--check` says so: run `gnarl --update-baseline .` and commit the
 tighter baseline with the change. Before you open a pull request,
 `gnarl --diff origin/main` shows what your change did to each function it
 touched.
