@@ -13,6 +13,7 @@ const Ast = std.zig.Ast;
 const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
+const children = @import("children.zig");
 const cognitive = @import("cognitive.zig");
 const cyclomatic = @import("cyclomatic.zig");
 const lines = @import("lines.zig");
@@ -268,6 +269,130 @@ fn isBlock(tree: *const Ast, node: Node.Index) bool {
     };
 }
 
+/// A `return`, `break` or `continue`, and where it lands.
+pub const Jump = struct {
+    token: Ast.TokenIndex,
+    /// As written: `return`, `break`, `continue :outer`.
+    construct: []const u8,
+    /// The first and last tokens of the loop, labeled block or labeled
+    /// switch it lands at; null for a `return`, which leaves the function.
+    target: ?[2]Ast.TokenIndex,
+
+    /// Whether it is among the tokens `first` to `last` and lands outside
+    /// them: lifted out with them, it would need reworking.
+    pub fn leaves(j: Jump, first: Ast.TokenIndex, last: Ast.TokenIndex) bool {
+        if (j.token < first or j.token > last) return false;
+        const t = j.target orelse return true;
+        return t[0] < first or t[1] > last;
+    }
+};
+
+/// Every jump in `function`'s own code, and where each lands. Allocated
+/// with `arena`.
+pub fn jumps(arena: Allocator, tree: *const Ast, function: Node.Index) Allocator.Error![]const Jump {
+    var w: JumpWalk = .{ .arena = arena, .tree = tree };
+    try w.landers.append(arena, .{ .span = .{ 0, 0 }, .label = null, .loop = false, .parent = 0 });
+    try w.pushChildren(function, 0);
+    while (w.stack.pop()) |item| try w.visit(item);
+    return w.out.items;
+}
+
+/// Where a jump can land: a loop, a labeled block or a labeled switch.
+const Lander = struct {
+    span: [2]Ast.TokenIndex,
+    label: ?Ast.TokenIndex,
+    loop: bool,
+    /// The one it is in; the function's own, 0, is its own parent.
+    parent: u32,
+};
+
+const JumpWalk = struct {
+    arena: Allocator,
+    tree: *const Ast,
+    stack: std.ArrayList(JumpItem) = .empty,
+    kids: std.ArrayList(Node.Index) = .empty,
+    landers: std.ArrayList(Lander) = .empty,
+    out: std.ArrayList(Jump) = .empty,
+
+    const JumpItem = struct { node: Node.Index, lander: u32 };
+
+    fn visit(w: *JumpWalk, item: JumpItem) Allocator.Error!void {
+        switch (w.tree.nodeTag(item.node)) {
+            // Their jumps are their own.
+            .fn_decl, .test_decl => {},
+            .while_simple, .while_cont, .@"while", .for_simple, .@"for" => try w.loop(item),
+            .@"switch", .switch_comma => try w.labeled(item, w.tree.fullSwitch(item.node).?.label_token),
+            .block_two, .block_two_semicolon, .block, .block_semicolon => try w.labeled(item, blockLabel(w.tree, item.node)),
+            .@"break", .@"continue", .@"return" => try w.jump(item),
+            else => try w.pushChildren(item.node, item.lander),
+        }
+    }
+
+    /// A loop is where an unlabeled jump in its body lands; its condition,
+    /// inputs and else are outside it.
+    fn loop(w: *JumpWalk, item: JumpItem) Allocator.Error!void {
+        const tree = w.tree;
+        const body, const label = if (tree.fullWhile(item.node)) |f| .{ f.ast.then_expr, f.label_token } else for_: {
+            const f = tree.fullFor(item.node).?;
+            break :for_ .{ f.ast.then_expr, f.label_token };
+        };
+        const l = try w.open(item, label, true);
+        w.kids.clearRetainingCapacity();
+        try children.append(w.arena, tree, item.node, &w.kids);
+        for (w.kids.items) |kid| try w.stack.append(w.arena, .{ .node = kid, .lander = if (kid == body) l else item.lander });
+    }
+
+    fn labeled(w: *JumpWalk, item: JumpItem, label: ?Ast.TokenIndex) Allocator.Error!void {
+        const l = if (label != null) try w.open(item, label, false) else item.lander;
+        try w.pushChildren(item.node, l);
+    }
+
+    fn jump(w: *JumpWalk, item: JumpItem) Allocator.Error!void {
+        const tree = w.tree;
+        try w.pushChildren(item.node, item.lander);
+        const keyword = tree.nodeMainToken(item.node);
+        if (tree.nodeTag(item.node) == .@"return") return w.out.append(w.arena, .{ .token = keyword, .construct = "return", .target = null });
+        const label = tree.nodeData(item.node).opt_token_and_opt_node[0].unwrap();
+        const lands = w.landing(item.lander, label) orelse return;
+        const construct = if (label) |l| try std.mem.concat(w.arena, u8, &.{ tree.tokenSlice(keyword), " :", tree.tokenSlice(l) }) else tree.tokenSlice(keyword);
+        try w.out.append(w.arena, .{ .token = keyword, .construct = construct, .target = w.landers.items[lands].span });
+    }
+
+    /// Where a jump from inside `from` lands: what `label` names, or with
+    /// none, the innermost loop.
+    fn landing(w: *JumpWalk, from: u32, label: ?Ast.TokenIndex) ?u32 {
+        var f = from;
+        while (f != 0) : (f = w.landers.items[f].parent) {
+            const l = w.landers.items[f];
+            const lands = if (label) |name| sameName(w.tree, l.label, name) else l.loop;
+            if (lands) return f;
+        }
+        return null;
+    }
+
+    fn open(w: *JumpWalk, item: JumpItem, label: ?Ast.TokenIndex, is_loop: bool) Allocator.Error!u32 {
+        try w.landers.append(w.arena, .{ .span = .{ w.tree.firstToken(item.node), w.tree.lastToken(item.node) }, .label = label, .loop = is_loop, .parent = item.lander });
+        return @intCast(w.landers.items.len - 1);
+    }
+
+    fn pushChildren(w: *JumpWalk, node: Node.Index, lander: u32) Allocator.Error!void {
+        w.kids.clearRetainingCapacity();
+        try children.append(w.arena, w.tree, node, &w.kids);
+        for (w.kids.items) |kid| try w.stack.append(w.arena, .{ .node = kid, .lander = lander });
+    }
+};
+
+fn sameName(tree: *const Ast, a: ?Ast.TokenIndex, b: Ast.TokenIndex) bool {
+    return std.mem.eql(u8, tree.tokenSlice(a orelse return false), tree.tokenSlice(b));
+}
+
+/// The label of the block `node`, as `blk` is of `blk: {`, if it has one.
+fn blockLabel(tree: *const Ast, node: Node.Index) ?Ast.TokenIndex {
+    const lbrace = tree.nodeMainToken(node);
+    if (lbrace < 2 or tree.tokenTag(lbrace - 1) != .colon or tree.tokenTag(lbrace - 2) != .identifier) return null;
+    return lbrace - 2;
+}
+
 /// What lifting a range out into a function of its own would leave, about:
 /// the new function's numbers, its structures as much shallower as the
 /// range's outermost ones sit deep, and what the old one keeps. Jumps out
@@ -398,6 +523,53 @@ test "a statement that alone adds is opened, its parts a level in; the sums stil
         \\0 13-13 +0 +0
         \\
     , got.items);
+}
+
+test "jumps: where each lands, and which leave a range" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tree = try testing.parse(arena,
+        \\fn f(xs: []const u8, ys: []const u8) ?u8 {
+        \\    outer: for (xs) |x| {
+        \\        for (ys) |y| {
+        \\            if (y == 0) break;
+        \\            if (y > x) continue :outer;
+        \\            if (x == y) return x;
+        \\        }
+        \\        const v = blk: {
+        \\            if (x == 0) break :blk 1;
+        \\            break :blk 2;
+        \\        };
+        \\        _ = v;
+        \\    }
+        \\    return null;
+        \\}
+    );
+    const function = (try testing.functions.list(arena, &tree))[0];
+    const all = try jumps(arena, &tree, function.node);
+    // The inner loop, lines 3-7, as a range.
+    var first: Ast.TokenIndex = 0;
+    while (tree.tokenLocation(0, first).line + 1 < 3) first += 1;
+    var last = first;
+    while (tree.tokenLocation(0, last + 1).line + 1 <= 7) last += 1;
+    var got: std.ArrayList(u8) = .empty;
+    for (all) |j| if (j.leaves(first, last)) try got.print(arena, "{d} {s}\n", .{ tree.tokenLocation(0, j.token).line + 1, j.construct });
+    // Six jumps. The break lands at the inner loop, inside the range;
+    // continue :outer and the return leave it; the breaks to blk and the
+    // last return are outside it.
+    try std.testing.expectEqual(6, all.len);
+    var sorted = std.mem.splitScalar(u8, got.items, '\n');
+    var leaving: std.ArrayList([]const u8) = .empty;
+    while (sorted.next()) |line| if (line.len > 0) try leaving.append(arena, line);
+    std.mem.sort([]const u8, leaving.items, {}, struct {
+        fn before(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.before);
+    try std.testing.expectEqual(2, leaving.items.len);
+    try std.testing.expectEqualStrings("5 continue :outer", leaving.items[0]);
+    try std.testing.expectEqualStrings("6 return", leaving.items[1]);
 }
 
 test "extracted: the structures as much shallower as the range's outermost sit deep" {

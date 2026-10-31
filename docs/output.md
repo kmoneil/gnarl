@@ -173,9 +173,12 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
     - `cyclomatic`, `cognitive`, `lines`, `nesting`: as for a region.
     - `depth`: how much of `cognitive` is for the depth its structures
       sit at.
-    - `extracted`: the lines moved into a function of their own, about;
-      a `return`, `break` or `continue` that leaves them is not accounted
-      for:
+    - `leaving`: each `return`, `break` or `continue` in the lines that
+      lands outside them (a `return` always does), which moved out with
+      them would need reworking:
+      - `line`, `column`, `construct`: as for a branch.
+    - `extracted`: the lines moved into a function of their own, about,
+      the jumps that leave them aside:
       - `helper`: that function's `cyclomatic`, `cognitive` and
         `nesting`, its structures as much shallower as the lines'
         outermost sat deep.

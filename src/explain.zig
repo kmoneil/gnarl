@@ -105,10 +105,15 @@ pub const Range = struct {
     lines: u32,
     /// The deepest level a construct in the lines opens.
     nesting: u32,
+    /// Each `return`, `break` or `continue` in the lines that lands outside
+    /// them: moved out with them, it would need reworking.
+    leaving: []const Leaving,
     /// Moved into a function of its own, about: that function's numbers
     /// and what this one keeps.
     extracted: regions.Extracted,
 };
+
+pub const Leaving = struct { line: u32, column: u32, construct: []const u8 };
 
 const LineIndex = select.LineIndex;
 
@@ -397,7 +402,8 @@ const Reading = struct {
     /// `e`, add, and about what moving them out would leave.
     fn range(r: Reading, function: functions.Function, e: Explanation, first_line: u32, last_line: u32) Allocator.Error!Range {
         const facts: regions.Facts = try .of(r.scratch, r.tree, function.node);
-        const sum: regions.Sum = if (r.tokensOn(function, first_line, last_line)) |span| .of(facts, span[0], span[1]) else .{};
+        const span = r.tokensOn(function, first_line, last_line);
+        const sum: regions.Sum = if (span) |s| .of(facts, s[0], s[1]) else .{};
         return .{
             .first_line = first_line,
             .last_line = last_line,
@@ -406,8 +412,24 @@ const Reading = struct {
             .depth = sum.depth,
             .lines = sum.lines,
             .nesting = sum.nesting,
+            .leaving = if (span) |s| try r.leavingIn(function, s) else &.{},
             .extracted = .of(sum, .{ .cyclomatic = e.cyclomatic.value, .cognitive = e.cognitive.value, .lines = e.lines.value }),
         };
+    }
+
+    /// The jumps among the tokens of `span` that land outside them.
+    fn leavingIn(r: Reading, function: functions.Function, span: [2]Ast.TokenIndex) Allocator.Error![]const Leaving {
+        var out: std.ArrayList(Leaving) = .empty;
+        for (try regions.jumps(r.scratch, r.tree, function.node)) |j| if (j.leaves(span[0], span[1])) {
+            const loc = r.index.ofToken(r.tree, j.token);
+            try out.append(r.arena, .{ .line = loc.line, .column = loc.column, .construct = try r.arena.dupe(u8, j.construct) });
+        };
+        std.mem.sort(Leaving, out.items, {}, leavingBefore);
+        return out.items;
+    }
+
+    fn leavingBefore(_: void, a: Leaving, b: Leaving) bool {
+        return a.line < b.line or (a.line == b.line and a.column < b.column);
     }
 
     /// The first and last of `function`'s tokens on those lines; null when
@@ -641,6 +663,7 @@ fn putRegions(row: Item, e: Explanation) Writer.Error!void {
     const range = e.range orelse return;
     const at = std.fmt.bufPrint(&buffer, "{d}-{d}", .{ range.first_line, range.last_line }) catch unreachable;
     inline for (.{ "cyclomatic", "cognitive", "depth", "lines", "nesting" }) |field| try row.put("range", field, at, @field(range, field), "");
+    for (range.leaving) |l| try row.putAt("range", l.construct, l.line, l.column, 1, "leaves the lines");
     inline for (.{ "cyclomatic", "cognitive", "nesting" }) |field| try row.put("range", "helper." ++ field, at, @field(range.extracted.helper, field), "");
     inline for (.{ "cyclomatic", "cognitive", "lines" }) |field| try row.put("range", "rest." ++ field, at, @field(range.extracted.rest, field), "");
 }
@@ -658,7 +681,15 @@ fn writeRegionsXml(w: *Writer, e: Explanation) Writer.Error!void {
     const range = e.range orelse return;
     try w.writeAll("      <range");
     inline for (.{ "first_line", "last_line", "cyclomatic", "cognitive", "depth", "lines", "nesting" }) |field| try formats.attrInt(w, field, @field(range, field));
-    try w.writeAll(">\n        <extracted>\n          <helper");
+    try w.writeAll(">\n");
+    for (range.leaving) |l| {
+        try w.writeAll("        <leaving");
+        try formats.attrInt(w, "line", l.line);
+        try formats.attrInt(w, "column", l.column);
+        try formats.attr(w, "construct", l.construct);
+        try w.writeAll("/>\n");
+    }
+    try w.writeAll("        <extracted>\n          <helper");
     inline for (.{ "cyclomatic", "cognitive", "nesting" }) |field| try formats.attrInt(w, field, @field(range.extracted.helper, field));
     try w.writeAll("/>\n          <rest");
     inline for (.{ "cyclomatic", "cognitive", "lines" }) |field| try formats.attrInt(w, field, @field(range.extracted.rest, field));
@@ -780,7 +811,9 @@ fn writeRegionsMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
 fn writeRangeMarkdown(w: *Writer, e: Explanation, r: Range) Writer.Error!void {
     try w.print("**lines {d}-{d}**: cyclomatic +{d}, cognitive +{d} ({d} of it for depth), {d} logical lines, the deepest level {d}.\n\n", .{ r.first_line, r.last_line, r.cyclomatic, r.cognitive, r.depth, r.lines, r.nesting });
     const x = r.extracted;
-    try w.print("Moved into a function of its own, about: that function cyclomatic {d}, cognitive {d}, nesting {d}; `{s}` keeps cyclomatic {d}, cognitive {d}, lines {d}. A return, break or continue that leaves those lines is not accounted for.\n", .{ x.helper.cyclomatic, x.helper.cognitive, x.helper.nesting, e.name, x.rest.cyclomatic, x.rest.cognitive, x.rest.lines });
+    try w.print("Moved into a function of its own, about: that function cyclomatic {d}, cognitive {d}, nesting {d}; `{s}` keeps cyclomatic {d}, cognitive {d}, lines {d}.\n\n", .{ x.helper.cyclomatic, x.helper.cognitive, x.helper.nesting, e.name, x.rest.cyclomatic, x.rest.cognitive, x.rest.lines });
+    try writeLeaving(w, r.leaving);
+    try w.writeAll(".\n");
 }
 
 /// What lines asked about cost, and about what moving them out would
@@ -789,7 +822,15 @@ fn writeRangeText(w: *Writer, e: Explanation, r: Range) Writer.Error!void {
     try w.print("lines {d}-{d}: cyclomatic +{d}, cognitive +{d} ({d} of it for depth), {d} logical lines, the deepest level {d}\n", .{ r.first_line, r.last_line, r.cyclomatic, r.cognitive, r.depth, r.lines, r.nesting });
     const x = r.extracted;
     try w.print("moved into a function of its own, about: that function cyclomatic {d}, cognitive {d}, nesting {d}; {s} keeps cyclomatic {d}, cognitive {d}, lines {d}\n", .{ x.helper.cyclomatic, x.helper.cognitive, x.helper.nesting, e.name, x.rest.cyclomatic, x.rest.cognitive, x.rest.lines });
-    try w.writeAll("a return, break or continue that leaves those lines is not accounted for\n");
+    try writeLeaving(w, r.leaving);
+    try w.writeByte('\n');
+}
+
+/// The jumps that leave a range, each where it is, or that none does.
+fn writeLeaving(w: *Writer, leaving: []const Leaving) Writer.Error!void {
+    if (leaving.len == 0) return w.writeAll("no return, break or continue leaves those lines");
+    try w.print("{d} jump{s} leave{s} those lines and would need reworking if they moved: ", .{ leaving.len, if (leaving.len == 1) "" else "s", if (leaving.len == 1) "s" else "" });
+    for (leaving, 0..) |l, i| try w.print("{s}{s} at {d}:{d}", .{ if (i == 0) "" else ", ", l.construct, l.line, l.column });
 }
 
 /// Writes `explanations` in `format`.
@@ -1141,7 +1182,7 @@ test "a range: what its lines add, and about what moving them out would leave" {
         \\
         \\lines 4-7: cyclomatic +2, cognitive +6 (3 of it for depth), 2 logical lines, the deepest level 3
         \\moved into a function of its own, about: that function cyclomatic 3, cognitive 4, nesting 2; S.pick keeps cyclomatic 3, cognitive 2, lines 4
-        \\a return, break or continue that leaves those lines is not accounted for
+        \\1 jump leaves those lines and would need reworking if they moved: return at 6:31
         \\
     , out.written());
 }
