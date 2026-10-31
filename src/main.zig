@@ -9,6 +9,7 @@ const test_options = @import("test_options");
 const cyclomatic = @import("cyclomatic.zig");
 const functions = @import("functions.zig");
 const lines = @import("lines.zig");
+const nesting = @import("nesting.zig");
 const walk = @import("walk.zig");
 
 const usage =
@@ -17,8 +18,8 @@ const usage =
     \\
     \\Lists every function and test block in each file named, and in every
     \\.zig file under each directory named, a line each with its metrics:
-    \\path:line: name cyclomatic=N lines=N. Hidden files and directories,
-    \\zig-out and zig-pkg are skipped.
+    \\path:line: name cyclomatic=N lines=N nesting=N. Hidden files and
+    \\directories, zig-out and zig-pkg are skipped.
     \\
     \\  --exclude <path>  Skip this file or directory, named as gnarl prints
     \\                    paths: relative to the current directory. May be
@@ -110,7 +111,8 @@ pub fn main(init: std.process.Init) !u8 {
         for (try functions.list(file_arena.allocator(), &tree)) |function| {
             const cc = try cyclomatic.count(file_arena.allocator(), &tree, function.node);
             const lloc = try lines.count(file_arena.allocator(), &tree, function.node);
-            try out.print("{s}:{d}: {s} cyclomatic={d} lines={d}\n", .{ path, function.line, function.name, cc, lloc });
+            const depth = try nesting.depth(file_arena.allocator(), &tree, function.node);
+            try out.print("{s}:{d}: {s} cyclomatic={d} lines={d} nesting={d}\n", .{ path, function.line, function.name, cc, lloc, depth });
         }
     }
     try out.flush();
@@ -205,13 +207,13 @@ test "lists each file's functions, files in path order" {
     try expectRun(tmp.dir, &.{"src"}, 0,
         \\src
     ++ sep ++
-        \\a.zig:1: f cyclomatic=1 lines=1
+        \\a.zig:1: f cyclomatic=1 lines=1 nesting=0
         \\src
     ++ sep ++
-        \\a.zig:2: test "f" cyclomatic=1 lines=1
+        \\a.zig:2: test "f" cyclomatic=1 lines=1 nesting=0
         \\src
     ++ sep ++
-        \\b.zig:2: S.m cyclomatic=2 lines=2
+        \\b.zig:2: S.m cyclomatic=2 lines=2 nesting=1
         \\
     , "");
 }
@@ -223,7 +225,7 @@ test "a file that does not parse is reported and the rest still listed" {
     try tmp.dir.writeFile(io, .{ .sub_path = "bad.zig", .data = "fn f( {}\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "good.zig", .data = "fn g() void {}\n" });
 
-    try expectRun(tmp.dir, &.{"."}, 2, "good.zig:1: g cyclomatic=1 lines=1\n", "gnarl: bad.zig:1:7: expected type expression, found '{'\n");
+    try expectRun(tmp.dir, &.{"."}, 2, "good.zig:1: g cyclomatic=1 lines=1 nesting=0\n", "gnarl: bad.zig:1:7: expected type expression, found '{'\n");
 }
 
 test "a path that is missing or holds no .zig file is an error" {
@@ -235,7 +237,7 @@ test "a path that is missing or holds no .zig file is an error" {
     try tmp.dir.writeFile(io, .{ .sub_path = "gen/a.zig", .data = "fn a() void {}\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "b.zig", .data = "fn b() void {}\n" });
 
-    try expectRun(tmp.dir, &.{ "nope", "empty", "gen", "--exclude", "gen/a.zig", "b.zig" }, 2, "b.zig:1: b cyclomatic=1 lines=1\n",
+    try expectRun(tmp.dir, &.{ "nope", "empty", "gen", "--exclude", "gen/a.zig", "b.zig" }, 2, "b.zig:1: b cyclomatic=1 lines=1 nesting=0\n",
         \\gnarl: nope: FileNotFound
         \\gnarl: empty: no .zig file to read (hidden files and directories, zig-out, zig-pkg and excluded paths are skipped)
         \\gnarl: gen: no .zig file to read (hidden files and directories, zig-out, zig-pkg and excluded paths are skipped)
@@ -286,5 +288,6 @@ test {
     _ = @import("cyclomatic.zig");
     _ = @import("functions.zig");
     _ = @import("lines.zig");
+    _ = @import("nesting.zig");
     _ = @import("walk.zig");
 }
