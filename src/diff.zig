@@ -179,15 +179,16 @@ test "dropGlobbed: what a glob covers below the path named, not the path named" 
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    // Cleaned, as changedFiles cleans what git lists: `\` on Windows.
     const all = [_]File{
-        .{ .path = "src/a.zig", .git_path = "src/a.zig", .status = .modified },
-        .{ .path = "test/golden/f.zig", .git_path = "test/golden/f.zig", .status = .modified },
+        .{ .path = try std.fs.path.resolveAlloc(arena, &.{"src/a.zig"}), .git_path = "src/a.zig", .status = .modified },
+        .{ .path = try std.fs.path.resolveAlloc(arena, &.{"test/golden/f.zig"}), .git_path = "test/golden/f.zig", .status = .modified },
     };
     var files: std.ArrayList(File) = .empty;
     try files.appendSlice(arena, &all);
     try dropGlobbed(arena, &files, &.{"."}, &.{"test/golden"});
     try std.testing.expectEqual(1, files.items.len);
-    try std.testing.expectEqualStrings("src/a.zig", files.items[0].path);
+    try std.testing.expectEqualStrings("src/a.zig", files.items[0].git_path);
 
     files.clearRetainingCapacity();
     try files.appendSlice(arena, &all);
