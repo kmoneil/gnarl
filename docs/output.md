@@ -44,7 +44,7 @@ names, and elements for what is a list or an object in json.
   - `gone`: how many baselined functions of a file read are no longer
     there: renamed, moved or deleted.
 - `thresholds`: the limits in force, by class of code:
-  - `hot`, `normal`, `cold`: each class's limits, by metric:
+  - `hot`, `normal`, `cold`, `tests`: each class's limits, by metric:
     - `cyclomatic`, `cognitive`, `lines`, `nesting`, `params`,
       `params_weighted`: each metric's limits:
       - `warning`: over this is a warning; null for none.
@@ -65,7 +65,8 @@ names, and elements for what is a list or an object in json.
   - `column`: the column of its name, from 1, in bytes.
   - `name`: its qualified name, as `Validator.record`.
   - `kind`: `fn` or `test`.
-  - `class`: `hot`, `normal` or `cold`.
+  - `class`: `hot`, `normal` or `cold`, by its file; `tests` for a test
+    block, whatever its file.
   - `cyclomatic`: its cyclomatic complexity.
   - `cognitive`: its cognitive complexity, by the rules in
     docs/cognitive.md.

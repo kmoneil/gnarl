@@ -48,6 +48,7 @@ const usage =
     \\The thresholds depend on the class of code a file is in, hot, normal
     \\or cold, which complexity.zon in the current directory gives by globs,
     \\with any thresholds of its own. With no such file every file is normal.
+    \\A test block is held to the tests class's thresholds whatever its file.
     \\Its .exclude globs leave out what they match, as what git ignores is:
     \\not read under a directory named, read when named outright.
     \\
@@ -217,12 +218,12 @@ pub fn main(init: std.process.Init) !u8 {
         measured += 1;
         const class = settings.classOf(path);
         if (search) |*s| {
-            try s.file(arena, file_arena.allocator(), path, &tree, class, settings.classes.get(class));
+            try s.file(arena, file_arena.allocator(), path, &tree, class, settings.classes);
             continue;
         }
         const first = rows.items.len;
         try measure.file(arena, file_arena.allocator(), path, &tree, &rows);
-        for (rows.items[first..]) |*row| row.class = class;
+        for (rows.items[first..]) |*row| row.class = .forFunction(class, row.kind == .@"test");
     }
     if (search) |s| {
         const found = try s.results(arena, &said);
@@ -331,7 +332,7 @@ fn runDiff(
             }
         }
         const class = settings.classOf(file.path);
-        try diff.compareFile(arena, scratch, file.path, if (before) |*t| t else null, if (after) |*t| t else null, class, settings.classes.get(class), &touched);
+        try diff.compareFile(arena, scratch, file.path, if (before) |*t| t else null, if (after) |*t| t else null, class, settings.classes, &touched);
     }
     diff.sort(touched.items);
     const status: u8 = if (said.errors() > 0) 2 else 0;
@@ -682,7 +683,10 @@ test "a row per function, worst first, from every file read" {
         \\
         \\3 functions in 3 files: 0 over a critical threshold (!!), 0 more over a warning one (!).
         \\
-    ++ thresholds_line, "");
+    ++ thresholds_line ++
+        \\Thresholds for test code (warning, critical): cyclomatic -, 20; cognitive -, 35.
+        \\
+    , "");
 }
 
 test "in a git work tree, what git ignores is not read; --no-ignore reads it" {
@@ -995,6 +999,17 @@ test "--check fails on a critical threshold, by the class complexity.zon gives t
         defer gpa.free(result.stderr);
         try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
     }
+    // A test block is held as a test, not as hot code: thirteen ifs are
+    // within its limits.
+    try tmp.dir.writeFile(io, .{ .sub_path = "hot.zig", .data = "test \"t\" {\n" ++ thirteen["fn f(c: bool) void {\n".len..] });
+    {
+        const result = try runGnarl(tmp.dir, &.{ "--check", "--json", "hot.zig" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "\"within_limits\":1") != null);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "hot.zig", .data = thirteen });
     // Excluded, hot.zig is not read under `.`, and is when named.
     try tmp.dir.writeFile(io, .{ .sub_path = "complexity.zon", .data = ".{ .hot = .{\"hot.zig\"}, .exclude = .{\"hot.zig\"} }\n" });
     {

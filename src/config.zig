@@ -8,6 +8,7 @@
 //!         .thresholds = .{
 //!             .hot = .{ .cyclomatic = .{ .warning = 6, .critical = 10 } },
 //!             .normal = .{ .params_weighted = .{ .warning = 6 } },
+//!             .tests = .{ .lines = .{ .warning = 150 } },
 //!         },
 //!     }
 //!
@@ -15,7 +16,8 @@
 //! against paths as gnarl prints them, relative to the current directory.
 //! A path both a hot and a cold glob match is hot; one no glob matches is
 //! normal. A metric named under a class replaces both its limits there; a
-//! metric not named keeps the class's default. What an `.exclude` glob
+//! metric not named keeps the class's default. Test blocks are held to
+//! `.tests`, whatever their file's class. What an `.exclude` glob
 //! matches, or what is inside it, is not read when gnarl walks a directory
 //! above it, as what git ignores is not; named outright, it is read.
 
@@ -54,6 +56,7 @@ const File = struct {
         hot: Overrides = .{},
         normal: Overrides = .{},
         cold: Overrides = .{},
+        tests: Overrides = .{},
     } = .{},
 };
 

@@ -61,9 +61,13 @@ fn build(
     index: LineIndex,
     path: []const u8,
     function: functions.Function,
-    class: Class,
-    limits: Thresholds,
+    /// The file's; the function is held to its own, as
+    /// `Class.forFunction` gives it.
+    file_class: Class,
+    classes: thresholds.Classes,
 ) Allocator.Error!Explanation {
+    const class: Class = .forFunction(file_class, function.kind == .@"test");
+    const limits = classes.get(class);
     var raw_branches: std.ArrayList(cyclomatic.Branch) = .empty;
     const cc = try cyclomatic.explain(scratch, tree, function.node, &raw_branches);
     const branches = try arena.alloc(Branch, raw_branches.items.len);
@@ -178,7 +182,9 @@ pub const Search = struct {
 
     /// Explains each function in `tree`, read from `path`, that a selector
     /// names.
-    pub fn file(s: *Search, arena: Allocator, scratch: Allocator, path: []const u8, tree: *const Ast, class: Class, limits: Thresholds) Allocator.Error!void {
+    /// `class` is the file's; each function is held to its own, as
+    /// `Class.forFunction` gives it.
+    pub fn file(s: *Search, arena: Allocator, scratch: Allocator, path: []const u8, tree: *const Ast, class: Class, classes: thresholds.Classes) Allocator.Error!void {
         const listed = try functions.list(scratch, tree);
         var index: ?LineIndex = null;
         for (s.selectors, s.found) |selector, *found| switch (selector) {
@@ -190,7 +196,7 @@ pub const Search = struct {
                 var around_span: u32 = std.math.maxInt(u32);
                 for (listed) |function| {
                     if (function.line == at.line) {
-                        try found.exact.append(arena, try build(arena, scratch, tree, index.?, path, function, class, limits));
+                        try found.exact.append(arena, try build(arena, scratch, tree, index.?, path, function, class, classes));
                         break;
                     }
                     const first = index.?.ofToken(tree, tree.firstToken(function.node)).line;
@@ -200,14 +206,14 @@ pub const Search = struct {
                         around_span = last - first;
                     }
                 } else if (around) |function| {
-                    try found.partial.append(arena, try build(arena, scratch, tree, index.?, path, function, class, limits));
+                    try found.partial.append(arena, try build(arena, scratch, tree, index.?, path, function, class, classes));
                 }
             },
             .name => |name| for (listed) |function| {
                 const match = select.matchName(function.name, name);
                 if (match == .none) continue;
                 if (index == null) index = try LineIndex.init(scratch, tree.source);
-                const e = try build(arena, scratch, tree, index.?, path, function, class, limits);
+                const e = try build(arena, scratch, tree, index.?, path, function, class, classes);
                 try (if (match == .exact) &found.exact else &found.partial).append(arena, e);
             },
         };
@@ -469,7 +475,7 @@ const Widths = struct {
 };
 
 fn writeText(w: *Writer, e: Explanation) Writer.Error!void {
-    try w.print("{s}:{d}  {s}  ({t} code)\n\n", .{ e.path, e.line, e.name, e.class });
+    try w.print("{s}:{d}  {s}  ({s})\n\n", .{ e.path, e.line, e.name, e.class.text() });
     const ws: Widths = .of(e);
 
     try w.print("cyclomatic {d}", .{e.cyclomatic.value});
@@ -580,7 +586,7 @@ fn writeAt(w: *Writer, line: u32, column: u32, width: usize) Writer.Error!void {
 }
 
 fn writeMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
-    try w.print("### `{s}` at `{s}:{d}` ({t} code)\n\n", .{ e.name, e.path, e.line, e.class });
+    try w.print("### `{s}` at `{s}:{d}` ({s})\n\n", .{ e.name, e.path, e.line, e.class.text() });
 
     try w.print("**cyclomatic {d}**", .{e.cyclomatic.value});
     try writeOver(w, e, .cyclomatic);
@@ -657,7 +663,7 @@ fn explainSample(arena: Allocator, texts: []const []const u8) !struct { explanat
     var tree = try Ast.parse(gpa, sample, .{});
     defer tree.deinit(gpa);
     var search: Search = try .init(arena, texts);
-    try search.file(arena, arena, "a.zig", &tree, .normal, thresholds.Classes.defaults.normal);
+    try search.file(arena, arena, "a.zig", &tree, .normal, .defaults);
     var said: Messages = .{ .arena = arena, .echo = false };
     const r = try search.results(arena, &said);
     return .{ .explanations = r.explanations, .all_found = r.all_found };
@@ -846,7 +852,7 @@ test "every golden fixture function: the explanation agrees with its golden row"
         try measure.file(arena, arena, entry.name, &tree, &rows);
         const index = try LineIndex.init(arena, tree.source);
         for (try functions.list(arena, &tree), rows.items) |function, row| {
-            const e = try build(arena, arena, &tree, index, entry.name, function, .normal, .{});
+            const e = try build(arena, arena, &tree, index, entry.name, function, .normal, .defaults);
             try std.testing.expectEqual(row.cyclomatic, e.cyclomatic.value);
             try std.testing.expectEqual(row.cognitive, e.cognitive.value);
             var cost: u32 = 0;

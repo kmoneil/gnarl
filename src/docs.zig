@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 const explain = @import("explain.zig");
 const messages = @import("messages.zig");
 const report = @import("report.zig");
+const thresholds = @import("thresholds.zig");
 
 const doc_path = "docs/output.md";
 
@@ -136,7 +137,9 @@ test "docs/output.md lists every field of an explanation, and no other" {
     var tree = try Ast.parse(std.testing.allocator, source, .{});
     defer tree.deinit(std.testing.allocator);
     var search: explain.Search = try .init(arena, &.{"f"});
-    try search.file(arena, arena, "a.zig", &tree, .normal, .{ .cyclomatic = .{ .warning = 1 } });
+    var classes: thresholds.Classes = .defaults;
+    classes.normal = .{ .cyclomatic = .{ .warning = 1 } };
+    try search.file(arena, arena, "a.zig", &tree, .normal, classes);
     var quiet: messages.Messages = .{ .arena = arena, .echo = false };
     const found = try search.results(arena, &quiet);
     var out: std.Io.Writer.Allocating = .init(arena);

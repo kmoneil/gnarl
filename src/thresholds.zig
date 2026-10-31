@@ -41,13 +41,36 @@ pub const Thresholds = struct {
 
 /// How strictly code is held: hot code is on a path that runs often or
 /// matters most, cold code is build scripts, tools and the like. Which
-/// paths are which is configuration, never guessed.
-pub const Class = enum { hot, normal, cold };
+/// paths are which is configuration, never guessed. A test block is held
+/// as `tests` whatever its file's class: Zig keeps tests in the files
+/// they test, so no path tells them apart.
+pub const Class = enum {
+    hot,
+    normal,
+    cold,
+    tests,
+
+    /// The class a function is held to, in a file of class `file`.
+    pub fn forFunction(file: Class, is_test: bool) Class {
+        return if (is_test) .tests else file;
+    }
+
+    /// As a report says it: `hot code`, `test code`.
+    pub fn text(class: Class) []const u8 {
+        return switch (class) {
+            .hot => "hot code",
+            .normal => "normal code",
+            .cold => "cold code",
+            .tests => "test code",
+        };
+    }
+};
 
 pub const Classes = struct {
     hot: Thresholds,
     normal: Thresholds,
     cold: Thresholds,
+    tests: Thresholds,
 
     pub const defaults: Classes = .{
         .hot = .{
@@ -66,6 +89,12 @@ pub const Classes = struct {
         },
         // Only what is far past any class's limits.
         .cold = .{
+            .cyclomatic = .{ .critical = 20 },
+            .cognitive = .{ .critical = 35 },
+        },
+        // As cold: a long test is usually a table of cases, and only a
+        // test with real logic in it is worth a look.
+        .tests = .{
             .cyclomatic = .{ .critical = 20 },
             .cognitive = .{ .critical = 35 },
         },
@@ -116,4 +145,13 @@ test "the classes: hot is stricter than normal, cold only past 20 (cognitive 35)
     try std.testing.expectEqual(.critical, c.get(.normal).over(.cognitive, 26).?.level);
     try std.testing.expectEqual(null, c.get(.cold).over(.cognitive, 35));
     try std.testing.expectEqual(.critical, c.get(.cold).over(.cognitive, 36).?.level);
+}
+
+test "a test block is held as tests whatever its file's class; tests only past cold's limits" {
+    try std.testing.expectEqual(Class.tests, Class.forFunction(.hot, true));
+    try std.testing.expectEqual(Class.hot, Class.forFunction(.hot, false));
+    const t = Classes.defaults.get(.tests);
+    try std.testing.expectEqual(null, t.over(.lines, 500));
+    try std.testing.expectEqual(null, t.over(.cognitive, 35));
+    try std.testing.expectEqual(.critical, t.over(.cyclomatic, 21).?.level);
 }

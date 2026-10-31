@@ -191,6 +191,7 @@ every file is normal. Default limits, warning then critical:
 | hot | 8, 12 | 10, 15 | 40, 80 | 3 | 4 |
 | normal | 10, 15 | 15, 25 | 50, 100 | 4 | 4 |
 | cold | critical 20 | critical 35 | | | |
+| tests | critical 20 | critical 35 | | | |
 
 ```zig
 .{
@@ -202,6 +203,9 @@ every file is normal. Default limits, warning then critical:
 
 `*` matches within a path segment, `**` across them, `?` one character.
 A metric named under a class replaces both its limits there.
+A test block is held to `tests` whatever its file's class: Zig keeps
+tests beside the code, so no glob can tell them apart, and a long test
+is usually a table of cases. `.thresholds.tests` changes its limits.
 `.exclude = .{ "test/fixtures" }` leaves out what a glob matches, or
 what is inside it, as what git ignores is: not read under a directory
 named, read when named outright.

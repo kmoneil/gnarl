@@ -460,7 +460,7 @@ fn plural(n: usize) []const u8 {
 /// `Thresholds for normal code (warning, critical): cyclomatic 10, 15;
 /// ...`, with no line end.
 pub fn writeThresholds(w: *Writer, classes: Classes, class: Class) Writer.Error!void {
-    try w.print("Thresholds for {t} code (warning, critical):", .{class});
+    try w.print("Thresholds for {s} (warning, critical):", .{class.text()});
     const limits = classes.get(class);
     var first = true;
     for (std.enums.values(Metric)) |metric| {
@@ -732,7 +732,7 @@ test "write: xml says what json does, and reads back" {
     try std.testing.expectEqualStrings("2", doc.child("not_listed").?.get("within_limits").?);
     try std.testing.expectEqualStrings("true", doc.child("check").?.get("failed").?);
     try std.testing.expectEqualStrings("15", doc.child("check").?.children[0].get("limit").?);
-    try std.testing.expectEqual(3, doc.child("thresholds").?.children.len);
+    try std.testing.expectEqual(4, doc.child("thresholds").?.children.len);
     try std.testing.expectEqualStrings("3", doc.child("errors").?.children[0].get("line").?);
     try std.testing.expectEqualStrings("a.zig:1  f", doc.child("notes").?.children[0].children[0].get("text").?);
     const listed = doc.child("functions").?.children;

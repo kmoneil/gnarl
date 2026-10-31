@@ -265,8 +265,10 @@ pub fn compareFile(
     path: []const u8,
     before: ?*const Ast,
     after: ?*const Ast,
-    class: Class,
-    limits: Thresholds,
+    /// The file's; each function is held to its own, as
+    /// `Class.forFunction` gives it.
+    file_class: Class,
+    classes: thresholds.Classes,
     out: *std.ArrayList(Touched),
 ) Allocator.Error!void {
     const old: Side = if (before) |t| try side(arena, scratch, path, t) else .{};
@@ -286,12 +288,13 @@ pub fn compareFile(
             was = Values.of(old.rows[i]);
             change = compare(was.?, now);
         }
+        const class: Class = .forFunction(file_class, row.kind == .@"test");
         var trips: std.ArrayList(Trip) = .empty;
-        for (metrics) |m| if (limits.over(m, now.get(m))) |trip| try trips.append(arena, trip);
+        for (metrics) |m| if (classes.get(class).over(m, now.get(m))) |trip| try trips.append(arena, trip);
         try out.append(arena, .{ .path = path, .line = row.line, .name = row.name, .kind = row.kind, .class = class, .change = change, .before = was, .after = now, .trips = trips.items });
     }
     for (old.rows, matched) |row, m| if (!m) {
-        try out.append(arena, .{ .path = path, .line = row.line, .name = row.name, .kind = row.kind, .class = class, .change = .removed, .before = Values.of(row), .after = null, .trips = &.{} });
+        try out.append(arena, .{ .path = path, .line = row.line, .name = row.name, .kind = row.kind, .class = .forFunction(file_class, row.kind == .@"test"), .change = .removed, .before = Values.of(row), .after = null, .trips = &.{} });
     };
 }
 
@@ -611,7 +614,7 @@ test "compareFile: worse, added, the same, better, removed; moved or nested-only
     );
     defer new.deinit(gpa);
     var touched: std.ArrayList(Touched) = .empty;
-    try compareFile(arena, arena, "a.zig", &old, &new, .normal, Classes.defaults.normal, &touched);
+    try compareFile(arena, arena, "a.zig", &old, &new, .normal, Classes.defaults, &touched);
     sort(touched.items);
     var got: std.ArrayList(u8) = .empty;
     for (touched.items) |t| try got.print(arena, "{t} {s} {d}\n", .{ t.change, t.name, t.line });
