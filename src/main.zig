@@ -21,7 +21,9 @@ const Class = @import("thresholds.zig").Class;
 const Classes = @import("thresholds.zig").Classes;
 const walk = @import("walk.zig");
 
-const usage =
+/// The command lines gnarl takes: how --help begins, and all a usage
+/// error, or gnarl run with nothing, prints of it.
+const synopsis =
     \\Usage: gnarl [--exclude <path>]... [--config <file>] [--check]
     \\             [--baseline <file>] [--update-baseline]
     \\             [--all] [--top <n>] [--function <function>]... [--no-ignore]
@@ -31,6 +33,15 @@ const usage =
     \\       gnarl --files [--top <n>] <path>...
     \\       gnarl skill [--install <dir>]
     \\       gnarl --version | --help
+    \\
+;
+
+/// What a usage error prints after saying why: a line that matters should
+/// not be the first of a hundred.
+const synopsis_and_more = synopsis ++ "\ngnarl --help says more.\n";
+
+/// What --help prints.
+const usage = synopsis ++
     \\
     \\Measures every function and test block in each file named, and in
     \\every .zig file under each directory named (. for the current
@@ -44,7 +55,8 @@ const usage =
     \\skipped, and in a git work tree what git ignores, unless the file or
     \\directory is named outright.
     \\
-    \\gnarl reads only the paths it is given; with none, it prints this.
+    \\gnarl reads only the paths it is given; with none, it prints the
+    \\usage above and exits 2.
     \\Two need no path: a function named as path:line, which reads its own
     \\file, and --diff, which reads the files git says changed, in the
     \\whole work tree when no path is given.
@@ -172,7 +184,7 @@ fn answer(arena: std.mem.Allocator, io: Io, stdout_writer: *Io.File.Writer, comm
         } else try out.writeAll(skill.text),
         .usage_error => |message| {
             if (message.len > 0) std.debug.print("gnarl: {s}\n\n", .{message});
-            std.debug.print("{s}", .{usage});
+            std.debug.print("{s}", .{synopsis_and_more});
             return 2;
         },
     }
@@ -1383,10 +1395,10 @@ test "--version, --help and usage errors" {
     // Nothing at all: the usage, on stderr, and nothing read, wherever it
     // is run.
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.zig", .data = "fn a() void {}\n" });
-    try expectRun(tmp.dir, &.{}, 2, "", usage);
-    // Options with no path: why, and the usage.
-    try expectRun(tmp.dir, &.{"--check"}, 2, "", "gnarl: " ++ no_path ++ "\n\n" ++ usage);
-    try expectRun(tmp.dir, &.{ "--explain", "a" }, 2, "", "gnarl: " ++ no_path ++ "\n\n" ++ usage);
+    try expectRun(tmp.dir, &.{}, 2, "", synopsis_and_more);
+    // Options with no path: why, and the usage, not the whole --help.
+    try expectRun(tmp.dir, &.{"--check"}, 2, "", "gnarl: " ++ no_path ++ "\n\n" ++ synopsis_and_more);
+    try expectRun(tmp.dir, &.{ "--explain", "a" }, 2, "", "gnarl: " ++ no_path ++ "\n\n" ++ synopsis_and_more);
     // . is the current directory, named.
     try expectRun(tmp.dir, &.{ "--all", "." }, 0,
         \\cyclomatic  cognitive  lines  nesting  params  weighted  location  function
@@ -1395,7 +1407,11 @@ test "--version, --help and usage errors" {
         \\1 function in 1 file: 0 over a critical threshold (!!), 0 more over a warning one (!).
         \\
     ++ thresholds_line, "");
-    try expectRun(tmp.dir, &.{ "src", "--frobnicate" }, 2, "", "gnarl: unknown option '--frobnicate'\n\n" ++ usage);
+    try expectRun(tmp.dir, &.{ "src", "--frobnicate" }, 2, "", "gnarl: unknown option '--frobnicate'\n\n" ++ synopsis_and_more);
+    try expectRun(tmp.dir, &.{ "--top", "0", "src" }, 2, "", "gnarl: --top takes how many functions to list, 1 or more, not '0'\n\n" ++ synopsis_and_more);
+    // --help is all of it, and begins with the same lines.
+    try std.testing.expect(std.mem.startsWith(u8, usage, synopsis));
+    try std.testing.expect(std.mem.count(u8, synopsis_and_more, "\n") < 15);
 }
 
 test "parseArgs: paths and excludes, in any order" {
