@@ -22,7 +22,9 @@ as often as it helps.
    lists each construct counted and where (for cognitive complexity, how
    much of each cost is its depth), the regions of the body (the
    signature and each statement, what each adds, so the costliest
-   stand out), the deepest nesting chain, how
+   stand out; one that holds most of the cost is opened into its
+   parts, a switch's prongs, a loop's statements), the deepest nesting
+   chain, how
    the lines divide, and each parameter: aim the refactor at those lines.
    `gnarl --explain path:A-B` says what lines A to B cost and about what
    moving them into a function of their own would leave, before you do.

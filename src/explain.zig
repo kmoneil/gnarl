@@ -90,6 +90,9 @@ pub const Region = struct {
     nesting: u32,
     /// Its first line, as written.
     text: []const u8,
+    /// 0 for the signature and the body's statements; 1 for the parts of
+    /// a statement that alone added anything, opened; and so on.
+    level: u32,
 };
 
 pub const Range = struct {
@@ -123,6 +126,7 @@ fn regionsOf(arena: Allocator, scratch: Allocator, tree: *const Ast, index: Line
         .cognitive = r.sum.cognitive,
         .lines = r.sum.lines,
         .nesting = r.sum.nesting,
+        .level = r.level,
         .text = try arena.dupe(u8, lineText(tree.source, tree.tokenStart(r.first))),
     };
     return out;
@@ -672,7 +676,7 @@ const RegionRows = struct {
         var row = it.all[it.i];
         it.i += 1;
         if (!idle(row)) return row;
-        while (it.i < it.all.len and idle(it.all[it.i])) : (it.i += 1) {
+        while (it.i < it.all.len and idle(it.all[it.i]) and it.all[it.i].level == row.level) : (it.i += 1) {
             const more = it.all[it.i];
             row.last_line = more.last_line;
             row.statements += more.statements;
@@ -708,11 +712,33 @@ fn shortText(text: []const u8) struct { []const u8, []const u8 } {
     return .{ text[0..cut], "..." };
 }
 
-fn writeRegionsText(w: *Writer, all: []const Region) Writer.Error!void {
-    if (!RegionRows.worthListing(all)) return;
+/// What the regions header says: whether a statement was opened.
+fn regionsHeading(all: []const Region) []const u8 {
+    for (all) |r| if (r.level > 0) return "the signature and the body's statements, one that held most of the cost opened into its parts (indented); what each adds";
+    return "the signature and the body's statements, what each adds";
+}
+
+/// When there is nothing to compare, for a function over a limit: where
+/// all of its cost is.
+fn writeLoneRegion(w: *Writer, e: Explanation, format: enum { text, md }) Writer.Error!void {
+    if (e.trips.len == 0) return;
+    const r = for (e.regions) |r| {
+        if (r.cyclomatic > 0 or r.cognitive > 0) break r;
+    } else return;
     var buffer: [24]u8 = undefined;
-    const width = @max("lines".len, lineSpan(&buffer, .{ .first_line = all[all.len - 1].last_line, .last_line = all[all.len - 1].last_line + 1, .statements = 0, .cyclomatic = 0, .cognitive = 0, .lines = 0, .nesting = 0, .text = "" }).len);
-    try w.writeAll("regions: the signature and the body's statements, what each adds\n  lines");
+    const at = lineSpan(&buffer, r);
+    switch (format) {
+        .text => try w.print("regions: all of it is in lines {s}, which open no further; --explain {s}:A-B says what a range inside them costs\n", .{ at, e.path }),
+        .md => try w.print("\n**regions**: all of it is in lines {s}, which open no further; `--explain {s}:A-B` says what a range inside them costs.\n", .{ at, e.path }),
+    }
+}
+
+fn writeRegionsText(w: *Writer, e: Explanation) Writer.Error!void {
+    const all = e.regions;
+    if (!RegionRows.worthListing(all)) return writeLoneRegion(w, e, .text);
+    var buffer: [24]u8 = undefined;
+    const width = @max("lines".len, lineSpan(&buffer, .{ .first_line = all[all.len - 1].last_line, .last_line = all[all.len - 1].last_line + 1, .statements = 0, .cyclomatic = 0, .cognitive = 0, .lines = 0, .nesting = 0, .text = "", .level = 0 }).len);
+    try w.print("regions: {s}\n  lines", .{regionsHeading(all)});
     try w.splatByteAll(' ', width - "lines".len + 2);
     try w.writeAll("cyclomatic  cognitive  logical  deepest\n");
     var rows: RegionRows = .{ .all = all };
@@ -725,6 +751,7 @@ fn writeRegionsText(w: *Writer, all: []const Region) Writer.Error!void {
         try writePadded(w, "{d}", r.lines, "logical".len + 2);
         try writePadded(w, "{d}", r.nesting, "deepest".len + 2);
         const text, const more = shortText(r.text);
+        try w.splatByteAll(' ', 2 * r.level);
         try w.print("{s}{s}", .{ text, more });
         if (r.statements > 1) try w.print("  ({d} statements)", .{r.statements});
         try w.writeByte('\n');
@@ -736,14 +763,15 @@ fn writePadded(w: *Writer, comptime format: []const u8, n: u32, width: usize) Wr
     try w.splatByteAll(' ', width -| std.fmt.count(format, .{n}));
 }
 
-fn writeRegionsMarkdown(w: *Writer, all: []const Region) Writer.Error!void {
-    if (!RegionRows.worthListing(all)) return;
-    try w.writeAll("\n**regions**: the signature and the body's statements, what each adds.\n\n| lines | cyclomatic | cognitive | logical | deepest | starts |\n| --- | ---: | ---: | ---: | ---: | --- |\n");
+fn writeRegionsMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
+    const all = e.regions;
+    if (!RegionRows.worthListing(all)) return writeLoneRegion(w, e, .md);
+    try w.print("\n**regions**: {s}.\n\n| lines | level | cyclomatic | cognitive | logical | deepest | starts |\n| --- | ---: | ---: | ---: | ---: | ---: | --- |\n", .{regionsHeading(all)});
     var buffer: [24]u8 = undefined;
     var rows: RegionRows = .{ .all = all };
     while (rows.next()) |r| {
         const text, const more = shortText(r.text);
-        try w.print("| {s} | {d} | {d} | {d} | {d} | `{s}{s}`", .{ lineSpan(&buffer, r), r.cyclomatic, r.cognitive, r.lines, r.nesting, text, more });
+        try w.print("| {s} | {d} | {d} | {d} | {d} | {d} | `{s}{s}`", .{ lineSpan(&buffer, r), r.level, r.cyclomatic, r.cognitive, r.lines, r.nesting, text, more });
         if (r.statements > 1) try w.print(" ({d} statements)", .{r.statements});
         try w.writeAll(" |\n");
     }
@@ -873,7 +901,7 @@ fn writeText(w: *Writer, e: Explanation) Writer.Error!void {
         try w.writeByte('\n');
     }
     try writeTallyText(w, e);
-    try writeRegionsText(w, e.regions);
+    try writeRegionsText(w, e);
 }
 
 fn writeCognitiveText(w: *Writer, e: Explanation, ws: Widths) Writer.Error!void {
@@ -977,7 +1005,7 @@ fn writeMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
         for (e.params.each) |p| try w.print("| `{s}` | `{s}` | {d} | {s} |\n", .{ p.name, p.type, p.weight, p.why });
     }
     try writeTallyMarkdown(w, e);
-    try writeRegionsMarkdown(w, e.regions);
+    try writeRegionsMarkdown(w, e);
 }
 
 fn writeCognitiveMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
@@ -1085,6 +1113,13 @@ test "write: text" {
         \\  x    u8         1
         \\comptime: 0 constructs counted
         \\  unknown from the source: the members of its inferred error set
+        \\regions: the signature and the body's statements, one that held most of the cost opened into its parts (indented); what each adds
+        \\  lines  cyclomatic  cognitive  logical  deepest
+        \\  2      +0          +0         1        0        fn pick(s: *S, gpa: Allocator, x: u8) !u8 {
+        \\  3      +2          +2         1        1        if (x > 3 and x < 9) {
+        \\  4      +1          +2         1        2          for (s.items) |item| {
+        \\  6      +1          +4         1        3            if (item > x) return item;
+        \\  9      +0          +0         1        0        return try s.fallback(gpa);
         \\
     , out.written());
 }
@@ -1273,7 +1308,7 @@ test "every golden fixture function: the explanation agrees with its golden row"
             for (e.cognitive.costs) |c| cost += c.adds;
             try std.testing.expectEqual(e.cognitive.value, cost);
             // The regions add up to the totals.
-            var regions_sum: Region = .{ .first_line = 0, .last_line = 0, .statements = 0, .cyclomatic = 1, .cognitive = 0, .lines = 0, .nesting = 0, .text = "" };
+            var regions_sum: Region = .{ .first_line = 0, .last_line = 0, .statements = 0, .cyclomatic = 1, .cognitive = 0, .lines = 0, .nesting = 0, .text = "", .level = 0 };
             for (e.regions) |r| {
                 regions_sum.cyclomatic += r.cyclomatic;
                 regions_sum.cognitive += r.cognitive;

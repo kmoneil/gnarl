@@ -153,13 +153,20 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
   - `regions`: where the numbers come from: the signature, then each
     statement of the body, each construct, logical line and level in the
     region that holds it, so the regions add up to the totals
-    (cyclomatic's base 1 aside):
+    (cyclomatic's base 1 aside). A region that holds three quarters or
+    more of the cost (cognitive, or cyclomatic when there is none) is
+    opened in its place, and so on down: its head (what of it no part
+    holds: its keyword, its condition, an `else`), then its parts, a
+    switch's prongs, an `if`'s branches, a loop body's statements, a
+    level deeper:
     - `first_line`, `last_line`: the lines it spans.
     - `statements`: how many of the body's statements it is; 0 for the
       signature.
     - `cyclomatic`, `cognitive`, `lines`: what it adds to each.
     - `nesting`: the deepest level a construct in it opens; 0 for none.
     - `text`: its first line, as written.
+    - `level`: 0 for the signature and the body's statements, 1 for the
+      parts of one opened, and so on.
   - `range`: for a function named as `path:A-B`, what lines A to B cost;
     null otherwise:
     - `first_line`, `last_line`: A and B.
