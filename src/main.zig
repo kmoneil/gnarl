@@ -84,8 +84,9 @@ const usage =
     \\  --diff <ref>      Rather than report, list each function the change
     \\                    from the commit <ref> to the work tree touched,
     \\                    uncommitted edits and new files included, with its
-    \\                    numbers before and after: worse first, then added,
-    \\                    the same, better and removed.
+    \\                    numbers before and after: worse first, then mixed
+    \\                    (some up, some down), added, the same, better and
+    \\                    removed.
     \\  --format <format> text (the default, a table); md (a Markdown table,
     \\                    for a review); json or xml (every field and all
     \\                    that stderr says, versioned); csv or tsv (a header,
@@ -862,7 +863,7 @@ test "--diff: the functions a change touched, before and after, worse first" {
         \\removed  1           0          1       0        0       0         a.zig:5   dropped
         \\removed  1           0          1       0        0       0         b.zig:1   gone
         \\
-        \\6 functions touched in 3 files since HEAD: 1 worse, 2 added, 1 the same, 0 better, 2 removed.
+        \\6 functions touched in 3 files since HEAD: 1 worse, 0 mixed, 2 added, 1 the same, 0 better, 2 removed.
         \\gnarl --explain a.zig:1 says why grows, the worst of those that got worse, scores what it does now.
         \\
     ++ thresholds_line, "");

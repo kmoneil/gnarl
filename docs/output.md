@@ -142,13 +142,14 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
 - `ref`: the commit the work tree was compared with.
 - `files`: how many files the change touched.
 - `changes`: how many functions each change came to:
-  - `worse`: a number went up.
+  - `worse`: a number went up, none down.
+  - `mixed`: some numbers went up and some down.
   - `added`: new since the commit.
   - `same`: the text changed, the numbers did not.
   - `better`: a number went down, none up.
   - `removed`: gone since the commit.
 - `functions`: each function the change touched, worse first, then
-  added, the same, better and removed:
+  mixed, added, the same, better and removed:
   - `path`, `name`, `kind`, `class`, `trips`: as in the report's
     `functions`; `trips` are those of its numbers after the change.
   - `line`: where it is now; for a removed function, where it was.

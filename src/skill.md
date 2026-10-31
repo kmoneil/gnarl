@@ -24,9 +24,11 @@ as often as it helps.
    the lines divide, and each parameter: aim the refactor at those lines.
 3. Change the code, then `gnarl --diff HEAD` lists each function the
    change touched (uncommitted edits and new files included) with its
-   numbers before and after: worse first, then added, the same, better
-   and removed, and says plainly when nothing got worse. A function split
-   in two shows as one changed and one added. `gnarl --function <function>
+   numbers before and after: worse first, then mixed (some numbers up and
+   some down, as a function made simpler at the price of a parameter),
+   added, the same, better and removed, and says plainly when nothing got
+   worse. A function split in two shows as one changed and one added.
+   `gnarl --function <function>
    src` measures one function again, whatever its numbers.
 4. `gnarl --check src` in CI exits 1 when a function is over a critical
    threshold, and names the `--explain` to run for the worst.
@@ -164,8 +166,8 @@ out, and why), `check` (`asked`, `failed`, `critical`), `thresholds`,
 metrics (`cyclomatic`, `cognitive`, `lines`, `nesting`, `params`,
 `params_weighted`) and `trips` (`metric`, `level`, `limit`).
 
-A `--diff` document has `ref`, `changes` (how many `worse`, `added`,
-`same`, `better`, `removed`) and `functions`, each with `change`,
+A `--diff` document has `ref`, `changes` (how many `worse`, `mixed`,
+`added`, `same`, `better`, `removed`) and `functions`, each with `change`,
 `before` and `after` (null for the side it does not have). For a pull
 request comment, `gnarl --diff origin/main --format md`.
 
@@ -228,7 +230,8 @@ one). gnarl still reports what it could read.
 - Extracting a helper can move the cost into its parameters: the context
   the code needed becomes the helper's arguments. Measure the helper too
   (`--function` takes several), and prefer passing a struct over six
-  values.
+  values. `--diff` shows such a function as mixed: read which numbers
+  fell before calling the change a loss.
 - A flat `switch` of many prongs scores high cyclomatic and 1 cognitive:
   it has many paths but reads as one decision. Cognitive complexity is
   the better guide to what is hard to read; what raises it is depth, so

@@ -34,8 +34,12 @@ const metrics = std.enums.values(Metric);
 
 /// What a change did to a function, in the order a diff lists them.
 pub const Change = enum {
-    /// A number went up.
+    /// A number went up and none down.
     worse,
+    /// Some numbers went up and some down: often a refactor that moved
+    /// the cost, as an extraction that made a function far simpler at the
+    /// price of a parameter.
+    mixed,
     added,
     /// Its text changed, its numbers did not.
     same,
@@ -318,11 +322,12 @@ fn compare(was: Values, now: Values) Change {
         if (now.get(m) > was.get(m)) up = true;
         if (now.get(m) < was.get(m)) down = true;
     }
+    if (up and down) return .mixed;
     return if (up) .worse else if (down) .better else .same;
 }
 
-/// Worse first, then added, the same, better and removed. Within worse
-/// and added, the worst first: the most critical limits passed, then the
+/// Worse first, then mixed, added, the same, better and removed. Within
+/// worse, mixed and added, the worst first: the most critical limits passed, then the
 /// most warnings, then the most each number rose (from nothing, for an
 /// added function), cyclomatic first. Then by place.
 pub fn sort(touched: []Touched) void {
@@ -331,7 +336,7 @@ pub fn sort(touched: []Touched) void {
 
 fn listedBefore(_: void, a: Touched, b: Touched) bool {
     if (a.change != b.change) return @backingInt(a.change) < @backingInt(b.change);
-    if (a.change == .worse or a.change == .added) {
+    if (a.change == .worse or a.change == .mixed or a.change == .added) {
         for (severity(a), severity(b)) |x, y| {
             if (x != y) return x > y;
         }
@@ -343,7 +348,19 @@ fn listedBefore(_: void, a: Touched, b: Touched) bool {
     };
 }
 
-pub const Counts = struct { worse: usize = 0, added: usize = 0, same: usize = 0, better: usize = 0, removed: usize = 0 };
+/// What to do next, after a diff's counts: the --explain for the worst of
+/// those that got worse, or with none, of the mixed; or that nothing got
+/// worse. `touched` is sorted, so the first is that worst.
+fn writeNext(w: *Writer, touched: []const Touched, n: Counts) Writer.Error!void {
+    const first = touched[0];
+    if (n.worse > 0) {
+        try w.print("gnarl --explain {s}:{d} says why {s}, the worst of those that got worse, scores what it does now.", .{ first.path, first.line, first.name });
+    } else if (n.mixed > 0) {
+        try w.print("Nothing got only worse; of the mixed, some numbers up and some down, gnarl --explain {s}:{d} says why {s}, the worst, scores what it does now.", .{ first.path, first.line, first.name });
+    } else try w.writeAll("Nothing got worse.");
+}
+
+pub const Counts = struct { worse: usize = 0, mixed: usize = 0, added: usize = 0, same: usize = 0, better: usize = 0, removed: usize = 0 };
 
 fn count(touched: []const Touched) Counts {
     var c: Counts = .{};
@@ -446,14 +463,11 @@ fn writeTable(w: *Writer, touched: []const Touched, c: Context, kind: enum { tex
     const gap = if (kind == .md) "\n\n" else "\n";
     if (touched.len == 0) return w.print("No function touched since {s}.\n", .{c.ref});
     const n = count(touched);
-    try w.print("{d} function{s} touched in {d} file{s} since {s}: {d} worse, {d} added, {d} the same, {d} better, {d} removed.", .{
-        touched.len, plural(touched.len), c.files, plural(c.files), c.ref, n.worse, n.added, n.same, n.better, n.removed,
+    try w.print("{d} function{s} touched in {d} file{s} since {s}: {d} worse, {d} mixed, {d} added, {d} the same, {d} better, {d} removed.", .{
+        touched.len, plural(touched.len), c.files, plural(c.files), c.ref, n.worse, n.mixed, n.added, n.same, n.better, n.removed,
     });
-    if (n.worse == 0) {
-        try w.print("{s}Nothing got worse.", .{gap});
-    } else {
-        try w.print("{s}gnarl --explain {s}:{d} says why {s}, the worst of those that got worse, scores what it does now.", .{ gap, touched[0].path, touched[0].line, touched[0].name });
-    }
+    try w.writeAll(gap);
+    try writeNext(w, touched, n);
     for (std.enums.values(Class)) |class| {
         for (touched) |t| {
             if (t.class == class) break;
@@ -586,6 +600,10 @@ test "compareFile: worse, added, the same, better, removed; moved or nested-only
         \\    _ = S;
         \\}
         \\fn dropped() void {}
+        \\fn trades(c: bool) void {
+        \\    if (c) {}
+        \\    if (c) {}
+        \\}
     );
     defer old.deinit(gpa);
     var new = try parse(gpa,
@@ -611,6 +629,9 @@ test "compareFile: worse, added, the same, better, removed; moved or nested-only
         \\    _ = S;
         \\}
         \\fn fresh() void {}
+        \\fn trades(c: bool, d: bool) void {
+        \\    if (c and d) {}
+        \\}
     );
     defer new.deinit(gpa);
     var touched: std.ArrayList(Touched) = .empty;
@@ -619,10 +640,12 @@ test "compareFile: worse, added, the same, better, removed; moved or nested-only
     var got: std.ArrayList(u8) = .empty;
     for (touched.items) |t| try got.print(arena, "{t} {s} {d}\n", .{ t.change, t.name, t.line });
     // moves only moved; outer only had a nested function change. Of the
-    // two worse, inner rose in nesting too, so it is the worse.
+    // two worse, inner rose in nesting too, so it is the worse. trades
+    // took a parameter for a line: mixed.
     try std.testing.expectEqualStrings(
         \\worse outer.S.inner 16
         \\worse grows 1
+        \\mixed trades 23
         \\added fresh 22
         \\same comment 8
         \\better shrinks 5
@@ -650,7 +673,7 @@ test "write: the table, and the summary saying when nothing got worse" {
         \\worse    12 -> 16!!  9          40     3        2       2         a.zig:3   grows
         \\removed  12          9          40     3        2       2         b.zig:9   gone
         \\
-        \\2 functions touched in 2 files since main: 1 worse, 0 added, 0 the same, 0 better, 1 removed.
+        \\2 functions touched in 2 files since main: 1 worse, 0 mixed, 0 added, 0 the same, 0 better, 1 removed.
         \\gnarl --explain a.zig:3 says why grows, the worst of those that got worse, scores what it does now.
         \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; cognitive 15, 25; lines 50, 100; nesting 4; params 4.
         \\
@@ -659,6 +682,17 @@ test "write: the table, and the summary saying when nothing got worse" {
     var better: Writer.Allocating = .init(arena);
     try write(&better.writer, .text, touched[1..], context);
     try std.testing.expect(std.mem.indexOf(u8, better.written(), "\nNothing got worse.\n") != null);
+
+    // Simpler at the price of a parameter: mixed, and said so.
+    var traded = after;
+    traded.cyclomatic = 4;
+    traded.params = 3;
+    const mixed = [_]Touched{.{ .path = "a.zig", .line = 3, .name = "trades", .kind = .@"fn", .class = .normal, .change = .mixed, .before = before, .after = traded, .trips = &.{} }};
+    var some: Writer.Allocating = .init(arena);
+    try write(&some.writer, .text, &mixed, context);
+    try std.testing.expect(std.mem.indexOf(u8, some.written(), "\nmixed   12 -> 4 ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, some.written(), ": 0 worse, 1 mixed, ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, some.written(), "\nNothing got only worse; of the mixed, some numbers up and some down, gnarl --explain a.zig:3 says why trades, the worst, scores what it does now.\n") != null);
 
     var none: Writer.Allocating = .init(arena);
     try write(&none.writer, .md, &.{}, context);
