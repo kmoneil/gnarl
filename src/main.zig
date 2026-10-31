@@ -206,8 +206,9 @@ const Context = struct {
     fn parse(c: Context, label: []const u8, source: [:0]const u8) !?Ast {
         var tree = try Ast.parse(c.gpa, source, .{});
         if (tree.errors.len == 0) return tree;
+        // Freed however saying the errors goes.
+        defer tree.deinit(c.gpa);
         try sayParseErrors(c.said, label, &tree);
-        tree.deinit(c.gpa);
         return null;
     }
 
