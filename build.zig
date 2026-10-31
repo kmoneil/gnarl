@@ -1,11 +1,23 @@
 const std = @import("std");
 const zon = @import("build.zig.zon");
 
+/// What a GitHub release carries: one binary for each platform, named
+/// gnarl-<os>-<arch> as the Homebrew formula and the install docs name them.
+const release_targets = [_]struct { query: std.Target.Query, name: []const u8 }{
+    .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .linux }, .name = "gnarl-linux-amd64" },
+    .{ .query = .{ .cpu_arch = .aarch64, .os_tag = .linux }, .name = "gnarl-linux-arm64" },
+    .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .macos }, .name = "gnarl-darwin-amd64" },
+    .{ .query = .{ .cpu_arch = .aarch64, .os_tag = .macos }, .name = "gnarl-darwin-arm64" },
+    .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .windows }, .name = "gnarl-windows-amd64.exe" },
+    .{ .query = .{ .cpu_arch = .aarch64, .os_tag = .windows }, .name = "gnarl-windows-arm64.exe" },
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // `gnarl --version` prints build.zig.zon's version.
+    // `gnarl --version` prints build.zig.zon's version; the release
+    // workflow refuses a tag that does not match it.
     const options = b.addOptions();
     options.addOption([]const u8, "version", zon.version);
 
@@ -62,6 +74,29 @@ pub fn build(b: *std.Build) void {
     lint.setCwd(b.path("."));
     lint.has_side_effects = true;
     b.step("lint", "Run zigvet over gnarl's own source").dependOn(&lint.step);
+
+    // `zig build release`: every binary a release carries, into
+    // zig-out/release/. CI builds it on every change, so a tag never finds
+    // a target that does not build.
+    const release = b.step("release", "Build the release binaries into zig-out/release/");
+    for (release_targets) |release_target| release.dependOn(releaseBinary(b, release_target.query, release_target.name, options));
+}
+
+/// One release binary: ReleaseSafe, so a bug stops gnarl with a message
+/// rather than letting it print a wrong number, and stripped, since the
+/// debug info holds the paths of the machine that built it.
+fn releaseBinary(b: *std.Build, query: std.Target.Query, name: []const u8, options: *std.Build.Step.Options) *std.Build.Step {
+    const exe = b.addExecutable(.{
+        .name = "gnarl",
+        .root_module = gnarlModule(b, b.resolveTargetQuery(query), .ReleaseSafe, options),
+    });
+    exe.root_module.strip = true;
+    const install = b.addInstallArtifact(exe, .{
+        .dest_dir = .{ .override = .{ .custom = "release" } },
+        .dest_sub_path = name,
+        .pdb_dir = .disabled,
+    });
+    return &install.step;
 }
 
 fn gnarlModule(

@@ -89,14 +89,24 @@ whether any of them is over a critical limit now.
 
 ## In GitHub Actions
 
-With Zig 0.17 on the runner:
+A released binary, pinned and checked against its release's checksums:
 
 ```yaml
-- name: build gnarl
+- name: install gnarl
+  env:
+    GNARL: v0.1.0
   run: |
-    git clone --depth 1 https://github.com/kmoneil/gnarl "$RUNNER_TEMP/gnarl"
-    cd "$RUNNER_TEMP/gnarl" && zig build -Doptimize=ReleaseFast
-    echo "$RUNNER_TEMP/gnarl/zig-out/bin" >> "$GITHUB_PATH"
+    dir="$RUNNER_TEMP/gnarl" && mkdir -p "$dir" && cd "$dir"
+    base="https://github.com/kmoneil/gnarl/releases/download/$GNARL"
+    curl -fsSL --remote-name-all "$base/gnarl-linux-amd64" "$base/SHA256SUMS"
+    grep ' gnarl-linux-amd64$' SHA256SUMS | sha256sum -c -
+    mv gnarl-linux-amd64 gnarl && chmod +x gnarl
+    echo "$dir" >> "$GITHUB_PATH"
 - name: complexity
   run: gnarl --check
 ```
+
+On a runner with Zig 0.17 it can be built instead:
+`git clone --depth 1 https://github.com/kmoneil/gnarl`, then
+`zig build -Doptimize=ReleaseFast` in it, and its `zig-out/bin` on the
+`PATH`.

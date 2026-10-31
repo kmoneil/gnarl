@@ -60,6 +60,21 @@ a field added leaves it.
 every example in it against the binary. A new flag, metric or format is
 named there in the same change.
 
+## Releasing
+
+A tag is the release. Set `.version` in `build.zig.zon` (what
+`gnarl --version` prints) in a pull request, and once it is on `main`,
+tag that commit `vX.Y.Z` and push the tag.
+`.github/workflows/release.yml` then runs the whole gate again on the
+tagged commit, refuses a tag that disagrees with the version, builds the
+six binaries with `zig build release`, attests them, publishes them with
+`SHA256SUMS`, and tells the Homebrew tap, which checks and installs the
+release before its formula moves to it.
+
+A `v*` tag cannot be moved or deleted, so a mistake in one is a new
+version. Run the release workflow by hand on `main` first: that run builds
+and checks everything and publishes nothing.
+
 ## The site
 
 GitHub Pages builds <https://kmoneil.github.io/gnarl/> from `docs/` on

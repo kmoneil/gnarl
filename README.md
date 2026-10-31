@@ -11,6 +11,7 @@ refactor will leave before you make it, and holds the line in CI so the
 debt you have cannot grow.
 
 [![ci](https://github.com/kmoneil/gnarl/actions/workflows/ci.yml/badge.svg)](https://github.com/kmoneil/gnarl/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/kmoneil/gnarl)](https://github.com/kmoneil/gnarl/releases/latest)
 [![docs](https://img.shields.io/badge/docs-kmoneil.github.io%2Fgnarl-blue)](https://kmoneil.github.io/gnarl/)
 
 `Zig 0.17` · `one binary` · `no build step` · `no dependencies` ·
@@ -67,14 +68,39 @@ lists only what needs attention; `--all` lists everything.
 
 ## Install
 
-gnarl needs Zig 0.17.
+| Where | How |
+|---|---|
+| macOS, Linux | `brew install kmoneil/tap/gnarl` |
+| Anywhere | a binary from the [latest release](https://github.com/kmoneil/gnarl/releases/latest) |
+| From source | `zig build -Doptimize=ReleaseFast` with Zig 0.17, which leaves it in `zig-out/bin/` |
+
+Homebrew moves to each release by itself, after checking every file's
+build provenance. Each release carries a binary for Linux, macOS and
+Windows on x86-64 and arm64, named
+`gnarl-<linux|darwin|windows>-<amd64|arm64>` (`.exe` on Windows), with
+`SHA256SUMS` and a build-provenance attestation for every file.
+
+<details>
+<summary>Verify a download</summary>
+
+On an Apple-silicon Mac, for example:
 
 ```sh
-git clone https://github.com/kmoneil/gnarl
-cd gnarl
-zig build -Doptimize=ReleaseFast
-cp zig-out/bin/gnarl ~/.local/bin/   # or anywhere on your PATH
+curl -fLO https://github.com/kmoneil/gnarl/releases/latest/download/gnarl-darwin-arm64
+curl -fLO https://github.com/kmoneil/gnarl/releases/latest/download/SHA256SUMS
+shasum -a 256 --check --ignore-missing SHA256SUMS
+gh attestation verify gnarl-darwin-arm64 --repo kmoneil/gnarl
+chmod +x gnarl-darwin-arm64 && mv gnarl-darwin-arm64 /usr/local/bin/gnarl
 ```
+
+A binary downloaded with a browser on macOS is quarantined; clear it with
+`xattr -d com.apple.quarantine gnarl`. `curl` does not set the flag.
+
+The release binaries are built ReleaseSafe, so a bug stops gnarl with a
+message rather than letting it print a wrong number, and carry no debug
+info, so that message comes without a symbolized stack trace.
+
+</details>
 
 ## The loop
 

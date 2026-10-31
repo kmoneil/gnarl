@@ -60,7 +60,14 @@ refactor.
 
 ## Get started
 
-gnarl needs Zig 0.17.
+```sh
+brew install kmoneil/tap/gnarl   # macOS, Linux
+```
+
+Or take a binary for Linux, macOS or Windows from the
+[latest release](https://github.com/kmoneil/gnarl/releases/latest), each
+with its `SHA256SUMS` line and a build-provenance attestation, or build it
+from source with Zig 0.17:
 
 ```sh
 git clone https://github.com/kmoneil/gnarl
