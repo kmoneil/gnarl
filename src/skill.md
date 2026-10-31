@@ -37,6 +37,13 @@ as often as it helps.
 4. `gnarl --check src` in CI exits 1 when a function is over a critical
    threshold, and names the `--explain` to run for the worst.
 
+`--explain` also tallies what of a function runs at compile time:
+`comptime` blocks, `inline` loops and prongs, reflection builtins,
+comptime and anytype parameters, and whether it returns a type. What
+the source cannot show (an inferred error set's members, how often a
+generic is instantiated, what an anytype must provide) it names as
+unknown, rather than leaving out.
+
 `gnarl --files src` lists files rather than functions: the files each
 imports (fan-out), the files read that import it (fan-in), and the
 modules it imports (`std`, named modules), which gnarl does not follow;

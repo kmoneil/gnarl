@@ -1542,6 +1542,7 @@ test {
     _ = @import("baseline.zig");
     _ = @import("children.zig");
     _ = @import("cognitive.zig");
+    _ = @import("comptime_tally.zig");
     _ = @import("config.zig");
     _ = @import("diff.zig");
     _ = @import("docs.zig");

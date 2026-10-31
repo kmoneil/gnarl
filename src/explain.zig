@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 
 const cognitive = @import("cognitive.zig");
+const comptime_tally = @import("comptime_tally.zig");
 const cyclomatic = @import("cyclomatic.zig");
 const formats = @import("formats.zig");
 const functions = @import("functions.zig");
@@ -48,11 +49,34 @@ pub const Explanation = struct {
     nesting: struct { value: u32, chain: []const Level },
     lines: struct { value: u32, span: u32, blank: u32, comment: u32, closer: u32, nested: u32 },
     params: struct { value: u32, weighted: u32, each: []const params.Param },
+    /// What runs at compile time, as far as the source shows, and what it
+    /// cannot show.
+    comptime_tally: struct {
+        items: []const TallyItem,
+        returns_type: bool,
+        unknown: []const []const u8,
+    },
     /// The signature, then each statement of the body, and what each adds.
     regions: []const Region,
     /// For `path:A-B`, what those lines cost; null otherwise.
     range: ?Range = null,
 };
+
+pub const TallyItem = struct { line: u32, column: u32, construct: []const u8 };
+
+/// The comptime tally of `function`, its places as lines and columns, its
+/// text in `arena`.
+fn tallyOf(arena: Allocator, scratch: Allocator, tree: *const Ast, index: LineIndex, function: functions.Function) Allocator.Error!@FieldType(Explanation, "comptime_tally") {
+    const t = try comptime_tally.of(scratch, tree, function);
+    const items = try arena.alloc(TallyItem, t.items.len);
+    for (t.items, items) |item, *out| {
+        const loc = index.ofToken(tree, item.token);
+        out.* = .{ .line = loc.line, .column = loc.column, .construct = try arena.dupe(u8, item.construct) };
+    }
+    const unknown = try arena.alloc([]const u8, t.unknown.len);
+    for (t.unknown, unknown) |u, *out| out.* = try arena.dupe(u8, u);
+    return .{ .items = items, .returns_type = t.returns_type, .unknown = unknown };
+}
 
 pub const Region = struct {
     first_line: u32,
@@ -182,6 +206,7 @@ fn build(
             .nested = breakdown.nested,
         },
         .params = .{ .value = p.count, .weighted = p.weighted, .each = each },
+        .comptime_tally = try tallyOf(arena, scratch, tree, index, function),
         .regions = try regionsOf(arena, scratch, tree, index, function.node),
     };
     var trips: std.ArrayList(Trip) = .empty;
@@ -487,6 +512,7 @@ fn writeXml(w: *Writer, explanations: []const Explanation, c: Context) Writer.Er
             try w.writeAll("/>\n");
         }
         try w.writeAll("      </params>\n");
+        try writeTallyXml(w, e);
         try writeRegionsXml(w, e);
         try w.writeAll("    </explanation>\n");
     }
@@ -539,12 +565,69 @@ fn writeDelimited(w: *Writer, kind: formats.Delimited, explanations: []const Exp
             const item = std.fmt.bufPrint(&buffer, "{s}: {s}", .{ p.name, p.type }) catch p.name;
             try row.put("params", item, "", p.weight, p.why);
         }
+        try putTally(row, e);
         try putRegions(row, e);
     }
 }
 
 /// A region's rows, a metric each, `at` its lines and `why` its first
 /// line; and a range's.
+/// The tally's rows: each construct counted, 1, at its place; `returns a
+/// type` when it does; and each unknown, 0, said in `why`.
+fn putTally(row: Item, e: Explanation) Writer.Error!void {
+    const t = e.comptime_tally;
+    for (t.items) |item| try row.putAt("comptime", item.construct, item.line, item.column, 1, "");
+    if (t.returns_type) try row.put("comptime", "returns a type", "", 1, "its methods are measured on their own");
+    for (t.unknown) |u| try row.put("comptime", "unknown", "", 0, u);
+}
+
+/// The `<comptime_tally>` element.
+fn writeTallyXml(w: *Writer, e: Explanation) Writer.Error!void {
+    const t = e.comptime_tally;
+    try w.writeAll("      <comptime_tally");
+    try formats.attrBool(w, "returns_type", t.returns_type);
+    try w.writeAll(">\n");
+    for (t.items) |item| {
+        try w.writeAll("        <item");
+        try formats.attrInt(w, "line", item.line);
+        try formats.attrInt(w, "column", item.column);
+        try formats.attr(w, "construct", item.construct);
+        try w.writeAll("/>\n");
+    }
+    for (t.unknown) |u| {
+        try w.writeAll("        <unknown");
+        try formats.attr(w, "text", u);
+        try w.writeAll("/>\n");
+    }
+    try w.writeAll("      </comptime_tally>\n");
+}
+
+/// The tally, when there is anything to say: each construct where it is,
+/// then what the source cannot show.
+fn writeTallyText(w: *Writer, e: Explanation) Writer.Error!void {
+    const t = e.comptime_tally;
+    if (t.items.len == 0 and t.unknown.len == 0 and !t.returns_type) return;
+    try w.print("comptime: {d} construct{s} counted{s}\n", .{ t.items.len, if (t.items.len == 1) "" else "s", if (t.returns_type) "; returns a type, whose methods are measured on their own" else "" });
+    var width: usize = 0;
+    for (t.items) |item| width = @max(width, std.fmt.count("{d}:{d}", .{ item.line, item.column }));
+    for (t.items) |item| {
+        try writeAt(w, item.line, item.column, width);
+        try w.print("{s}\n", .{item.construct});
+    }
+    for (t.unknown) |u| try w.print("  unknown from the source: {s}\n", .{u});
+}
+
+fn writeTallyMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
+    const t = e.comptime_tally;
+    if (t.items.len == 0 and t.unknown.len == 0 and !t.returns_type) return;
+    try w.print("\n**comptime**: {d} construct{s} counted{s}.\n", .{ t.items.len, if (t.items.len == 1) "" else "s", if (t.returns_type) "; returns a type, whose methods are measured on their own" else "" });
+    if (t.items.len > 0) {
+        try w.writeAll("\n| at | construct |\n| --- | --- |\n");
+        for (t.items) |item| try w.print("| {d}:{d} | `{s}` |\n", .{ item.line, item.column, item.construct });
+    }
+    for (t.unknown) |u| try w.print("\nUnknown from the source: {s}.\n", .{u});
+}
+
 fn putRegions(row: Item, e: Explanation) Writer.Error!void {
     var buffer: [24]u8 = undefined;
     for (e.regions) |r| {
@@ -789,6 +872,7 @@ fn writeText(w: *Writer, e: Explanation) Writer.Error!void {
         if (p.why.len > 0) try w.print("  {s}", .{p.why});
         try w.writeByte('\n');
     }
+    try writeTallyText(w, e);
     try writeRegionsText(w, e.regions);
 }
 
@@ -892,6 +976,7 @@ fn writeMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
         try w.writeAll(".\n\n| name | type | weight | why |\n| --- | --- | ---: | --- |\n");
         for (e.params.each) |p| try w.print("| `{s}` | `{s}` | {d} | {s} |\n", .{ p.name, p.type, p.weight, p.why });
     }
+    try writeTallyMarkdown(w, e);
     try writeRegionsMarkdown(w, e.regions);
 }
 
@@ -998,6 +1083,8 @@ test "write: text" {
         \\  s    *S         0  a leading self
         \\  gpa  Allocator  0  an Allocator: context, not input
         \\  x    u8         1
+        \\comptime: 0 constructs counted
+        \\  unknown from the source: the members of its inferred error set
         \\
     , out.written());
 }
@@ -1123,7 +1210,7 @@ test "write: xml, csv and tsv say what json does" {
         // The rows say what the totals are made of: cyclomatic's items add
         // up to it, nesting's deepest level is it, and params counts the
         // parameters that weigh anything.
-        const metrics = [_][]const u8{ "cyclomatic", "nesting", "lines", "params", "cognitive", "region", "range" };
+        const metrics = [_][]const u8{ "cyclomatic", "nesting", "lines", "params", "cognitive", "region", "range", "comptime" };
         var totals: [metrics.len]u32 = @splat(0);
         var cyclomatic_sum: u32 = 0;
         var cognitive_sum: u32 = 0;

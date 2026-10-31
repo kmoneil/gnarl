@@ -139,6 +139,17 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
       - `weight`: what it adds to the weighted count; 0 when it is left
         out of both.
       - `why`: why it is left out, or weighs 2.
+  - `comptime_tally`: what of the function runs at compile time, as far
+    as its source shows:
+    - `items`: each `comptime` block or expression, `inline` loop or
+      prong, reflection builtin (`@typeInfo`, `@Type`, `@hasDecl`,
+      `@hasField`, `@FieldType`), and comptime or anytype parameter:
+      - `line`, `column`, `construct`: as for a branch.
+    - `returns_type`: whether it returns a type, whose methods are then
+      measured on their own.
+    - `unknown`: what the source cannot show, each said in a sentence:
+      the members of an inferred error set, how many times a generic
+      function is instantiated, what an anytype must provide.
   - `regions`: where the numbers come from: the signature, then each
     statement of the body, each construct, logical line and level in the
     region that holds it, so the regions add up to the totals
@@ -217,7 +228,9 @@ inside it is not its own. In csv and tsv, the columns are `path`,
 In csv and tsv, an explanation is a row per item, with the columns
 `path`, `line`, `name` (the function's), `metric`, `item`, `at`
 (`line:column`, when the item is a place), `value` and `why`. Each metric
-has a `total` row; cyclomatic's other rows (`base`, 1, and the branches)
+has a `total` row but `comptime`, whose rows are each construct counted
+(value 1), `returns a type` when it does, and each `unknown` (value 0,
+said in `why`); cyclomatic's other rows (`base`, 1, and the branches)
 add up to it, as cognitive's (the costs) do, their `why` saying how much
 of each is for its depth; nesting's deepest `level` is it, lines has a
 row for `span` and each kind, and params a `weighted` row and a row per
