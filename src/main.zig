@@ -7,6 +7,7 @@ const Ast = std.zig.Ast;
 
 const build_options = @import("build_options");
 const test_options = @import("test_options");
+const baseline = @import("baseline.zig");
 const config = @import("config.zig");
 const explain = @import("explain.zig");
 const measure = @import("measure.zig");
@@ -19,6 +20,7 @@ const walk = @import("walk.zig");
 
 const usage =
     \\Usage: gnarl [--exclude <path>]... [--config <file>] [--check]
+    \\             [--baseline <file>] [--update-baseline]
     \\             [--all] [--top <n>] [--function <function>]... [--no-ignore]
     \\             [--format <format>] [--json] [<path>...]
     \\       gnarl --explain <function>... [<path>...]
@@ -49,7 +51,14 @@ const usage =
     \\  --no-ignore       Read what git ignores too.
     \\  --config <file>   Read the classes and thresholds from this file
     \\                    rather than complexity.zon.
-    \\  --check           Exit 1 if a function is over a critical threshold.
+    \\  --check           Exit 1 if a function is over a critical threshold,
+    \\                    or with a baseline, over its critical limit and
+    \\                    above the baseline's number for it: new or worse.
+    \\  --baseline <file> The baseline --check holds to, or --update-baseline
+    \\                    writes, rather than complexity.baseline (which
+    \\                    --check holds to when it is there).
+    \\  --update-baseline Write the baseline: each function now over a
+    \\                    critical threshold, with its numbers, one a line.
     \\  --all             List every function, within its limits or not.
     \\  --top <n>         List at most the n worst.
     \\  --function <function>
@@ -71,12 +80,12 @@ const usage =
     \\                    then a row per function, or per explained item).
     \\  --json            The same as --format json.
     \\
-    \\Exit status: 0 if every file was read (and, with --check, no function
-    \\is over a critical threshold); 1 if --check found one; 2 on a usage
-    \\error, a configuration that cannot be used, a path that could not be
-    \\read or holds no .zig file, a file that does not parse, or an
-    \\--explain that names no function or more than one. The files that
-    \\could be read are reported either way.
+    \\Exit status: 0 if every file was read (and, with --check, nothing
+    \\fails it); 1 if --check found what does; 2 on a usage error, a
+    \\configuration or baseline that cannot be used or written, a path that
+    \\could not be read or holds no .zig file, a file that does not parse,
+    \\or an --explain that names no function or more than one. The files
+    \\that could be read are reported either way.
     \\
 ;
 
@@ -128,24 +137,14 @@ pub fn main(init: std.process.Init) !u8 {
     const cwd = Io.Dir.cwd();
     // Everything said on stderr, kept for the documents that carry it.
     var said: messages.Messages = .{ .arena = arena };
-    const settings = try loadConfig(gpa, arena, io, cwd, run.config, &said) orelse {
-        // A document that carries everything says so on stdout too.
-        const status: u8 = 2;
-        if (run.format == .json or run.format == .xml) {
-            if (run.explain.len > 0) {
-                explain.write(out, run.format, &.{}, .{ .version = build_options.version, .messages = said.items.items }) catch |err| return closedEarly(err, &stdout_writer, status);
-            } else {
-                report.write(out, run.format, &.{}, .{ .rows = &.{} }, .{
-                    .version = build_options.version,
-                    .files = 0,
-                    .classes = .defaults,
-                    .messages = said.items.items,
-                }) catch |err| return closedEarly(err, &stdout_writer, status);
-            }
-            out.flush() catch |err| return closedEarly(err, &stdout_writer, status);
-        }
-        return status;
-    };
+    const settings = try loadConfig(gpa, arena, io, cwd, run.config, &said) orelse
+        return stopEarly(out, &stdout_writer, run, said.items.items);
+    // A baseline is read only to check against it.
+    const held: ?Held = if (run.check) switch (try loadBaseline(arena, io, cwd, run.baseline, &said)) {
+        .none => null,
+        .held => |h| h,
+        .failed => return stopEarly(out, &stdout_writer, run, said.items.items),
+    } else null;
     var search: ?explain.Search = if (run.explain.len > 0) try .init(arena, run.explain) else null;
     const picks = try arena.alloc(select.Selector, run.functions.len);
     for (run.functions, picks) |text, *p| p.* = try select.Selector.parse(arena, text);
@@ -234,22 +233,119 @@ pub fn main(init: std.process.Init) !u8 {
         listing.picked = picked.picked;
     }
     const listed = try report.list(arena, rows.items, listing);
-    const critical = report.countCritical(rows.items);
-    const failed = run.check and critical > 0;
-    const status: u8 = if (said.errors() > 0) 2 else if (failed) 1 else 0;
+    var check: report.Check = .{ .asked = run.check, .critical = report.countCritical(rows.items) };
+    if (run.check) {
+        const r = try baseline.ratchet(arena, rows.items, settings.classes, if (held) |h| h.base else null, files.items);
+        check.failed = r.failures.len > 0;
+        check.failures = r.failures;
+        check.improved = r.improved;
+        check.gone = r.gone;
+        if (held) |h| {
+            check.baseline = h.path;
+            if (r.improved > 0) try said.add(.{ .level = .note, .path = h.path, .text = try std.fmt.allocPrint(arena, "{d} baselined function{s} {s} under the baseline's numbers now; gnarl --update-baseline tightens it", .{
+                r.improved, plural(r.improved), if (r.improved == 1) "is" else "are",
+            }) });
+            if (r.gone > 0) try said.add(.{ .level = .note, .path = h.path, .text = try std.fmt.allocPrint(arena, "{d} baselined function{s} {s} gone (renamed, moved or deleted); gnarl --update-baseline drops {s}", .{
+                r.gone, plural(r.gone), if (r.gone == 1) "is" else "are", if (r.gone == 1) "it" else "them",
+            }) });
+        }
+    }
+    if (run.update_baseline) try updateBaseline(arena, io, cwd, run.baseline orelse baseline.default_path, rows.items, &said);
+    const status: u8 = if (said.errors() > 0) 2 else if (check.failed) 1 else 0;
     report.write(out, run.format, rows.items, listed, .{
         .version = build_options.version,
         .files = measured,
         .classes = settings.classes,
-        .check = .{ .asked = run.check, .failed = failed, .critical = critical },
+        .check = check,
         .messages = said.items.items,
     }) catch |err| return closedEarly(err, &stdout_writer, status);
     out.flush() catch |err| return closedEarly(err, &stdout_writer, status);
-    // The rows run worst first, so the first is the one to look at.
-    if (failed) std.debug.print("gnarl: --check: {d} function{s} over a critical threshold; gnarl --explain {s}:{d} says why the worst scores what it does\n", .{
-        critical, if (critical == 1) "" else "s", rows.items[0].path, rows.items[0].line,
-    });
+    if (check.failed) sayFailures(check);
     return status;
+}
+
+fn plural(n: usize) []const u8 {
+    return if (n == 1) "" else "s";
+}
+
+/// When a configuration or baseline cannot be used, a document that
+/// carries everything still says so on stdout, with nothing measured.
+fn stopEarly(out: *Io.Writer, stdout_writer: *const Io.File.Writer, run: Run, said: []const messages.Message) !u8 {
+    const status: u8 = 2;
+    if (run.format == .json or run.format == .xml) {
+        if (run.explain.len > 0) {
+            explain.write(out, run.format, &.{}, .{ .version = build_options.version, .messages = said }) catch |err| return closedEarly(err, stdout_writer, status);
+        } else {
+            report.write(out, run.format, &.{}, .{ .rows = &.{} }, .{
+                .version = build_options.version,
+                .files = 0,
+                .classes = .defaults,
+                .messages = said,
+            }) catch |err| return closedEarly(err, stdout_writer, status);
+        }
+        out.flush() catch |err| return closedEarly(err, stdout_writer, status);
+    }
+    return status;
+}
+
+const Held = struct { path: []const u8, base: baseline.Baseline };
+
+/// The baseline in the file `named`, or in complexity.baseline if there
+/// is one. `failed` when the file cannot be used: why is said in `said`.
+fn loadBaseline(arena: std.mem.Allocator, io: Io, dir: Io.Dir, named: ?[]const u8, said: *messages.Messages) std.mem.Allocator.Error!union(enum) { none, held: Held, failed } {
+    const path = named orelse baseline.default_path;
+    const text = dir.readFileAlloc(io, path, arena, .limited(1 << 28)) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        else => {
+            if (err == error.FileNotFound and named == null) return .none;
+            try said.fail(path, "{t}", .{err});
+            return .failed;
+        },
+    };
+    var problem: baseline.Problem = undefined;
+    const base = baseline.parse(arena, text, &problem) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        error.Invalid => {
+            try said.add(.{ .level = .@"error", .path = path, .line = problem.line, .text = problem.message });
+            return .failed;
+        },
+    };
+    return .{ .held = .{ .path = path, .base = base } };
+}
+
+/// Writes the baseline of `rows` to `path`, unless a file could not be
+/// read: then what it held would be left out.
+fn updateBaseline(arena: std.mem.Allocator, io: Io, dir: Io.Dir, path: []const u8, rows: []const report.Row, said: *messages.Messages) !void {
+    if (said.errors() > 0) return said.fail(path, "not written: a file that could not be read would be left out of it", .{});
+    var text: Io.Writer.Allocating = .init(arena);
+    const n = baseline.write(arena, &text.writer, rows) catch return error.OutOfMemory;
+    dir.writeFile(io, .{ .sub_path = path, .data = text.written() }) catch |err| return said.fail(path, "{t}", .{err});
+    try said.add(.{ .level = .note, .path = path, .text = try std.fmt.allocPrint(arena, "wrote {d} function{s} over a critical threshold", .{ n, plural(n) }) });
+}
+
+/// Says on stderr what fails --check, after the report: each function and
+/// how, held to a baseline, or how many with none, and the --explain to
+/// run for the first.
+fn sayFailures(check: report.Check) void {
+    const first = check.failures[0];
+    const n = baseline.functionsFailing(check.failures);
+    const path = check.baseline orelse {
+        std.debug.print("gnarl: --check: {d} function{s} over a critical threshold; gnarl --explain {s}:{d} says why the worst scores what it does\n", .{ n, plural(n), first.path, first.line });
+        return;
+    };
+    std.debug.print("gnarl: --check: {d} function{s} fail{s} against {s}:", .{ n, plural(n), if (n == 1) "s" else "", path });
+    for (check.failures, 0..) |f, i| {
+        const same = i > 0 and check.failures[i - 1].line == f.line and std.mem.eql(u8, check.failures[i - 1].path, f.path);
+        if (same) {
+            std.debug.print("; ", .{});
+        } else std.debug.print("\n  {s}:{d}  {s}: ", .{ f.path, f.line, f.name });
+        if (f.baselined) |b| {
+            if (b > f.limit) {
+                std.debug.print("{t} {d}, above its baseline {d}", .{ f.metric, f.value, b });
+            } else std.debug.print("{t} {d}, over the critical limit {d}, which its baseline ({d}) was not", .{ f.metric, f.value, f.limit, b });
+        } else std.debug.print("{t} {d}, over the critical limit {d}; not in the baseline", .{ f.metric, f.value, f.limit });
+    }
+    std.debug.print("\ngnarl --explain {s}:{d} says why the first scores what it does\n", .{ first.path, first.line });
 }
 
 fn contains(items: []const []const u8, item: []const u8) bool {
@@ -317,29 +413,34 @@ fn sayParseErrors(said: *messages.Messages, path: []const u8, tree: *const Ast) 
 
 /// What the command line asks for.
 const Command = union(enum) {
-    run: struct {
-        paths: []const []const u8,
-        /// Cleaned, as `walk.collect` cleans the paths it lists.
-        excludes: []const []const u8,
-        format: report.Format,
-        /// The configuration file named, if one is.
-        config: ?[]const u8,
-        check: bool,
-        /// The functions to explain, as given; none for a report.
-        explain: []const []const u8,
-        all: bool,
-        top: ?usize,
-        /// Read what git ignores too.
-        no_ignore: bool,
-        /// The functions the report is to list, as given; none for all.
-        functions: []const []const u8,
-    },
+    run: Run,
     help,
     version,
     /// `gnarl skill`, and the directory to install it under, if any.
     skill: ?[]const u8,
     /// Why the command line cannot be run; empty when the usage alone says.
     usage_error: []const u8,
+};
+
+const Run = struct {
+    paths: []const []const u8,
+    /// Cleaned, as `walk.collect` cleans the paths it lists.
+    excludes: []const []const u8,
+    format: report.Format,
+    /// The configuration file named, if one is.
+    config: ?[]const u8,
+    check: bool,
+    /// The functions to explain, as given; none for a report.
+    explain: []const []const u8,
+    all: bool,
+    top: ?usize,
+    /// Read what git ignores too.
+    no_ignore: bool,
+    /// The functions the report is to list, as given; none for all.
+    functions: []const []const u8,
+    /// The baseline file named, if one is.
+    baseline: ?[]const u8,
+    update_baseline: bool,
 };
 
 /// `-h` and `--help`, `--version`, and an unknown option take effect where
@@ -364,6 +465,8 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
     var all = false;
     var top: ?usize = null;
     var no_ignore = false;
+    var baseline_path: ?[]const u8 = null;
+    var update_baseline = false;
     var to_list: std.ArrayList([]const u8) = .empty;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -386,6 +489,10 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
             no_ignore = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--update-baseline")) {
+            update_baseline = true;
+            continue;
+        }
         if (optionValue(args, &i, "--exclude")) |path| {
             if (path.len == 0) return .{ .usage_error = "--exclude needs a path" };
             try excludes.append(arena, try std.fs.path.resolveAlloc(arena, &.{path}));
@@ -398,6 +505,9 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
         } else if (optionValue(args, &i, "--explain")) |function| {
             if (function.len == 0) return .{ .usage_error = "--explain needs a function: path:line, or a name" };
             try to_explain.append(arena, function);
+        } else if (optionValue(args, &i, "--baseline")) |path| {
+            if (path.len == 0) return .{ .usage_error = "--baseline needs a file" };
+            baseline_path = path;
         } else if (optionValue(args, &i, "--config")) |path| {
             if (path.len == 0) return .{ .usage_error = "--config needs a file" };
             config_path = path;
@@ -408,9 +518,11 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
             return .{ .usage_error = try arena.print("unknown option '{s}'", .{arg}) };
         } else try paths.append(arena, arg);
     }
-    if (to_explain.items.len > 0 and (check or all or top != null or to_list.items.len > 0)) {
-        return .{ .usage_error = "--check, --all, --top and --function are for the report, not --explain" };
+    if (to_explain.items.len > 0 and (check or all or top != null or to_list.items.len > 0 or baseline_path != null or update_baseline)) {
+        return .{ .usage_error = "--check, --all, --top, --function, --baseline and --update-baseline are for the report, not --explain" };
     }
+    if (check and update_baseline) return .{ .usage_error = "--update-baseline writes the baseline and --check holds to it: one at a time" };
+    if (baseline_path != null and !check and !update_baseline) return .{ .usage_error = "--baseline is for --check or --update-baseline" };
     return .{ .run = .{
         .paths = paths.items,
         .excludes = excludes.items,
@@ -421,6 +533,8 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
         .all = all,
         .top = top,
         .no_ignore = no_ignore,
+        .baseline = baseline_path,
+        .update_baseline = update_baseline,
         .functions = to_list.items,
     } };
 }
@@ -517,6 +631,105 @@ test "in a git work tree, what git ignores is not read; --no-ignore reads it" {
     defer std.testing.allocator.free(all.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 2 }, all.term);
     try std.testing.expect(std.mem.startsWith(u8, all.stderr, "gnarl: _tmp" ++ std.fs.path.sep_str ++ "b.zig:1:7: "));
+}
+
+/// A function of `ifs` ifs, cyclomatic ifs + 1, named `name`.
+fn branchy(arena: std.mem.Allocator, name: []const u8, ifs: usize) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.print(arena, "fn {s}(c: bool) void {{\n", .{name});
+    for (0..ifs) |_| try out.appendSlice(arena, "    if (c) {}\n");
+    try out.appendSlice(arena, "}\n");
+    return out.items;
+}
+
+test "--update-baseline, then --check holds to it: new or worse fails, debt kept passes" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const Step = struct { source: []const u8, exit: u8, stderr: []const u8 };
+    const held_at = try branchy(arena, "f", 16);
+    const steps = [_]Step{
+        // No baseline yet: any critical crossing fails.
+        .{ .source = held_at, .exit = 1, .stderr = "gnarl: --check: 1 function over a critical threshold; gnarl --explain a.zig:1 says why the worst scores what it does\n" },
+    };
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = steps[0].source });
+    for (steps) |step| {
+        const result = try runGnarl(tmp.dir, &.{ "--check", "a.zig" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqualStrings(step.stderr, result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = step.exit }, result.term);
+    }
+
+    // Written: the one function over, with its numbers.
+    {
+        const result = try runGnarl(tmp.dir, &.{ "--update-baseline", "a.zig" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+        try std.testing.expectEqualStrings("gnarl: complexity.baseline: note: wrote 1 function over a critical threshold\n", result.stderr);
+        const written = try tmp.dir.readFileAlloc(io, "complexity.baseline", arena, .limited(1 << 20));
+        try std.testing.expect(std.mem.endsWith(u8, written, "\na.zig\tf\t17\t17\t1\t1\t1\n"));
+    }
+
+    const held = [_]Step{
+        // Held at its baseline: passes.
+        .{ .source = held_at, .exit = 0, .stderr = "" },
+        // Worse than its baseline: fails, saying by how much. Its lines
+        // rise too, but within their limit, which is allowed.
+        .{ .source = try branchy(arena, "f", 18), .exit = 1, .stderr =
+        \\gnarl: --check: 1 function fails against complexity.baseline:
+        \\  a.zig:1  f: cyclomatic 19, above its baseline 17
+        \\gnarl --explain a.zig:1 says why the first scores what it does
+        \\
+        },
+        // A new function over: fails; f is held still.
+        .{ .source = try std.mem.concat(arena, u8, &.{ held_at, try branchy(arena, "g", 15) }), .exit = 1, .stderr =
+        \\gnarl: --check: 1 function fails against complexity.baseline:
+        \\  a.zig:19  g: cyclomatic 16, over the critical limit 15; not in the baseline
+        \\gnarl --explain a.zig:19 says why the first scores what it does
+        \\
+        },
+        // Better than its baseline, still over: passes, and says to tighten.
+        .{ .source = try branchy(arena, "f", 15), .exit = 0, .stderr = "gnarl: complexity.baseline: note: 1 baselined function is under the baseline's numbers now; gnarl --update-baseline tightens it\n" },
+        // Renamed: a new function over, and the old one gone.
+        .{ .source = try branchy(arena, "h", 16), .exit = 1, .stderr =
+        \\gnarl: complexity.baseline: note: 1 baselined function is gone (renamed, moved or deleted); gnarl --update-baseline drops it
+        \\gnarl: --check: 1 function fails against complexity.baseline:
+        \\  a.zig:1  h: cyclomatic 17, over the critical limit 15; not in the baseline
+        \\gnarl --explain a.zig:1 says why the first scores what it does
+        \\
+        },
+    };
+    for (held) |step| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = step.source });
+        const result = try runGnarl(tmp.dir, &.{ "--check", "a.zig" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqualStrings(step.stderr, result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = step.exit }, result.term);
+    }
+}
+
+test "a baseline that cannot be used stops the run, and says where" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = "fn a() void {}\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "complexity.baseline", .data = "# fine\na.zig\ta\t1\t1\n" });
+    try expectRun(tmp.dir, &.{ "--check", "a.zig" }, 2, "", "gnarl: complexity.baseline:2: fewer than 7 fields: path, name and the five metrics, tab-separated\n");
+    try expectRun(tmp.dir, &.{ "--check", "--baseline", "nope", "a.zig" }, 2, "", "gnarl: nope: FileNotFound\n");
+    // Not written over a run that could not read every file.
+    try expectRun(tmp.dir, &.{ "--update-baseline", "--baseline=b.txt", "a.zig", "missing.zig" }, 2,
+        \\1 function in 1 file: 0 over a critical threshold (!!), 0 more over a warning one (!).
+        \\1 within limits is not listed; --all lists every function.
+        \\
+    ++ thresholds_line, "gnarl: missing.zig: FileNotFound\ngnarl: b.txt: not written: a file that could not be read would be left out of it\n");
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "b.txt", .{}));
 }
 
 test "a reader that stops early ends the report quietly" {
@@ -759,7 +972,8 @@ test "--json says what stderr says: a file that does not parse, a missing path" 
     try std.testing.expectEqualStrings("FileNotFound", doc.value.errors[0].text);
     try std.testing.expectEqualStrings("bad.zig", doc.value.errors[1].path);
     try std.testing.expectEqual(7, doc.value.errors[1].column.?);
-    try std.testing.expectEqual(report.Check{ .asked = true }, doc.value.check);
+    try std.testing.expect(doc.value.check.asked and !doc.value.check.failed);
+    try std.testing.expectEqual(0, doc.value.check.failures.len);
     try std.testing.expectEqual(report.schema, doc.value.schema);
 }
 
@@ -865,7 +1079,7 @@ test "parseArgs: --all, --top and --function" {
     try std.testing.expectEqualStrings("--top takes how many functions to list, 1 or more, not '0'", (try parseArgs(arena, &.{ "--top", "0", "src" })).usage_error);
     try std.testing.expectEqualStrings("--top takes how many functions to list, 1 or more, not 'x'", (try parseArgs(arena, &.{ "src", "--top=x" })).usage_error);
     try std.testing.expectEqualStrings("--function needs a function: path:line, or a name", (try parseArgs(arena, &.{ "src", "--function" })).usage_error);
-    try std.testing.expectEqualStrings("--check, --all, --top and --function are for the report, not --explain", (try parseArgs(arena, &.{ "--all", "--explain", "f" })).usage_error);
+    try std.testing.expectEqualStrings("--check, --all, --top, --function, --baseline and --update-baseline are for the report, not --explain", (try parseArgs(arena, &.{ "--all", "--explain", "f" })).usage_error);
 }
 
 test "parseArgs: --config and --check" {
@@ -930,6 +1144,18 @@ fn flags(arena: std.mem.Allocator, text: []const u8) !std.StringArrayHashMapUnma
     return out;
 }
 
+test "parseArgs: --baseline and --update-baseline" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const run = (try parseArgs(arena, &.{ "--check", "--baseline", "ci.baseline" })).run;
+    try std.testing.expectEqualStrings("ci.baseline", run.baseline.?);
+    try std.testing.expect((try parseArgs(arena, &.{"--update-baseline"})).run.update_baseline);
+    try std.testing.expectEqualStrings("--update-baseline writes the baseline and --check holds to it: one at a time", (try parseArgs(arena, &.{ "--check", "--update-baseline" })).usage_error);
+    try std.testing.expectEqualStrings("--baseline is for --check or --update-baseline", (try parseArgs(arena, &.{ "--baseline", "b" })).usage_error);
+    try std.testing.expectEqualStrings("--baseline needs a file", (try parseArgs(arena, &.{ "--check", "--baseline" })).usage_error);
+}
+
 test "parseArgs: gnarl skill" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
@@ -953,7 +1179,7 @@ test "parseArgs: --explain, more than once, with or without paths" {
     try std.testing.expectEqualStrings("Parser.next", run.explain[1]);
     try std.testing.expectEqual(0, run.paths.len);
     try std.testing.expectEqualStrings("--explain needs a function: path:line, or a name", (try parseArgs(arena, &.{"--explain"})).usage_error);
-    try std.testing.expectEqualStrings("--check, --all, --top and --function are for the report, not --explain", (try parseArgs(arena, &.{ "--check", "--explain", "f" })).usage_error);
+    try std.testing.expectEqualStrings("--check, --all, --top, --function, --baseline and --update-baseline are for the report, not --explain", (try parseArgs(arena, &.{ "--check", "--explain", "f" })).usage_error);
 }
 
 test "parseArgs: --format and --json" {
@@ -987,6 +1213,7 @@ test "parseArgs: help, version and usage errors" {
 }
 
 test {
+    _ = @import("baseline.zig");
     _ = @import("children.zig");
     _ = @import("config.zig");
     _ = @import("docs.zig");

@@ -30,6 +30,19 @@ names, and elements for what is a list or an object in json.
   - `failed`: whether it fails the run, exit status 1.
   - `critical`: how many functions are over a critical threshold, asked
     or not.
+  - `baseline`: the baseline file it was held to; null for none.
+  - `failures`: what fails it, worst first, each metric of a function
+    over what it may be (its critical limit, or its baseline's number if
+    higher):
+    - `path`, `line`, `name`: the function, as in `functions`.
+    - `metric`, `value`: the metric and its number.
+    - `limit`: its critical limit.
+    - `baselined`: the baseline's number for it; null when the baseline
+      does not hold the function.
+  - `improved`: how many baselined functions are under the baseline's
+    numbers now (`--update-baseline` tightens it).
+  - `gone`: how many baselined functions of a file read are no longer
+    there: renamed, moved or deleted.
 - `thresholds`: the limits in force, by class of code:
   - `hot`, `normal`, `cold`: each class's limits, by metric:
     - `cyclomatic`, `lines`, `nesting`, `params`, `params_weighted`:

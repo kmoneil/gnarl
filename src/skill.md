@@ -27,6 +27,14 @@ as often as it helps.
 4. `gnarl --check src` in CI exits 1 when a function is over a critical
    threshold, and names the `--explain` to run for the worst.
 
+On code with debt already, `gnarl --update-baseline src` writes
+`complexity.baseline` (commit it): the functions over a critical
+threshold now, with their numbers. From then on `--check` holds to it
+and fails only what is new or worse: a function not in it over a
+critical limit, or one above its number there. A function is known by
+its path and name, so a rename or a move is a new function: update the
+baseline in the same change. `--baseline <file>` names another file.
+
 Paths are optional: with none, gnarl reads the current directory. A
 function given to `--explain` or `--function` as `path:line` needs no
 path besides, and then only its file is read.
@@ -162,9 +170,9 @@ A metric named under a class replaces both its limits there.
 
 ## Exit status
 
-0 when every file was read (and, with `--check`, no function is over a
-critical threshold); 1 when `--check` found one; 2 on a usage error, a
-configuration that cannot be used, a path that cannot be read or holds
+0 when every file was read (and, with `--check`, nothing fails it); 1
+when `--check` found what does; 2 on a usage error, a configuration or
+baseline that cannot be used or written, a path that cannot be read or holds
 no .zig file, a file that does not parse, or a `--function` or
 `--explain` that names no function (or, for `--explain`, more than
 one). gnarl still reports what it could read.

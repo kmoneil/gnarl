@@ -5,6 +5,7 @@ const std = @import("std");
 const Writer = std.Io.Writer;
 const Allocator = std.mem.Allocator;
 
+const baseline = @import("baseline.zig");
 const formats = @import("formats.zig");
 const functions = @import("functions.zig");
 const messages = @import("messages.zig");
@@ -153,6 +154,15 @@ pub const Check = struct {
     failed: bool = false,
     /// How many functions are over a critical threshold, asked or not.
     critical: usize = 0,
+    /// The baseline file it was held to, if any.
+    baseline: ?[]const u8 = null,
+    /// What fails it, worst first: each metric of a function over what it
+    /// may be (its critical limit, or its baseline's number if higher).
+    failures: []const baseline.Failure = &.{},
+    /// Baselined functions now under the baseline's numbers.
+    improved: usize = 0,
+    /// Baselined functions of a file read that are no longer there.
+    gone: usize = 0,
 };
 
 /// What a report says besides its rows.
@@ -215,7 +225,27 @@ fn writeXml(w: *Writer, rows: []const Row, listed: Listed, c: Context) Writer.Er
     try formats.attrBool(w, "asked", c.check.asked);
     try formats.attrBool(w, "failed", c.check.failed);
     try formats.attrInt(w, "critical", c.check.critical);
-    try w.writeAll("/>\n  <thresholds>\n");
+    if (c.check.baseline) |path| try formats.attr(w, "baseline", path);
+    try formats.attrInt(w, "improved", c.check.improved);
+    try formats.attrInt(w, "gone", c.check.gone);
+    if (c.check.failures.len == 0) {
+        try w.writeAll("/>\n");
+    } else {
+        try w.writeAll(">\n");
+        for (c.check.failures) |f| {
+            try w.writeAll("    <failure");
+            try formats.attr(w, "path", f.path);
+            try formats.attrInt(w, "line", f.line);
+            try formats.attr(w, "name", f.name);
+            try formats.attr(w, "metric", @tagName(f.metric));
+            try formats.attrInt(w, "value", f.value);
+            try formats.attrInt(w, "limit", f.limit);
+            if (f.baselined) |b| try formats.attrInt(w, "baselined", b);
+            try w.writeAll("/>\n");
+        }
+        try w.writeAll("  </check>\n");
+    }
+    try w.writeAll("  <thresholds>\n");
     for (std.enums.values(Class)) |class| {
         try w.writeAll("    <class");
         try formats.attr(w, "name", @tagName(class));
@@ -623,7 +653,11 @@ test "write: JSON" {
     const doc = try std.json.parseFromSliceLeaky(Doc, arena, out.written(), .{});
     try std.testing.expectEqual(schema, doc.schema);
     try std.testing.expectEqualStrings("0.0.0", doc.gnarl);
-    try std.testing.expectEqual(Check{ .asked = true, .failed = true, .critical = 1 }, doc.check);
+    try std.testing.expect(doc.check.asked and doc.check.failed);
+    try std.testing.expectEqual(1, doc.check.critical);
+    try std.testing.expectEqualStrings("complexity.baseline", doc.check.baseline.?);
+    try std.testing.expectEqual(16, doc.check.failures[0].value);
+    try std.testing.expectEqual(null, doc.check.failures[0].baselined);
     try std.testing.expectEqualStrings("bad.zig", doc.errors[0].path);
     try std.testing.expectEqual(3, doc.errors[0].line.?);
     try std.testing.expectEqual(null, doc.notes[0].line);
@@ -653,7 +687,13 @@ fn sampleContext() Context {
         .version = "0.0.0",
         .files = 2,
         .classes = .defaults,
-        .check = .{ .asked = true, .failed = true, .critical = 1 },
+        .check = .{
+            .asked = true,
+            .failed = true,
+            .critical = 1,
+            .baseline = "complexity.baseline",
+            .failures = &.{.{ .path = "src/b.zig", .line = 120, .name = "Parser.next", .metric = .cyclomatic, .value = 16, .limit = 15, .baselined = null }},
+        },
         .messages = &.{
             .{ .level = .@"error", .path = "bad.zig", .line = 3, .column = 7, .text = "expected ';' after statement" },
             .{ .level = .note, .path = "f", .text = "explained the function of exactly that name; 1 more ends with it:", .more = &.{"a.zig:1  f"} },
@@ -675,6 +715,7 @@ test "write: xml says what json does, and reads back" {
     try std.testing.expectEqualStrings("4", doc.get("measured").?);
     try std.testing.expectEqualStrings("2", doc.child("not_listed").?.get("within_limits").?);
     try std.testing.expectEqualStrings("true", doc.child("check").?.get("failed").?);
+    try std.testing.expectEqualStrings("15", doc.child("check").?.children[0].get("limit").?);
     try std.testing.expectEqual(3, doc.child("thresholds").?.children.len);
     try std.testing.expectEqualStrings("3", doc.child("errors").?.children[0].get("line").?);
     try std.testing.expectEqualStrings("a.zig:1  f", doc.child("notes").?.children[0].children[0].get("text").?);

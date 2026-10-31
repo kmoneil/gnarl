@@ -91,7 +91,22 @@ test "docs/output.md lists every field of the report, and no other" {
     var rows = [_]report.Row{.{ .path = "a.zig", .line = 1, .end_line = 3, .column = 4, .name = "f", .kind = .@"fn", .cyclomatic = 30, .lines = 3, .nesting = 0, .params = 0, .params_weighted = 0 }};
     try report.rank(arena, &rows, .defaults);
     var out: std.Io.Writer.Allocating = .init(arena);
-    try report.write(&out.writer, .json, &rows, try report.list(arena, &rows, .{}), .{ .version = "0.0.0", .files = 1, .classes = .defaults, .messages = &said });
+    try report.write(&out.writer, .json, &rows, try report.list(arena, &rows, .{}), .{
+        .version = "0.0.0",
+        .files = 1,
+        .classes = .defaults,
+        .messages = &said,
+        // A failure, so its fields are in the document.
+        .check = .{ .asked = true, .failed = true, .critical = 1, .baseline = "complexity.baseline", .failures = &.{.{
+            .path = "a.zig",
+            .line = 1,
+            .name = "f",
+            .metric = .cyclomatic,
+            .value = 30,
+            .limit = 15,
+            .baselined = 20,
+        }} },
+    });
     try expectSame(arena, doc, "## The report", null, out.written());
 }
 
