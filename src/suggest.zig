@@ -200,10 +200,10 @@ test "the prongs of a switch that holds it all are the cuts, best first" {
     var got: std.ArrayList(u8) = .empty;
     for (found) |c| {
         try got.print(arena, "{d}-{d} keeps {d}/{d} lifts {d}/{d} params {d} gives {d} leaving {d}\n", .{
-            tree.tokenLocation(0, c.first).line + 1,       tree.tokenLocation(0, c.last).line + 1,
-            c.extracted.rest.cognitive,                    c.extracted.rest.cyclomatic,
-            c.extracted.helper.cognitive,                  c.extracted.helper.cyclomatic,
-            c.extracted.helper.params,                     c.gives,
+            tree.tokenLocation(0, c.first).line + 1, tree.tokenLocation(0, c.last).line + 1,
+            c.extracted.rest.cognitive,              c.extracted.rest.cyclomatic,
+            c.extracted.helper.cognitive,            c.extracted.helper.cyclomatic,
+            c.extracted.helper.params,               c.gives,
             c.leaving,
         });
     }

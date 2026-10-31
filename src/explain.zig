@@ -495,7 +495,6 @@ const Reading = struct {
     }
 };
 
-
 /// What a range's lines would take and give back, moved out.
 fn writeFlow(w: *Writer, r: Range) Writer.Error!void {
     try w.writeAll("it would take ");
