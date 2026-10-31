@@ -83,8 +83,9 @@ an `if` whose branches are both expressions. Each run of `and` or of
 handler, a labeled block used as a value, a `return` inside a loop or a
 labeled `switch`, a labeled `break` or `continue` that ends a loop or
 block on its way, and an `errdefer`. Nothing for a `try`, a `defer`, a
-capture or a guard clause's `return`. docs/cognitive.md in gnarl's
-repository has the rules, an example each.
+capture or a guard clause's `return`. `--explain` shows each cost a
+function was charged and why, and the table below is checked against
+gnarl itself.
 
 | Code | cyclomatic | cognitive |
 | --- | ---: | ---: |
@@ -203,7 +204,9 @@ counts, and the footer says how many are left out.
 
 Code is hot, normal or cold, by globs in `complexity.zon` in the
 directory gnarl runs in (or the file `--config` names); with no file,
-every file is normal. Default limits, warning then critical:
+every file is normal. Default limits, warning then critical; nesting and
+params have a warning limit only, so they mark a row `!` but never fail
+`--check`:
 
 | | cyclomatic | cognitive | lines | nesting | params |
 | --- | --- | --- | --- | --- | --- |
