@@ -7,13 +7,15 @@ const Ast = std.zig.Ast;
 
 const build_options = @import("build_options");
 const test_options = @import("test_options");
+const config = @import("config.zig");
 const measure = @import("measure.zig");
 const report = @import("report.zig");
-const Thresholds = @import("thresholds.zig").Thresholds;
+const Classes = @import("thresholds.zig").Classes;
 const walk = @import("walk.zig");
 
 const usage =
-    \\Usage: gnarl [--exclude <path>]... [--format <format>] [--json] <path>...
+    \\Usage: gnarl [--exclude <path>]... [--config <file>] [--check]
+    \\             [--format <format>] [--json] <path>...
     \\       gnarl --version
     \\
     \\Measures every function and test block in each file named, and in
@@ -24,16 +26,25 @@ const usage =
     \\critical one !!. Hidden files and directories, zig-out and zig-pkg are
     \\skipped.
     \\
+    \\The thresholds depend on the class of code a file is in, hot, normal
+    \\or cold, which complexity.zon in the current directory gives by globs,
+    \\with any thresholds of its own. With no such file every file is normal.
+    \\
     \\  --exclude <path>  Skip this file or directory, named as gnarl prints
     \\                    paths: relative to the current directory. May be
     \\                    given more than once.
+    \\  --config <file>   Read the classes and thresholds from this file
+    \\                    rather than complexity.zon.
+    \\  --check           Exit 1 if a function is over a critical threshold.
     \\  --format <format> text (the default, a table), json, or md (a
     \\                    Markdown table, for a review).
     \\  --json            The same as --format json.
     \\
-    \\Exit status: 0 if every file was read, 2 on a usage error, a path that
-    \\could not be read or holds no .zig file, or a file that does not parse.
-    \\The files that could be read are reported either way.
+    \\Exit status: 0 if every file was read (and, with --check, no function
+    \\is over a critical threshold); 1 if --check found one; 2 on a usage
+    \\error, a configuration that cannot be used, a path that could not be
+    \\read or holds no .zig file, or a file that does not parse. The files
+    \\that could be read are reported either way.
     \\
 ;
 
@@ -72,6 +83,7 @@ pub fn main(init: std.process.Init) !u8 {
     };
 
     const cwd = Io.Dir.cwd();
+    const settings = try loadConfig(gpa, arena, io, cwd, run.config) orelse return 2;
     var unreadable = false;
     var files: std.ArrayList([]const u8) = .empty;
     for (run.paths) |arg| {
@@ -118,13 +130,47 @@ pub fn main(init: std.process.Init) !u8 {
             continue;
         }
         measured += 1;
+        const first = rows.items.len;
         try measure.file(arena, file_arena.allocator(), path, &tree, &rows);
+        const class = settings.classOf(path);
+        for (rows.items[first..]) |*row| row.class = class;
     }
-    try report.rank(arena, rows.items, .normal);
-    const status: u8 = if (unreadable) 2 else 0;
-    report.write(out, run.format, rows.items, measured, .normal) catch |err| return closedEarly(err, &stdout_writer, status);
+    try report.rank(arena, rows.items, settings.classes);
+    const critical = report.countCritical(rows.items);
+    const failed = run.check and critical > 0;
+    const status: u8 = if (unreadable) 2 else if (failed) 1 else 0;
+    report.write(out, run.format, rows.items, measured, settings.classes) catch |err| return closedEarly(err, &stdout_writer, status);
     out.flush() catch |err| return closedEarly(err, &stdout_writer, status);
+    if (failed) std.debug.print("gnarl: --check: {d} function{s} over a critical threshold\n", .{ critical, if (critical == 1) "" else "s" });
     return status;
+}
+
+/// The configuration in the file `named`, or in complexity.zon if there is
+/// one, or the defaults. Null when the file cannot be used: why is said
+/// on stderr.
+fn loadConfig(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: Io, dir: Io.Dir, named: ?[]const u8) std.mem.Allocator.Error!?config.Config {
+    const path = named orelse config.default_path;
+    const source = dir.readFileAllocOptions(io, path, arena, .limited(1 << 20), .of(u8), 0) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        else => {
+            if (err == error.FileNotFound and named == null) return .{};
+            std.debug.print("gnarl: {s}: {t}\n", .{ path, err });
+            return null;
+        },
+    };
+    var diagnostics: std.zon.parse.Diagnostics = undefined;
+    var problem: config.Problem = undefined;
+    return config.parse(gpa, arena, source, &diagnostics, &problem) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        error.ParseZon => {
+            std.debug.print("gnarl: {f}", .{diagnostics.fmt(path)});
+            return null;
+        },
+        error.Invalid => {
+            std.debug.print("gnarl: {s}: {s}\n", .{ path, problem.message });
+            return null;
+        },
+    };
 }
 
 /// A reader that stops early, as `gnarl src | head` does, closes the pipe:
@@ -154,6 +200,9 @@ const Command = union(enum) {
         /// Cleaned, as `walk.collect` cleans the paths it lists.
         excludes: []const []const u8,
         format: report.Format,
+        /// The configuration file named, if one is.
+        config: ?[]const u8,
+        check: bool,
     },
     help,
     version,
@@ -167,6 +216,8 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
     var paths: std.ArrayList([]const u8) = .empty;
     var excludes: std.ArrayList([]const u8) = .empty;
     var format: report.Format = .text;
+    var config_path: ?[]const u8 = null;
+    var check = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
@@ -176,9 +227,16 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
             format = .json;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--check")) {
+            check = true;
+            continue;
+        }
         if (optionValue(args, &i, "--exclude")) |path| {
             if (path.len == 0) return .{ .usage_error = "--exclude needs a path" };
             try excludes.append(arena, try std.fs.path.resolveAlloc(arena, &.{path}));
+        } else if (optionValue(args, &i, "--config")) |path| {
+            if (path.len == 0) return .{ .usage_error = "--config needs a file" };
+            config_path = path;
         } else if (optionValue(args, &i, "--format")) |name| {
             format = std.meta.stringToEnum(report.Format, name) orelse
                 return .{ .usage_error = try arena.print("--format takes text, json or md, not '{s}'", .{name}) };
@@ -187,7 +245,7 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
         } else try paths.append(arena, arg);
     }
     if (paths.items.len == 0) return .{ .usage_error = "" };
-    return .{ .run = .{ .paths = paths.items, .excludes = excludes.items, .format = format } };
+    return .{ .run = .{ .paths = paths.items, .excludes = excludes.items, .format = format, .config = config_path, .check = check } };
 }
 
 /// The value of option `name` if `args[i.*]` is it, given as `name value`
@@ -226,7 +284,7 @@ fn expectRun(dir: Io.Dir, argv: []const []const u8, exit: u8, stdout: []const u8
     try std.testing.expectEqual(std.process.Child.Term{ .exited = exit }, result.term);
 }
 
-const thresholds_line = "Thresholds (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.\n";
+const thresholds_line = "Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.\n";
 
 test "a row per function, worst first, from every file read" {
     const io = std.testing.io;
@@ -239,9 +297,9 @@ test "a row per function, worst first, from every file read" {
 
     try expectRun(tmp.dir, &.{"."}, 0,
         \\cyclomatic  lines  nesting  params  weighted  location  function
-        \\       2      2        1       1           1  b.zig:2   S.m
-        \\       1      1        0       0           0  a.zig:1   f
-        \\       1      1        0       0           0  a.zig:2   test "f"
+        \\       2      2        1       1         1    b.zig:2   S.m
+        \\       1      1        0       0         0    a.zig:1   f
+        \\       1      1        0       0         0    a.zig:2   test "f"
         \\
         \\3 functions in 3 files: 0 over a critical threshold (!!), 0 more over a warning one (!).
         \\
@@ -289,13 +347,75 @@ test "--json: the same rows, for a program to read" {
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
-    const Doc = struct { functions: []const report.Row, files: usize, thresholds: Thresholds };
+    const Doc = struct { functions: []const report.Row, files: usize, thresholds: Classes };
     const doc = try std.json.parseFromSlice(Doc, gpa, result.stdout, .{});
     defer doc.deinit();
     try std.testing.expectEqual(1, doc.value.functions.len);
     try std.testing.expectEqualStrings("f", doc.value.functions[0].name);
     try std.testing.expectEqual(2, doc.value.functions[0].params_weighted);
     try std.testing.expectEqual(1, doc.value.files);
+}
+
+/// A function with twelve ifs: cyclomatic 13, a warning in normal code and
+/// critical in hot code.
+const thirteen = source: {
+    var s: []const u8 = "fn f(c: bool) void {\n";
+    for (0..12) |_| s = s ++ "    if (c) {}\n";
+    break :source s ++ "}\n";
+};
+
+test "--check fails on a critical threshold, by the class complexity.zon gives the file" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "hot.zig", .data = thirteen });
+    try tmp.dir.writeFile(io, .{ .sub_path = "normal.zig", .data = thirteen });
+
+    // No configuration: both normal, a warning each, and --check passes.
+    {
+        const result = try runGnarl(tmp.dir, &.{ "--check", "." });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+        try std.testing.expectEqualStrings("", result.stderr);
+    }
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "complexity.zon", .data = ".{ .hot = .{\"hot.zig\"} }\n" });
+    {
+        const result = try runGnarl(tmp.dir, &.{ "--check", "." });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+        try std.testing.expectEqualStrings("gnarl: --check: 1 function over a critical threshold\n", result.stderr);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "      13!!  ") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "      13!   ") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Thresholds for hot code (warning, critical): cyclomatic 8, 12;") != null);
+    }
+    // Without --check the same report exits 0.
+    {
+        const result = try runGnarl(tmp.dir, &.{"."});
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    }
+}
+
+test "a configuration that cannot be used is an error, and nothing is measured" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = "fn a() void {}\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "typo.zon", .data = ".{ .hott = .{\"a.zig\"} }\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "limits.zon", .data = ".{ .thresholds = .{ .hot = .{ .lines = .{ .warning = 9, .critical = 9 } } } }\n" });
+
+    try expectRun(tmp.dir, &.{ "--config", "nope.zon", "." }, 2, "", "gnarl: nope.zon: FileNotFound\n");
+    try expectRun(tmp.dir, &.{ "--config=limits.zon", "." }, 2, "", "gnarl: limits.zon: thresholds.hot.lines: the warning limit, 9, is not below the critical one, 9\n");
+    try expectRun(tmp.dir, &.{ "--config", "typo.zon", "." }, 2, "",
+        \\gnarl: typo.zon:1:5: error: unexpected field 'hott'
+        \\typo.zon:1:5: note: supported: 'hot', 'cold', 'thresholds'
+        \\
+    );
 }
 
 test "a file that does not parse is reported and the rest still listed" {
@@ -307,7 +427,7 @@ test "a file that does not parse is reported and the rest still listed" {
 
     try expectRun(tmp.dir, &.{"."}, 2,
         \\cyclomatic  lines  nesting  params  weighted  location    function
-        \\       1      1        0       0           0  good.zig:1  g
+        \\       1      1        0       0         0    good.zig:1  g
         \\
         \\1 function in 1 file: 0 over a critical threshold (!!), 0 more over a warning one (!).
         \\
@@ -325,7 +445,7 @@ test "a path that is missing or holds no .zig file is an error" {
 
     try expectRun(tmp.dir, &.{ "nope", "empty", "gen", "--exclude", "gen/a.zig", "b.zig" }, 2,
         \\cyclomatic  lines  nesting  params  weighted  location  function
-        \\       1      1        0       0           0  b.zig:1   b
+        \\       1      1        0       0         0    b.zig:1   b
         \\
         \\1 function in 1 file: 0 over a critical threshold (!!), 0 more over a warning one (!).
         \\
@@ -359,6 +479,20 @@ test "parseArgs: paths and excludes, in any order" {
     try std.testing.expectEqualStrings("_tmp", run.excludes[0]);
     try std.testing.expectEqualStrings(try std.fs.path.resolveAlloc(arena, &.{"src/vendor"}), run.excludes[1]);
     try std.testing.expectEqual(.text, run.format);
+    try std.testing.expectEqual(null, run.config);
+    try std.testing.expect(!run.check);
+}
+
+test "parseArgs: --config and --check" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const run = (try parseArgs(arena, &.{ "--check", "--config", "ci.zon", "src" })).run;
+    try std.testing.expect(run.check);
+    try std.testing.expectEqualStrings("ci.zon", run.config.?);
+    try std.testing.expectEqualStrings("ci.zon", (try parseArgs(arena, &.{ "src", "--config=ci.zon" })).run.config.?);
+    try std.testing.expectEqualStrings("--config needs a file", (try parseArgs(arena, &.{ "src", "--config" })).usage_error);
 }
 
 test "parseArgs: --format and --json" {
@@ -391,8 +525,10 @@ test "parseArgs: help, version and usage errors" {
 
 test {
     _ = @import("children.zig");
+    _ = @import("config.zig");
     _ = @import("cyclomatic.zig");
     _ = @import("functions.zig");
+    _ = @import("glob.zig");
     _ = @import("golden.zig");
     _ = @import("lines.zig");
     _ = @import("measure.zig");

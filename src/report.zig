@@ -7,7 +7,8 @@ const Allocator = std.mem.Allocator;
 
 const functions = @import("functions.zig");
 const thresholds = @import("thresholds.zig");
-const Thresholds = thresholds.Thresholds;
+const Class = thresholds.Class;
+const Classes = thresholds.Classes;
 const Metric = thresholds.Metric;
 const Trip = thresholds.Trip;
 
@@ -24,15 +25,19 @@ pub const Row = struct {
     nesting: u32,
     params: u32,
     params_weighted: u32,
+    /// The class of code its file is in, which picks its thresholds.
+    class: Class = .normal,
     /// The limits it is over, each metric once at its worst. Set by `rank`.
     trips: []const Trip = &.{},
 };
 
-/// Sets each row's trips against `limits`, and sorts the rows worst first:
-/// the most critical trips, then the most warnings, then by cyclomatic
-/// complexity, lines, nesting and parameters, then by path and line.
-pub fn rank(arena: Allocator, rows: []Row, limits: Thresholds) Allocator.Error!void {
+/// Sets each row's trips against its class's thresholds, and sorts the rows
+/// worst first: the most critical trips, then the most warnings, then by
+/// cyclomatic complexity, lines, nesting and parameters, then by path and
+/// line.
+pub fn rank(arena: Allocator, rows: []Row, classes: Classes) Allocator.Error!void {
     for (rows) |*row| {
+        const limits = classes.get(row.class);
         var buffer: [std.enums.values(Metric).len]Trip = undefined;
         var n: usize = 0;
         inline for (comptime std.enums.values(Metric)) |metric| {
@@ -73,55 +78,59 @@ fn levelOf(row: Row, metric: Metric) ?thresholds.Level {
     return null;
 }
 
+/// How many rows are over a critical threshold.
+pub fn countCritical(rows: []const Row) usize {
+    var n: usize = 0;
+    for (rows) |row| n += @intFromBool(tally(row, .critical) > 0);
+    return n;
+}
+
 /// Writes `rows`, ranked, in `format`. `files` is how many files they
-/// came from.
-pub fn write(w: *Writer, format: Format, rows: []const Row, files: usize, limits: Thresholds) Writer.Error!void {
+/// came from, and `classes` the thresholds they were ranked against.
+pub fn write(w: *Writer, format: Format, rows: []const Row, files: usize, classes: Classes) Writer.Error!void {
     switch (format) {
-        .text => try writeText(w, rows, files, limits),
-        .md => try writeMarkdown(w, rows, files, limits),
+        .text => try writeText(w, rows, files, classes),
+        .md => try writeMarkdown(w, rows, files, classes),
         .json => {
-            try std.json.Stringify.value(.{ .functions = rows, .files = files, .thresholds = limits }, .{ .whitespace = .indent_2 }, w);
+            try std.json.Stringify.value(.{ .functions = rows, .files = files, .thresholds = classes }, .{ .whitespace = .indent_2 }, w);
             try w.writeByte('\n');
         },
     }
 }
 
-/// The table's number columns, in order; the last has no limits.
-const Column = struct { header: []const u8, metric: ?Metric };
+/// The table's number columns, in order.
+const Column = struct { header: []const u8, metric: Metric };
 const columns = [_]Column{
     .{ .header = "cyclomatic", .metric = .cyclomatic },
     .{ .header = "lines", .metric = .lines },
     .{ .header = "nesting", .metric = .nesting },
     .{ .header = "params", .metric = .params },
-    .{ .header = "weighted", .metric = null },
+    .{ .header = "weighted", .metric = .params_weighted },
 };
 
 fn value(row: Row, column: Column) u32 {
-    const metric = column.metric orelse return row.params_weighted;
-    return switch (metric) {
+    return switch (column.metric) {
         inline else => |m| @field(row, @tagName(m)),
     };
 }
 
 /// What follows a number over a limit: `!` a warning, `!!` critical.
 fn marker(row: Row, column: Column) []const u8 {
-    const metric = column.metric orelse return "";
-    const level = levelOf(row, metric) orelse return "";
+    const level = levelOf(row, column.metric) orelse return "";
     return switch (level) {
         .warning => "!",
         .critical => "!!",
     };
 }
 
-fn writeText(w: *Writer, rows: []const Row, files: usize, limits: Thresholds) Writer.Error!void {
+fn writeText(w: *Writer, rows: []const Row, files: usize, classes: Classes) Writer.Error!void {
     // Each number column is wide enough for its header and for its widest
     // number with a two-character marker after it.
     var widths: [columns.len]usize = undefined;
     for (columns, &widths) |column, *width| {
         width.* = column.header.len;
         for (rows) |row| {
-            const marked = std.fmt.count("{d}", .{value(row, column)}) + @as(usize, if (column.metric != null) 2 else 0);
-            width.* = @max(width.*, marked);
+            width.* = @max(width.*, std.fmt.count("{d}", .{value(row, column)}) + 2);
         }
     }
     var location_width: usize = "location".len;
@@ -138,24 +147,23 @@ fn writeText(w: *Writer, rows: []const Row, files: usize, limits: Thresholds) Wr
         for (columns, widths) |column, width| {
             const mark = marker(row, column);
             const number = std.fmt.count("{d}", .{value(row, column)});
-            const tail: usize = if (column.metric != null) 2 else 0;
-            try w.splatByteAll(' ', width - tail - number);
+            try w.splatByteAll(' ', width - 2 - number);
             try w.print("{d}{s}", .{ value(row, column), mark });
-            try w.splatByteAll(' ', tail - mark.len + 2);
+            try w.splatByteAll(' ', 2 - mark.len + 2);
         }
         try w.print("{s}:{d}", .{ row.path, row.line });
         try w.splatByteAll(' ', locationPad(row, location_width) + 2);
         try w.print("{s}\n", .{row.name});
     }
     try w.writeByte('\n');
-    try writeSummary(w, rows, files, limits, "\n");
+    try writeSummary(w, rows, files, classes, "\n");
 }
 
 fn locationPad(row: Row, width: usize) usize {
     return width - std.fmt.count("{s}:{d}", .{ row.path, row.line });
 }
 
-fn writeMarkdown(w: *Writer, rows: []const Row, files: usize, limits: Thresholds) Writer.Error!void {
+fn writeMarkdown(w: *Writer, rows: []const Row, files: usize, classes: Classes) Writer.Error!void {
     try w.writeAll("|");
     for (columns) |column| try w.print(" {s} |", .{column.header});
     try w.writeAll(" location | function |\n|");
@@ -175,7 +183,7 @@ fn writeMarkdown(w: *Writer, rows: []const Row, files: usize, limits: Thresholds
         try w.writeAll(" |\n");
     }
     try w.writeByte('\n');
-    try writeSummary(w, rows, files, limits, "\n\n");
+    try writeSummary(w, rows, files, classes, "\n\n");
 }
 
 /// Writes `text` and `suffix` as one Markdown code span that a table cell
@@ -201,8 +209,8 @@ fn writeCode(w: *Writer, text: []const u8, suffix: []const u8) Writer.Error!void
 }
 
 /// How many functions were measured and how many are over a limit, then
-/// the limits; `gap` goes between the two.
-fn writeSummary(w: *Writer, rows: []const Row, files: usize, limits: Thresholds, gap: []const u8) Writer.Error!void {
+/// the limits of each class of code they are in; `gap` ends each line.
+fn writeSummary(w: *Writer, rows: []const Row, files: usize, classes: Classes, gap: []const u8) Writer.Error!void {
     var critical: usize = 0;
     var warning: usize = 0;
     for (rows) |row| {
@@ -210,21 +218,27 @@ fn writeSummary(w: *Writer, rows: []const Row, files: usize, limits: Thresholds,
             critical += 1;
         } else if (row.trips.len > 0) warning += 1;
     }
-    try w.print("{d} function{s} in {d} file{s}: {d} over a critical threshold (!!), {d} more over a warning one (!).{s}", .{
-        rows.len, plural(rows.len), files, plural(files), critical, warning, gap,
+    try w.print("{d} function{s} in {d} file{s}: {d} over a critical threshold (!!), {d} more over a warning one (!).", .{
+        rows.len, plural(rows.len), files, plural(files), critical, warning,
     });
-    try w.writeAll("Thresholds (warning, critical):");
-    var first = true;
-    inline for (comptime std.enums.values(Metric)) |metric| {
-        const limit = @field(limits, @tagName(metric));
-        if (limit.warning != null or limit.critical != null) {
-            try w.print("{s} {s}", .{ if (first) "" else ";", @tagName(metric) });
+    for (std.enums.values(Class)) |class| {
+        for (rows) |row| {
+            if (row.class == class) break;
+        } else continue;
+        try w.print("{s}Thresholds for {t} code (warning, critical):", .{ gap, class });
+        const limits = classes.get(class);
+        var first = true;
+        for (std.enums.values(Metric)) |metric| {
+            const limit = limits.of(metric);
+            if (limit.warning == null and limit.critical == null) continue;
+            try w.print("{s} {t}", .{ if (first) "" else ";", metric });
             first = false;
             if (limit.warning) |n| try w.print(" {d}", .{n}) else try w.writeAll(" -");
             if (limit.critical) |n| try w.print(", {d}", .{n});
         }
+        try w.writeAll(if (first) " none." else ".");
     }
-    try w.writeAll(".\n");
+    try w.writeByte('\n');
 }
 
 fn plural(n: usize) []const u8 {
@@ -240,7 +254,7 @@ fn sampleRows(arena: Allocator) ![]Row {
         .{ .path = "src/a.zig", .line = 30, .column = 1, .name = "test \"a|b\"", .kind = .@"test", .cyclomatic = 3, .lines = 12, .nesting = 1, .params = 0, .params_weighted = 0 },
         .{ .path = "src/a.zig", .line = 2, .column = 4, .name = "wide", .kind = .@"fn", .cyclomatic = 4, .lines = 20, .nesting = 1, .params = 6, .params_weighted = 8 },
     });
-    try rank(arena, rows, .normal);
+    try rank(arena, rows, .defaults);
     return rows;
 }
 
@@ -249,7 +263,7 @@ fn expectWritten(format: Format, expected: []const u8) !void {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var out: Writer.Allocating = .init(arena);
-    try write(&out.writer, format, try sampleRows(arena), 2, .normal);
+    try write(&out.writer, format, try sampleRows(arena), 2, .defaults);
     try std.testing.expectEqualStrings(expected, out.written());
 }
 
@@ -264,18 +278,51 @@ test "rank: critical first, then warnings, then the numbers, then the place" {
     try std.testing.expectEqual(.critical, levelOf(rows[0], .lines).?);
     try std.testing.expectEqual(.warning, levelOf(rows[0], .nesting).?);
     try std.testing.expectEqual(.warning, levelOf(rows[1], .params).?);
+    try std.testing.expectEqual(1, countCritical(rows));
+    try std.testing.expectEqual(0, countCritical(rows[1..]));
+}
+
+test "rank: each row against its own class's thresholds" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const row: Row = .{ .path = "a.zig", .line = 1, .column = 4, .name = "f", .kind = .@"fn", .cyclomatic = 13, .lines = 45, .nesting = 0, .params = 0, .params_weighted = 0 };
+    var rows = [_]Row{ row, row, row };
+    rows[0].class = .hot;
+    rows[1].line = 2;
+    rows[2].class = .cold;
+    rows[2].line = 3;
+    try rank(arena, &rows, .defaults);
+    // Hot: cyclomatic 13 is past 12, lines 45 past 40. Normal: a warning
+    // for cyclomatic only. Cold: nothing.
+    try std.testing.expectEqual(Class.hot, rows[0].class);
+    try std.testing.expectEqual(2, rows[0].trips.len);
+    try std.testing.expectEqual(.critical, levelOf(rows[0], .cyclomatic).?);
+    try std.testing.expectEqual(.warning, levelOf(rows[1], .cyclomatic).?);
+    try std.testing.expectEqual(null, levelOf(rows[1], .lines));
+    try std.testing.expectEqual(0, rows[2].trips.len);
+
+    var out: Writer.Allocating = .init(arena);
+    try writeSummary(&out.writer, &rows, 1, .defaults, "\n");
+    try std.testing.expectEqualStrings(
+        \\3 functions in 1 file: 1 over a critical threshold (!!), 1 more over a warning one (!).
+        \\Thresholds for hot code (warning, critical): cyclomatic 8, 12; lines 40, 80; nesting 3; params 4.
+        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
+        \\Thresholds for cold code (warning, critical): cyclomatic -, 20.
+        \\
+    , out.written());
 }
 
 test "write: text" {
     try expectWritten(.text,
         \\cyclomatic  lines  nesting  params  weighted  location       function
-        \\      22!!  140!!      5!      2           3  src/b.zig:120  Parser.next
-        \\       4     20        1       6!          8  src/a.zig:2    wide
-        \\       3     12        1       0           0  src/a.zig:30   test "a|b"
-        \\       1      3        0       0           0  src/a.zig:9    small
+        \\      22!!  140!!      5!      2         3    src/b.zig:120  Parser.next
+        \\       4     20        1       6!        8    src/a.zig:2    wide
+        \\       3     12        1       0         0    src/a.zig:30   test "a|b"
+        \\       1      3        0       0         0    src/a.zig:9    small
         \\
         \\4 functions in 2 files: 1 over a critical threshold (!!), 1 more over a warning one (!).
-        \\Thresholds (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
+        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
         \\
     );
 }
@@ -291,7 +338,7 @@ test "write: Markdown" {
         \\
         \\4 functions in 2 files: 1 over a critical threshold (!!), 1 more over a warning one (!).
         \\
-        \\Thresholds (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
+        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
         \\
     );
 }
@@ -301,10 +348,10 @@ test "write: JSON" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var out: Writer.Allocating = .init(arena);
-    try write(&out.writer, .json, try sampleRows(arena), 2, .normal);
+    try write(&out.writer, .json, try sampleRows(arena), 2, .defaults);
 
     // Read back, it says what the table says.
-    const Doc = struct { functions: []const Row, files: usize, thresholds: Thresholds };
+    const Doc = struct { functions: []const Row, files: usize, thresholds: Classes };
     const doc = try std.json.parseFromSliceLeaky(Doc, arena, out.written(), .{});
     try std.testing.expectEqual(4, doc.functions.len);
     try std.testing.expectEqual(2, doc.files);
@@ -313,7 +360,9 @@ test "write: JSON" {
     try std.testing.expectEqual(.@"test", doc.functions[2].kind);
     try std.testing.expectEqual(3, doc.functions[0].trips.len);
     try std.testing.expectEqual(Trip{ .metric = .cyclomatic, .level = .critical, .limit = 15 }, doc.functions[0].trips[0]);
-    try std.testing.expectEqual(null, doc.thresholds.nesting.critical);
+    try std.testing.expectEqual(null, doc.thresholds.normal.nesting.critical);
+    try std.testing.expectEqual(20, doc.thresholds.cold.cyclomatic.critical);
+    try std.testing.expectEqual(.normal, doc.functions[0].class);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"params_weighted\": 3") != null);
 }
 
