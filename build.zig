@@ -22,6 +22,9 @@ pub fn build(b: *std.Build) void {
     // and to run every time rather than be cached on the test binary alone.
     const test_options = b.addOptions();
     test_options.addOptionPath("gnarl_exe", exe.getEmittedBin());
+    // `zig build test -Dupdate`: a golden table whose numbers moved is
+    // rewritten to them (src/golden.zig).
+    test_options.addOption(bool, "update", b.option(bool, "update", "Rewrite the golden tables to what gnarl measures") orelse false);
     const test_module = gnarlModule(b, target, optimize, options);
     test_module.addOptions("test_options", test_options);
     const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = test_module }));

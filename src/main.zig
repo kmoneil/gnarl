@@ -7,11 +7,7 @@ const Ast = std.zig.Ast;
 
 const build_options = @import("build_options");
 const test_options = @import("test_options");
-const cyclomatic = @import("cyclomatic.zig");
-const functions = @import("functions.zig");
-const lines = @import("lines.zig");
-const nesting = @import("nesting.zig");
-const params = @import("params.zig");
+const measure = @import("measure.zig");
 const report = @import("report.zig");
 const Thresholds = @import("thresholds.zig").Thresholds;
 const walk = @import("walk.zig");
@@ -122,22 +118,7 @@ pub fn main(init: std.process.Init) !u8 {
             continue;
         }
         measured += 1;
-        const scratch = file_arena.allocator();
-        for (try functions.list(scratch, &tree)) |function| {
-            const p = params.count(&tree, function);
-            try rows.append(arena, .{
-                .path = path,
-                .line = function.line,
-                .column = function.column,
-                .name = try arena.dupe(u8, function.name),
-                .kind = function.kind,
-                .cyclomatic = try cyclomatic.count(scratch, &tree, function.node),
-                .lines = try lines.count(scratch, &tree, function.node),
-                .nesting = try nesting.depth(scratch, &tree, function.node),
-                .params = p.count,
-                .params_weighted = p.weighted,
-            });
-        }
+        try measure.file(arena, file_arena.allocator(), path, &tree, &rows);
     }
     try report.rank(arena, rows.items, .normal);
     const status: u8 = if (unreadable) 2 else 0;
@@ -412,7 +393,9 @@ test {
     _ = @import("children.zig");
     _ = @import("cyclomatic.zig");
     _ = @import("functions.zig");
+    _ = @import("golden.zig");
     _ = @import("lines.zig");
+    _ = @import("measure.zig");
     _ = @import("nesting.zig");
     _ = @import("params.zig");
     _ = @import("report.zig");

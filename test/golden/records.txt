@@ -1,0 +1,38 @@
+26 Field.raw cyclomatic=1 lines=2 nesting=0 params=1 weighted=1
+33 Field.value cyclomatic=2 lines=4 nesting=1 params=3 weighted=3
+74 unescape cyclomatic=9 lines=15 nesting=2 params=3 weighted=3
+94 test "unescape" cyclomatic=1 lines=11 nesting=0 params=0 weighted=0
+107 test "value copies only what needs it" cyclomatic=1 lines=7 nesting=0 params=0 weighted=0
+174 Scanner.init cyclomatic=2 lines=12 nesting=0 params=2 weighted=2
+189 Scanner.deinit cyclomatic=2 lines=4 nesting=1 params=0 weighted=0
+197 Scanner.indexable cyclomatic=11 lines=7 nesting=2 params=1 weighted=1
+210 Scanner.feed cyclomatic=2 lines=8 nesting=0 params=3 weighted=3
+221 Scanner.keepFrom cyclomatic=1 lines=2 nesting=0 params=0 weighted=0
+233 Scanner.next cyclomatic=14 lines=17 nesting=3 params=1 weighted=1
+258 Scanner.skipEmptyLines cyclomatic=11 lines=8 nesting=2 params=0 weighted=0
+271 Scanner.dropEntries cyclomatic=4 lines=4 nesting=1 params=1 weighted=1
+278 Scanner.reindex cyclomatic=9 lines=18 nesting=3 params=0 weighted=0
+302 Scanner.cut cyclomatic=7 lines=13 nesting=2 params=1 weighted=1
+320 Scanner.record cyclomatic=9 lines=41 nesting=3 params=1 weighted=1
+371 Scanner.classify cyclomatic=19 lines=33 nesting=3 params=3 weighted=3
+415 Scanner.nextSpecial cyclomatic=6 lines=12 nesting=3 params=2 weighted=2
+434 Scanner.fallback cyclomatic=1 lines=3 nesting=0 params=1 weighted=1
+439 Scanner.scalar cyclomatic=7 lines=24 nesting=2 params=1 weighted=1
+472 values cyclomatic=5 lines=22 nesting=2 params=6 weighted=6
+515 Batch.deinit cyclomatic=1 lines=4 nesting=0 params=0 weighted=0
+521 Batch.clear cyclomatic=1 lines=5 nesting=0 params=0 weighted=0
+528 Batch.len cyclomatic=1 lines=2 nesting=0 params=0 weighted=0
+532 Batch.recordFields cyclomatic=2 lines=3 nesting=1 params=1 weighted=1
+539 Batch.fill cyclomatic=7 lines=11 nesting=3 params=2 weighted=2
+564 Parsed.deinit cyclomatic=1 lines=4 nesting=0 params=0 weighted=0
+571 parseReference cyclomatic=2 lines=11 nesting=1 params=3 weighted=3
+587 parseScanner cyclomatic=6 lines=19 nesting=2 params=4 weighted=4
+612 expectSame cyclomatic=9 lines=19 nesting=3 params=4 weighted=4
+636 test "the scanner agrees with the reference on the edge cases" cyclomatic=3 lines=44 nesting=2 params=0 weighted=0
+687 randomInput cyclomatic=7 lines=9 nesting=2 params=3 weighted=3
+712 test "the scanner agrees with the reference on random inputs" cyclomatic=3 lines=17 nesting=2 params=0 weighted=0
+734 test "well-formed records never leave the index" cyclomatic=3 lines=16 nesting=2 params=0 weighted=0
+754 test "a batch stops at its row and byte limits" cyclomatic=1 lines=18 nesting=0 params=0 weighted=0
+774 test "a batch of wide rows of empty fields stops at its byte limit" cyclomatic=1 lines=11 nesting=0 params=0 weighted=0
+788 scannerInitDeinit cyclomatic=1 lines=3 nesting=0 params=0 weighted=0
+793 test "Scanner.init frees what it holds when an allocation fails" cyclomatic=1 lines=2 nesting=0 params=0 weighted=0
