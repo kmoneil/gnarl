@@ -13,6 +13,7 @@ const measure = @import("measure.zig");
 const messages = @import("messages.zig");
 const report = @import("report.zig");
 const select = @import("select.zig");
+const skill = @import("skill.zig");
 const Classes = @import("thresholds.zig").Classes;
 const walk = @import("walk.zig");
 
@@ -21,7 +22,8 @@ const usage =
     \\             [--all] [--top <n>] [--function <function>]...
     \\             [--format <format>] [--json] <path>...
     \\       gnarl --explain <function>... [<path>...]
-    \\       gnarl --version
+    \\       gnarl skill [--install <dir>]
+    \\       gnarl --version | --help
     \\
     \\Measures every function and test block in each file named, and in
     \\every .zig file under each directory named: cyclomatic complexity,
@@ -30,6 +32,10 @@ const usage =
     \\a threshold, worst first, and a summary of them all; a number over its
     \\warning threshold is marked !, over its critical one !!. Hidden files
     \\and directories, zig-out and zig-pkg are skipped.
+    \\
+    \\gnarl skill prints what an AI agent needs to work with gnarl: the
+    \\loop, the rules with examples, the output; --install <dir> writes it
+    \\to <dir>/gnarl/SKILL.md.
     \\
     \\The thresholds depend on the class of code a file is in, hot, normal
     \\or cold, which complexity.zon in the current directory gives by globs,
@@ -96,6 +102,17 @@ pub fn main(init: std.process.Init) !u8 {
         .version => {
             try out.print("gnarl {s}\n", .{build_options.version});
             try out.flush();
+            return 0;
+        },
+        .skill => |install_dir| {
+            if (install_dir) |dir| {
+                const path = skill.install(arena, io, dir) catch |err| {
+                    std.debug.print("gnarl: {s}: {t}\n", .{ dir, err });
+                    return 2;
+                };
+                try out.print("{s}\n", .{path});
+            } else try out.writeAll(skill.text);
+            out.flush() catch |err| return closedEarly(err, &stdout_writer, 0);
             return 0;
         },
         .usage_error => |message| {
@@ -313,6 +330,8 @@ const Command = union(enum) {
     },
     help,
     version,
+    /// `gnarl skill`, and the directory to install it under, if any.
+    skill: ?[]const u8,
     /// Why the command line cannot be run; empty when the usage alone says.
     usage_error: []const u8,
 };
@@ -320,6 +339,16 @@ const Command = union(enum) {
 /// `-h` and `--help`, `--version`, and an unknown option take effect where
 /// they stand; anything after them is not read.
 fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocator.Error!Command {
+    // A path named skill is ./skill.
+    if (args.len > 0 and std.mem.eql(u8, args[0], "skill")) {
+        if (args.len == 1) return .{ .skill = null };
+        var i: usize = 1;
+        if (optionValue(args, &i, "--install")) |dir| {
+            if (dir.len == 0) return .{ .usage_error = "--install needs a directory" };
+            if (i + 1 == args.len) return .{ .skill = dir };
+        }
+        return .{ .usage_error = "gnarl skill takes --install <dir>, or nothing" };
+    }
     var paths: std.ArrayList([]const u8) = .empty;
     var excludes: std.ArrayList([]const u8) = .empty;
     var format: report.Format = .text;
@@ -799,6 +828,69 @@ test "parseArgs: --config and --check" {
     try std.testing.expectEqualStrings("--config needs a file", (try parseArgs(arena, &.{ "src", "--config" })).usage_error);
 }
 
+test "gnarl skill prints the skill; --install writes it" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try expectRun(tmp.dir, &.{"skill"}, 0, skill.text, "");
+    const result = try runGnarl(tmp.dir, &.{ "skill", "--install", "agents" });
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("agents" ++ std.fs.path.sep_str ++ "gnarl" ++ std.fs.path.sep_str ++ "SKILL.md\n", result.stdout);
+    const written = try tmp.dir.readFileAlloc(io, "agents/gnarl/SKILL.md", std.testing.allocator, .limited(1 << 20));
+    defer std.testing.allocator.free(written);
+    try std.testing.expectEqualStrings(skill.text, written);
+}
+
+test "the skill names every flag gnarl takes, and no other" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const in_usage = try flags(arena, usage);
+    const in_skill = try flags(arena, skill.text);
+    var ok = true;
+    for (in_usage.keys()) |flag| if (!in_skill.contains(flag)) {
+        std.debug.print("{s} is in --help but not in the skill\n", .{flag});
+        ok = false;
+    };
+    for (in_skill.keys()) |flag| if (!in_usage.contains(flag)) {
+        std.debug.print("{s} is in the skill but gnarl does not take it\n", .{flag});
+        ok = false;
+    };
+    try std.testing.expect(ok);
+    try std.testing.expect(in_usage.count() >= 12);
+}
+
+/// Every `--flag` in `text`.
+fn flags(arena: std.mem.Allocator, text: []const u8) !std.StringArrayHashMapUnmanaged(void) {
+    var out: std.StringArrayHashMapUnmanaged(void) = .empty;
+    var i: usize = 0;
+    while (std.mem.findPos(u8, text, i, "--")) |at| {
+        i = at + 2;
+        if (at > 0 and (std.ascii.isAlphanumeric(text[at - 1]) or text[at - 1] == '-')) continue;
+        var end = i;
+        while (end < text.len and (std.ascii.isLower(text[end]) or (text[end] == '-' and end + 1 < text.len and std.ascii.isLower(text[end + 1])))) end += 1;
+        if (end == i) continue;
+        try out.put(arena, text[at..end], {});
+        i = end;
+    }
+    return out;
+}
+
+test "parseArgs: gnarl skill" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expectEqual(null, (try parseArgs(arena, &.{"skill"})).skill);
+    try std.testing.expectEqualStrings("d", (try parseArgs(arena, &.{ "skill", "--install", "d" })).skill.?);
+    try std.testing.expectEqualStrings("d", (try parseArgs(arena, &.{ "skill", "--install=d" })).skill.?);
+    try std.testing.expectEqualStrings("gnarl skill takes --install <dir>, or nothing", (try parseArgs(arena, &.{ "skill", "src" })).usage_error);
+    try std.testing.expectEqualStrings("--install needs a directory", (try parseArgs(arena, &.{ "skill", "--install" })).usage_error);
+    // A path called skill is given as ./skill.
+    try std.testing.expectEqualStrings("./skill", (try parseArgs(arena, &.{"./skill"})).run.paths[0]);
+}
+
 test "parseArgs: --explain, more than once, with or without paths" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
@@ -859,6 +951,7 @@ test {
     _ = @import("params.zig");
     _ = @import("report.zig");
     _ = @import("select.zig");
+    _ = @import("skill.zig");
     _ = @import("thresholds.zig");
     _ = @import("walk.zig");
 }
