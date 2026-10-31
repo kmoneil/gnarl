@@ -47,6 +47,9 @@ pub const Cost = struct {
     adds: u32,
     /// How much of `adds` is for the levels it sits in.
     depth: u32 = 0,
+    /// Whether its cost grows with its depth, as an `if`'s does and an
+    /// `and`'s does not: moved to a shallower place, it costs less.
+    structure: bool = false,
     /// Why it costs what it does, when its kind and depth do not say.
     why: []const u8 = "",
 
@@ -149,7 +152,7 @@ const Walk = struct {
         const d = item.depth;
         if (item.place == .else_if) {
             try w.add(.{ .token = full.ast.if_token, .construct = "else if", .adds = 1 });
-        } else try w.add(.{ .token = full.ast.if_token, .construct = "if", .adds = 1 + d, .depth = d });
+        } else try w.add(.{ .token = full.ast.if_token, .construct = "if", .adds = 1 + d, .depth = d, .structure = true });
         try w.push(.{ .node = full.ast.cond_expr, .depth = d, .frame = item.frame });
         try w.push(.{ .node = full.ast.then_expr, .depth = d + 1, .frame = item.frame, .place = .body });
         const e = full.ast.else_expr.unwrap() orelse return;
@@ -167,7 +170,7 @@ const Walk = struct {
         const tree = w.tree;
         const d = item.depth;
         const parts = try w.loopParts(item);
-        try w.add(.{ .token = parts.keyword, .construct = try w.text(&.{ if (parts.inline_token != null) "inline " else "", tree.tokenSlice(parts.keyword) }), .adds = 1 + d, .depth = d });
+        try w.add(.{ .token = parts.keyword, .construct = try w.text(&.{ if (parts.inline_token != null) "inline " else "", tree.tokenSlice(parts.keyword) }), .adds = 1 + d, .depth = d, .structure = true });
         // A jump from the body ends the loop; one from its else does not,
         // the loop being over by then.
         const frame = try w.open(item.frame, .loop, parts.label);
@@ -200,7 +203,7 @@ const Walk = struct {
         const full = tree.fullSwitch(item.node).?;
         const d = item.depth;
         if (own) {
-            try w.add(.{ .token = full.ast.switch_token, .construct = "switch", .adds = 1 + d, .depth = d });
+            try w.add(.{ .token = full.ast.switch_token, .construct = "switch", .adds = 1 + d, .depth = d, .structure = true });
         } else try w.add(.{ .token = full.ast.switch_token, .construct = "switch", .adds = 0, .why = "the handler: one structure with its catch or orelse" });
         try w.push(.{ .node = full.ast.condition, .depth = d, .frame = item.frame });
         const frame = if (full.label_token) |label| try w.open(item.frame, .@"switch", label) else item.frame;
@@ -226,11 +229,11 @@ const Walk = struct {
                 try w.push(.{ .node = rhs, .depth = d, .frame = item.frame });
             },
             .block => {
-                try w.add(.{ .token = keyword, .construct = name, .adds = 1 + d, .depth = d });
+                try w.add(.{ .token = keyword, .construct = name, .adds = 1 + d, .depth = d, .structure = true });
                 try w.push(.{ .node = rhs, .depth = d + 1, .frame = item.frame, .place = .body });
             },
             .@"switch" => {
-                try w.add(.{ .token = keyword, .construct = name, .adds = 1 + d, .depth = d });
+                try w.add(.{ .token = keyword, .construct = name, .adds = 1 + d, .depth = d, .structure = true });
                 try w.switchOn(.{ .node = rhs, .depth = d, .frame = item.frame }, false);
             },
         }

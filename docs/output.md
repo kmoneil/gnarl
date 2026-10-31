@@ -135,6 +135,30 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
       - `weight`: what it adds to the weighted count; 0 when it is left
         out of both.
       - `why`: why it is left out, or weighs 2.
+  - `regions`: where the numbers come from: the signature, then each
+    statement of the body, each construct, logical line and level in the
+    region that holds it, so the regions add up to the totals
+    (cyclomatic's base 1 aside):
+    - `first_line`, `last_line`: the lines it spans.
+    - `statements`: how many of the body's statements it is; 0 for the
+      signature.
+    - `cyclomatic`, `cognitive`, `lines`: what it adds to each.
+    - `nesting`: the deepest level a construct in it opens; 0 for none.
+    - `text`: its first line, as written.
+  - `range`: for a function named as `path:A-B`, what lines A to B cost;
+    null otherwise:
+    - `first_line`, `last_line`: A and B.
+    - `cyclomatic`, `cognitive`, `lines`, `nesting`: as for a region.
+    - `depth`: how much of `cognitive` is for the depth its structures
+      sit at.
+    - `extracted`: the lines moved into a function of their own, about;
+      a `return`, `break` or `continue` that leaves them is not accounted
+      for:
+      - `helper`: that function's `cyclomatic`, `cognitive` and
+        `nesting`, its structures as much shallower as the lines'
+        outermost sat deep.
+      - `rest`: this function's `cyclomatic`, `cognitive` and `lines`
+        after, the call a line of its own.
 
 ## A diff
 
@@ -171,9 +195,11 @@ In csv and tsv, an explanation is a row per item, with the columns
 has a `total` row; cyclomatic's other rows (`base`, 1, and the branches)
 add up to it, as cognitive's (the costs) do, their `why` saying how much
 of each is for its depth; nesting's deepest `level` is it, lines has a
-row for
-`span` and each kind, and params a `weighted` row and a row per
-parameter (`name: type`, with its weight).
+row for `span` and each kind, and params a `weighted` row and a row per
+parameter (`name: type`, with its weight). Each region has a row per
+metric under `region`, `at` its lines (`12-30`) and `why` its first
+line; a range has its rows under `range`, the estimate's named
+`helper.cyclomatic`, `rest.lines` and so on.
 
 csv quotes a field only when it holds a comma, a quote or a line break,
 a quote inside doubled. tsv holds no tab or line break in a field: a

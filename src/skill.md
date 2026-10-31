@@ -20,8 +20,12 @@ as often as it helps.
    `path:line` as the report prints it, any line inside the function, or
    its name (or the end of it: `record` finds `Validator.record`). It
    lists each construct counted and where (for cognitive complexity, how
-   much of each cost is its depth), the deepest nesting chain, how
+   much of each cost is its depth), the regions of the body (the
+   signature and each statement, what each adds, so the costliest
+   stand out), the deepest nesting chain, how
    the lines divide, and each parameter: aim the refactor at those lines.
+   `gnarl --explain path:A-B` says what lines A to B cost and about what
+   moving them into a function of their own would leave, before you do.
 3. Change the code, then `gnarl --diff HEAD` lists each function the
    change touched (uncommitted edits and new files included) with its
    numbers before and after: worse first, then mixed (some numbers up and

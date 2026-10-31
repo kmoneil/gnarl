@@ -20,6 +20,16 @@ const children = @import("children.zig");
 /// The logical lines of `function`, a `fn_decl` or `test_decl`. The working
 /// memory is allocated with `arena`.
 pub fn count(arena: Allocator, tree: *const Ast, function: Node.Index) Allocator.Error!u32 {
+    return walk(arena, tree, function, null);
+}
+
+/// The count of `function`, as `count` gives it, with the first code
+/// token of each line counted appended to `firsts`, in order.
+pub fn firsts(arena: Allocator, tree: *const Ast, function: Node.Index, out: *std.ArrayList(Ast.TokenIndex)) Allocator.Error!u32 {
+    return walk(arena, tree, function, out);
+}
+
+fn walk(arena: Allocator, tree: *const Ast, function: Node.Index, sink: ?*std.ArrayList(Ast.TokenIndex)) Allocator.Error!u32 {
     const nested = try nestedRanges(arena, tree, function);
     const first = tree.firstToken(function);
     const last = tree.lastToken(function);
@@ -43,6 +53,7 @@ pub fn count(arena: Allocator, tree: *const Ast, function: Node.Index) Allocator
         if (line != counted_line) {
             lines += 1;
             counted_line = line;
+            if (sink) |out| try out.append(arena, token);
         }
     }
     return lines;

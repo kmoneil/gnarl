@@ -62,6 +62,15 @@ pub fn depth(arena: Allocator, tree: *const Ast, function: Node.Index) Allocator
     return w.run(function);
 }
 
+/// Every construct in `function` that opens a level, appended to `out` in
+/// no particular order; returns the depth, as `depth` gives it.
+pub fn levels(arena: Allocator, tree: *const Ast, function: Node.Index, out: *std.ArrayList(Level)) Allocator.Error!u32 {
+    var w: Walk = .{ .arena = arena, .tree = tree };
+    const deepest = try w.run(function);
+    for (w.frames.items[1..]) |frame| try out.append(arena, frame.level);
+    return deepest;
+}
+
 /// The depth of `function`, as `depth` gives it, with the constructs that
 /// reach it appended to `chain`, outermost first. Allocated with `arena`.
 pub fn explain(arena: Allocator, tree: *const Ast, function: Node.Index, chain: *std.ArrayList(Level)) Allocator.Error!u32 {

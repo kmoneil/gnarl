@@ -136,7 +136,8 @@ test "docs/output.md lists every field of an explanation, and no other" {
     const source = "fn f(x: u8) void {\n    if (x > 0) {}\n}\n";
     var tree = try Ast.parse(std.testing.allocator, source, .{});
     defer tree.deinit(std.testing.allocator);
-    var search: explain.Search = try .init(arena, &.{"f"});
+    // By name, and by a range of lines.
+    var search: explain.Search = try .init(arena, &.{ "f", "a.zig:2-2" });
     var classes: thresholds.Classes = .defaults;
     classes.normal = .{ .cyclomatic = .{ .warning = 1 } };
     try search.file(arena, arena, "a.zig", &tree, .normal, classes);

@@ -17,6 +17,7 @@ const Messages = messages.Messages;
 const lines = @import("lines.zig");
 const nesting = @import("nesting.zig");
 const params = @import("params.zig");
+const regions = @import("regions.zig");
 const report = @import("report.zig");
 const select = @import("select.zig");
 const thresholds = @import("thresholds.zig");
@@ -47,9 +48,69 @@ pub const Explanation = struct {
     nesting: struct { value: u32, chain: []const Level },
     lines: struct { value: u32, span: u32, blank: u32, comment: u32, closer: u32, nested: u32 },
     params: struct { value: u32, weighted: u32, each: []const params.Param },
+    /// The signature, then each statement of the body, and what each adds.
+    regions: []const Region,
+    /// For `path:A-B`, what those lines cost; null otherwise.
+    range: ?Range = null,
+};
+
+pub const Region = struct {
+    first_line: u32,
+    last_line: u32,
+    /// How many of the body's statements it is: 0 for the signature.
+    statements: u32,
+    cyclomatic: u32,
+    cognitive: u32,
+    lines: u32,
+    /// The deepest level a construct in it opens; 0 for none.
+    nesting: u32,
+    /// Its first line, as written.
+    text: []const u8,
+};
+
+pub const Range = struct {
+    first_line: u32,
+    last_line: u32,
+    cyclomatic: u32,
+    cognitive: u32,
+    /// How much of `cognitive` is for the depth its structures sit at.
+    depth: u32,
+    lines: u32,
+    /// The deepest level a construct in the lines opens.
+    nesting: u32,
+    /// Moved into a function of its own, about: that function's numbers
+    /// and what this one keeps.
+    extracted: regions.Extracted,
 };
 
 const LineIndex = select.LineIndex;
+
+/// The signature and each statement of `function`'s body, and what each
+/// adds. Allocated with `arena`; `scratch` is working memory.
+fn regionsOf(arena: Allocator, scratch: Allocator, tree: *const Ast, index: LineIndex, function: Ast.Node.Index) Allocator.Error![]const Region {
+    const facts: regions.Facts = try .of(scratch, tree, function);
+    const raw = try regions.ofBody(scratch, tree, function, facts);
+    const out = try arena.alloc(Region, raw.len);
+    for (raw, out) |r, *o| o.* = .{
+        .first_line = index.ofToken(tree, r.first).line,
+        .last_line = index.ofToken(tree, r.last).line,
+        .statements = r.statements,
+        .cyclomatic = r.sum.cyclomatic,
+        .cognitive = r.sum.cognitive,
+        .lines = r.sum.lines,
+        .nesting = r.sum.nesting,
+        .text = try arena.dupe(u8, lineText(tree.source, tree.tokenStart(r.first))),
+    };
+    return out;
+}
+
+/// The line the byte at `offset` is on, without its indentation or its
+/// line break.
+fn lineText(source: []const u8, offset: usize) []const u8 {
+    const start = if (std.mem.findScalarLast(u8, source[0..offset], '\n')) |nl| nl + 1 else 0;
+    const end = std.mem.findScalarPos(u8, source, offset, '\n') orelse source.len;
+    return std.mem.trim(u8, source[start..end], " \t\r");
+}
 
 /// Every reason for `function`'s numbers. The strings are copied into
 /// `arena`, so the explanation outlives `tree`; `scratch` is working
@@ -121,6 +182,7 @@ fn build(
             .nested = breakdown.nested,
         },
         .params = .{ .value = p.count, .weighted = p.weighted, .each = each },
+        .regions = try regionsOf(arena, scratch, tree, index, function.node),
     };
     var trips: std.ArrayList(Trip) = .empty;
     for (std.enums.values(Metric)) |metric| {
@@ -181,40 +243,32 @@ pub const Search = struct {
     }
 
     /// Explains each function in `tree`, read from `path`, that a selector
-    /// names.
-    /// `class` is the file's; each function is held to its own, as
+    /// names. `class` is the file's; each function is held to its own, as
     /// `Class.forFunction` gives it.
     pub fn file(s: *Search, arena: Allocator, scratch: Allocator, path: []const u8, tree: *const Ast, class: Class, classes: thresholds.Classes) Allocator.Error!void {
-        const listed = try functions.list(scratch, tree);
-        var index: ?LineIndex = null;
+        const r: Reading = .{
+            .arena = arena,
+            .scratch = scratch,
+            .tree = tree,
+            .index = try LineIndex.init(scratch, tree.source),
+            .path = path,
+            .class = class,
+            .classes = classes,
+            .listed = try functions.list(scratch, tree),
+        };
         for (s.selectors, s.found) |selector, *found| switch (selector) {
             .at => |at| {
                 if (!std.mem.eql(u8, at.path, path)) continue;
                 found.read = true;
-                if (index == null) index = try LineIndex.init(scratch, tree.source);
-                var around: ?functions.Function = null;
-                var around_span: u32 = std.math.maxInt(u32);
-                for (listed) |function| {
-                    if (function.line == at.line) {
-                        try found.exact.append(arena, try build(arena, scratch, tree, index.?, path, function, class, classes));
-                        break;
-                    }
-                    const first = index.?.ofToken(tree, tree.firstToken(function.node)).line;
-                    const last = index.?.ofToken(tree, tree.lastToken(function.node)).line;
-                    if (first <= at.line and at.line <= last and last - first < around_span) {
-                        around = function;
-                        around_span = last - first;
-                    }
-                } else if (around) |function| {
-                    try found.partial.append(arena, try build(arena, scratch, tree, index.?, path, function, class, classes));
-                }
+                const hit = r.around(at) orelse continue;
+                var e = try r.explain(hit.function);
+                if (at.last) |last| e.range = try r.range(hit.function, e, at.line, last);
+                try (if (hit.exact) &found.exact else &found.partial).append(arena, e);
             },
-            .name => |name| for (listed) |function| {
+            .name => |name| for (r.listed) |function| {
                 const match = select.matchName(function.name, name);
                 if (match == .none) continue;
-                if (index == null) index = try LineIndex.init(scratch, tree.source);
-                const e = try build(arena, scratch, tree, index.?, path, function, class, classes);
-                try (if (match == .exact) &found.exact else &found.partial).append(arena, e);
+                try (if (match == .exact) &found.exact else &found.partial).append(arena, try r.explain(function));
             },
         };
     }
@@ -245,7 +299,7 @@ pub const Search = struct {
             if (matches.len == 0) {
                 switch (selector) {
                     // A file that could not be read has been said already.
-                    .at => |at| if (found.read) try said.add(.{ .level = .@"error", .path = at.path, .line = at.line, .text = "no function at or around that line" }),
+                    .at => |at| if (found.read) try said.add(.{ .level = .@"error", .path = at.path, .line = at.line, .text = at.missing() }),
                     .name => try said.fail(text, "no function by that name in the files read", .{}),
                 }
                 continue;
@@ -274,6 +328,75 @@ pub const Context = struct {
     version: []const u8,
     /// Everything said on stderr, for the documents that carry it.
     messages: []const Message = &.{},
+};
+
+/// A file being read for the selectors that name its functions.
+const Reading = struct {
+    arena: Allocator,
+    scratch: Allocator,
+    tree: *const Ast,
+    index: LineIndex,
+    path: []const u8,
+    /// The file's; each function is held to its own.
+    class: Class,
+    classes: thresholds.Classes,
+    listed: []const functions.Function,
+
+    fn explain(r: Reading, function: functions.Function) Allocator.Error!Explanation {
+        return build(r.arena, r.scratch, r.tree, r.index, r.path, function, r.class, r.classes);
+    }
+
+    /// The function `at` names: the one whose line it is, or the innermost
+    /// around it (for a range, around all of it).
+    fn around(r: Reading, at: Selector.At) ?struct { function: functions.Function, exact: bool } {
+        const last_line = at.last orelse at.line;
+        var best: ?functions.Function = null;
+        var best_span: u32 = std.math.maxInt(u32);
+        for (r.listed) |function| {
+            if (at.last == null and function.line == at.line) return .{ .function = function, .exact = true };
+            const first = r.index.ofToken(r.tree, r.tree.firstToken(function.node)).line;
+            const last = r.index.ofToken(r.tree, r.tree.lastToken(function.node)).line;
+            if (first <= at.line and last_line <= last and last - first < best_span) {
+                best = function;
+                best_span = last - first;
+            }
+        }
+        return .{ .function = best orelse return null, .exact = false };
+    }
+
+    /// What lines `first_line` to `last_line` of `function`, explained as
+    /// `e`, add, and about what moving them out would leave.
+    fn range(r: Reading, function: functions.Function, e: Explanation, first_line: u32, last_line: u32) Allocator.Error!Range {
+        const facts: regions.Facts = try .of(r.scratch, r.tree, function.node);
+        const sum: regions.Sum = if (r.tokensOn(function, first_line, last_line)) |span| .of(facts, span[0], span[1]) else .{};
+        return .{
+            .first_line = first_line,
+            .last_line = last_line,
+            .cyclomatic = sum.cyclomatic,
+            .cognitive = sum.cognitive,
+            .depth = sum.depth,
+            .lines = sum.lines,
+            .nesting = sum.nesting,
+            .extracted = .of(sum, .{ .cyclomatic = e.cyclomatic.value, .cognitive = e.cognitive.value, .lines = e.lines.value }),
+        };
+    }
+
+    /// The first and last of `function`'s tokens on those lines; null when
+    /// none is.
+    fn tokensOn(r: Reading, function: functions.Function, first_line: u32, last_line: u32) ?[2]Ast.TokenIndex {
+        var span: ?[2]Ast.TokenIndex = null;
+        var t = r.tree.firstToken(function.node);
+        while (t <= r.tree.lastToken(function.node)) : (t += 1) {
+            const line = r.index.ofToken(r.tree, t).line;
+            if (line > last_line) break;
+            if (line < first_line) continue;
+            // Read before writing: `span = .{ span..., t }` would see the
+            // half-written result.
+            const start = if (span) |s| s[0] else t;
+            span = .{ start, t };
+        }
+        return span;
+    }
 };
 
 /// Writes `explanations` in `format`.
@@ -363,7 +486,9 @@ fn writeXml(w: *Writer, explanations: []const Explanation, c: Context) Writer.Er
             try formats.attr(w, "why", p.why);
             try w.writeAll("/>\n");
         }
-        try w.writeAll("      </params>\n    </explanation>\n");
+        try w.writeAll("      </params>\n");
+        try writeRegionsXml(w, e);
+        try w.writeAll("    </explanation>\n");
     }
     try w.writeAll("  </explanations>\n</gnarl>\n");
 }
@@ -414,9 +539,149 @@ fn writeDelimited(w: *Writer, kind: formats.Delimited, explanations: []const Exp
             const item = std.fmt.bufPrint(&buffer, "{s}: {s}", .{ p.name, p.type }) catch p.name;
             try row.put("params", item, "", p.weight, p.why);
         }
+        try putRegions(row, e);
     }
 }
 
+/// A region's rows, a metric each, `at` its lines and `why` its first
+/// line; and a range's.
+fn putRegions(row: Item, e: Explanation) Writer.Error!void {
+    var buffer: [24]u8 = undefined;
+    for (e.regions) |r| {
+        const at = std.fmt.bufPrint(&buffer, "{d}-{d}", .{ r.first_line, r.last_line }) catch unreachable;
+        inline for (.{ "cyclomatic", "cognitive", "lines", "nesting" }) |field| try row.put("region", field, at, @field(r, field), r.text);
+    }
+    const range = e.range orelse return;
+    const at = std.fmt.bufPrint(&buffer, "{d}-{d}", .{ range.first_line, range.last_line }) catch unreachable;
+    inline for (.{ "cyclomatic", "cognitive", "depth", "lines", "nesting" }) |field| try row.put("range", field, at, @field(range, field), "");
+    inline for (.{ "cyclomatic", "cognitive", "nesting" }) |field| try row.put("range", "helper." ++ field, at, @field(range.extracted.helper, field), "");
+    inline for (.{ "cyclomatic", "cognitive", "lines" }) |field| try row.put("range", "rest." ++ field, at, @field(range.extracted.rest, field), "");
+}
+
+/// The `<regions>` element, and `<range>` when lines were asked about.
+fn writeRegionsXml(w: *Writer, e: Explanation) Writer.Error!void {
+    try w.writeAll("      <regions>\n");
+    for (e.regions) |r| {
+        try w.writeAll("        <region");
+        inline for (.{ "first_line", "last_line", "statements", "cyclomatic", "cognitive", "lines", "nesting" }) |field| try formats.attrInt(w, field, @field(r, field));
+        try formats.attr(w, "text", r.text);
+        try w.writeAll("/>\n");
+    }
+    try w.writeAll("      </regions>\n");
+    const range = e.range orelse return;
+    try w.writeAll("      <range");
+    inline for (.{ "first_line", "last_line", "cyclomatic", "cognitive", "depth", "lines", "nesting" }) |field| try formats.attrInt(w, field, @field(range, field));
+    try w.writeAll(">\n        <extracted>\n          <helper");
+    inline for (.{ "cyclomatic", "cognitive", "nesting" }) |field| try formats.attrInt(w, field, @field(range.extracted.helper, field));
+    try w.writeAll("/>\n          <rest");
+    inline for (.{ "cyclomatic", "cognitive", "lines" }) |field| try formats.attrInt(w, field, @field(range.extracted.rest, field));
+    try w.writeAll("/>\n        </extracted>\n      </range>\n");
+}
+
+/// The regions as a report lists them: each that adds something, and
+/// each run of statements between those that adds nothing, as one.
+const RegionRows = struct {
+    all: []const Region,
+    i: usize = 0,
+
+    fn next(it: *RegionRows) ?Region {
+        if (it.i >= it.all.len) return null;
+        var row = it.all[it.i];
+        it.i += 1;
+        if (!idle(row)) return row;
+        while (it.i < it.all.len and idle(it.all[it.i])) : (it.i += 1) {
+            const more = it.all[it.i];
+            row.last_line = more.last_line;
+            row.statements += more.statements;
+            row.lines += more.lines;
+            row.nesting = @max(row.nesting, more.nesting);
+        }
+        return row;
+    }
+
+    fn idle(r: Region) bool {
+        return r.statements > 0 and r.cyclomatic == 0 and r.cognitive == 0;
+    }
+
+    /// Whether there is anything to compare: two regions that add.
+    fn worthListing(all: []const Region) bool {
+        var n: usize = 0;
+        for (all) |r| n += @intFromBool(r.cyclomatic > 0 or r.cognitive > 0);
+        return n >= 2;
+    }
+};
+
+/// A region's lines, as `12` or `12-30`.
+fn lineSpan(buffer: []u8, r: Region) []const u8 {
+    if (r.first_line == r.last_line) return std.fmt.bufPrint(buffer, "{d}", .{r.first_line}) catch unreachable;
+    return std.fmt.bufPrint(buffer, "{d}-{d}", .{ r.first_line, r.last_line }) catch unreachable;
+}
+
+/// A region's first line, cut to a width a table row can carry.
+fn shortText(text: []const u8) struct { []const u8, []const u8 } {
+    if (text.len <= 60) return .{ text, "" };
+    var cut: usize = 57;
+    while (cut > 0 and text[cut] & 0xC0 == 0x80) cut -= 1;
+    return .{ text[0..cut], "..." };
+}
+
+fn writeRegionsText(w: *Writer, all: []const Region) Writer.Error!void {
+    if (!RegionRows.worthListing(all)) return;
+    var buffer: [24]u8 = undefined;
+    const width = @max("lines".len, lineSpan(&buffer, .{ .first_line = all[all.len - 1].last_line, .last_line = all[all.len - 1].last_line + 1, .statements = 0, .cyclomatic = 0, .cognitive = 0, .lines = 0, .nesting = 0, .text = "" }).len);
+    try w.writeAll("regions: the signature and the body's statements, what each adds\n  lines");
+    try w.splatByteAll(' ', width - "lines".len + 2);
+    try w.writeAll("cyclomatic  cognitive  logical  deepest\n");
+    var rows: RegionRows = .{ .all = all };
+    while (rows.next()) |r| {
+        const at = lineSpan(&buffer, r);
+        try w.print("  {s}", .{at});
+        try w.splatByteAll(' ', width - at.len + 2);
+        try writePadded(w, "+{d}", r.cyclomatic, "cyclomatic".len + 2);
+        try writePadded(w, "+{d}", r.cognitive, "cognitive".len + 2);
+        try writePadded(w, "{d}", r.lines, "logical".len + 2);
+        try writePadded(w, "{d}", r.nesting, "deepest".len + 2);
+        const text, const more = shortText(r.text);
+        try w.print("{s}{s}", .{ text, more });
+        if (r.statements > 1) try w.print("  ({d} statements)", .{r.statements});
+        try w.writeByte('\n');
+    }
+}
+
+fn writePadded(w: *Writer, comptime format: []const u8, n: u32, width: usize) Writer.Error!void {
+    try w.print(format, .{n});
+    try w.splatByteAll(' ', width -| std.fmt.count(format, .{n}));
+}
+
+fn writeRegionsMarkdown(w: *Writer, all: []const Region) Writer.Error!void {
+    if (!RegionRows.worthListing(all)) return;
+    try w.writeAll("\n**regions**: the signature and the body's statements, what each adds.\n\n| lines | cyclomatic | cognitive | logical | deepest | starts |\n| --- | ---: | ---: | ---: | ---: | --- |\n");
+    var buffer: [24]u8 = undefined;
+    var rows: RegionRows = .{ .all = all };
+    while (rows.next()) |r| {
+        const text, const more = shortText(r.text);
+        try w.print("| {s} | {d} | {d} | {d} | {d} | `{s}{s}`", .{ lineSpan(&buffer, r), r.cyclomatic, r.cognitive, r.lines, r.nesting, text, more });
+        if (r.statements > 1) try w.print(" ({d} statements)", .{r.statements});
+        try w.writeAll(" |\n");
+    }
+}
+
+fn writeRangeMarkdown(w: *Writer, e: Explanation, r: Range) Writer.Error!void {
+    try w.print("**lines {d}-{d}**: cyclomatic +{d}, cognitive +{d} ({d} of it for depth), {d} logical lines, the deepest level {d}.\n\n", .{ r.first_line, r.last_line, r.cyclomatic, r.cognitive, r.depth, r.lines, r.nesting });
+    const x = r.extracted;
+    try w.print("Moved into a function of its own, about: that function cyclomatic {d}, cognitive {d}, nesting {d}; `{s}` keeps cyclomatic {d}, cognitive {d}, lines {d}. A return, break or continue that leaves those lines is not accounted for.\n", .{ x.helper.cyclomatic, x.helper.cognitive, x.helper.nesting, e.name, x.rest.cyclomatic, x.rest.cognitive, x.rest.lines });
+}
+
+/// What lines asked about cost, and about what moving them out would
+/// leave; in place of the whole explanation.
+fn writeRangeText(w: *Writer, e: Explanation, r: Range) Writer.Error!void {
+    try w.print("lines {d}-{d}: cyclomatic +{d}, cognitive +{d} ({d} of it for depth), {d} logical lines, the deepest level {d}\n", .{ r.first_line, r.last_line, r.cyclomatic, r.cognitive, r.depth, r.lines, r.nesting });
+    const x = r.extracted;
+    try w.print("moved into a function of its own, about: that function cyclomatic {d}, cognitive {d}, nesting {d}; {s} keeps cyclomatic {d}, cognitive {d}, lines {d}\n", .{ x.helper.cyclomatic, x.helper.cognitive, x.helper.nesting, e.name, x.rest.cyclomatic, x.rest.cognitive, x.rest.lines });
+    try w.writeAll("a return, break or continue that leaves those lines is not accounted for\n");
+}
+
+/// Writes `explanations` in `format`.
 const Item = struct {
     w: *Writer,
     kind: formats.Delimited,
@@ -476,6 +741,7 @@ const Widths = struct {
 
 fn writeText(w: *Writer, e: Explanation) Writer.Error!void {
     try w.print("{s}:{d}  {s}  ({s})\n\n", .{ e.path, e.line, e.name, e.class.text() });
+    if (e.range) |r| return writeRangeText(w, e, r);
     const ws: Widths = .of(e);
 
     try w.print("cyclomatic {d}", .{e.cyclomatic.value});
@@ -523,6 +789,7 @@ fn writeText(w: *Writer, e: Explanation) Writer.Error!void {
         if (p.why.len > 0) try w.print("  {s}", .{p.why});
         try w.writeByte('\n');
     }
+    try writeRegionsText(w, e.regions);
 }
 
 fn writeCognitiveText(w: *Writer, e: Explanation, ws: Widths) Writer.Error!void {
@@ -587,6 +854,7 @@ fn writeAt(w: *Writer, line: u32, column: u32, width: usize) Writer.Error!void {
 
 fn writeMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
     try w.print("### `{s}` at `{s}:{d}` ({s})\n\n", .{ e.name, e.path, e.line, e.class.text() });
+    if (e.range) |r| return writeRangeMarkdown(w, e, r);
 
     try w.print("**cyclomatic {d}**", .{e.cyclomatic.value});
     try writeOver(w, e, .cyclomatic);
@@ -624,6 +892,7 @@ fn writeMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
         try w.writeAll(".\n\n| name | type | weight | why |\n| --- | --- | ---: | --- |\n");
         for (e.params.each) |p| try w.print("| `{s}` | `{s}` | {d} | {s} |\n", .{ p.name, p.type, p.weight, p.why });
     }
+    try writeRegionsMarkdown(w, e.regions);
 }
 
 fn writeCognitiveMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
@@ -733,6 +1002,64 @@ test "write: text" {
     , out.written());
 }
 
+test "a range: what its lines add, and about what moving them out would leave" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The for in S.pick, lines 4 to 7.
+    const r = try explainSample(arena, &.{"a.zig:4-7"});
+    try std.testing.expect(r.all_found);
+    try std.testing.expectEqualStrings("S.pick", r.explanations[0].name);
+    var out: Writer.Allocating = .init(arena);
+    try write(&out.writer, .text, r.explanations, .{ .version = "0.0.0" });
+    // for one level in 2, if two 3, the return in the loop 1; lifted out,
+    // both a level shallower: for 1, if 2, the return 1.
+    try std.testing.expectEqualStrings(
+        \\a.zig:2  S.pick  (normal code)
+        \\
+        \\lines 4-7: cyclomatic +2, cognitive +6 (3 of it for depth), 2 logical lines, the deepest level 3
+        \\moved into a function of its own, about: that function cyclomatic 3, cognitive 4, nesting 2; S.pick keeps cyclomatic 3, cognitive 2, lines 4
+        \\a return, break or continue that leaves those lines is not accounted for
+        \\
+    , out.written());
+}
+
+test "regions: each that adds a row, the runs between that add nothing one" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const gpa = std.testing.allocator;
+    var tree = try Ast.parse(gpa,
+        \\fn f(xs: []const u8, c: bool) u8 {
+        \\    const n = xs.len;
+        \\    var m: usize = 0;
+        \\    for (xs) |x| {
+        \\        if (x == 0) m += 1;
+        \\    }
+        \\    if (c and n > m) return 1;
+        \\    return 0;
+        \\}
+    , .{});
+    defer tree.deinit(gpa);
+    var search: Search = try .init(arena, &.{"f"});
+    try search.file(arena, arena, "a.zig", &tree, .normal, .defaults);
+    var said: Messages = .{ .arena = arena, .echo = false };
+    const found = try search.results(arena, &said);
+    var out: Writer.Allocating = .init(arena);
+    try write(&out.writer, .text, found.explanations, .{ .version = "0.0.0" });
+    const text = out.written();
+    try std.testing.expectEqualStrings(
+        \\regions: the signature and the body's statements, what each adds
+        \\  lines  cyclomatic  cognitive  logical  deepest
+        \\  1      +0          +0         1        0        fn f(xs: []const u8, c: bool) u8 {
+        \\  2-3    +0          +0         2        0        const n = xs.len;  (2 statements)
+        \\  4-6    +2          +3         2        2        for (xs) |x| {
+        \\  7      +2          +2         1        1        if (c and n > m) return 1;
+        \\  8      +0          +0         1        0        return 0;
+        \\
+    , text[std.mem.find(u8, text, "regions:").?..]);
+}
+
 test "write: Markdown and JSON" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
@@ -796,7 +1123,7 @@ test "write: xml, csv and tsv say what json does" {
         // The rows say what the totals are made of: cyclomatic's items add
         // up to it, nesting's deepest level is it, and params counts the
         // parameters that weigh anything.
-        const metrics = [_][]const u8{ "cyclomatic", "nesting", "lines", "params", "cognitive" };
+        const metrics = [_][]const u8{ "cyclomatic", "nesting", "lines", "params", "cognitive", "region", "range" };
         var totals: [metrics.len]u32 = @splat(0);
         var cyclomatic_sum: u32 = 0;
         var cognitive_sum: u32 = 0;
@@ -858,6 +1185,18 @@ test "every golden fixture function: the explanation agrees with its golden row"
             var cost: u32 = 0;
             for (e.cognitive.costs) |c| cost += c.adds;
             try std.testing.expectEqual(e.cognitive.value, cost);
+            // The regions add up to the totals.
+            var regions_sum: Region = .{ .first_line = 0, .last_line = 0, .statements = 0, .cyclomatic = 1, .cognitive = 0, .lines = 0, .nesting = 0, .text = "" };
+            for (e.regions) |r| {
+                regions_sum.cyclomatic += r.cyclomatic;
+                regions_sum.cognitive += r.cognitive;
+                regions_sum.lines += r.lines;
+                regions_sum.nesting = @max(regions_sum.nesting, r.nesting);
+            }
+            try std.testing.expectEqual(e.cyclomatic.value, regions_sum.cyclomatic);
+            try std.testing.expectEqual(e.cognitive.value, regions_sum.cognitive);
+            try std.testing.expectEqual(e.lines.value, regions_sum.lines);
+            try std.testing.expectEqual(e.nesting.value, regions_sum.nesting);
             try std.testing.expectEqual(row.lines, e.lines.value);
             try std.testing.expectEqual(row.nesting, e.nesting.value);
             try std.testing.expectEqual(row.params, e.params.value);

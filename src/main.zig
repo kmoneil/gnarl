@@ -77,7 +77,10 @@ const usage =
     \\                    metric, rather than report: each construct counted
     \\                    and where, the deepest nesting, the lines left out,
     \\                    each parameter. The function is path:line as the
-    \\                    report prints it (or any line inside it), or its
+    \\                    report prints it (or any line inside it), path:A-B
+    \\                    for what lines A to B of the function around them
+    \\                    cost and about what moving them into a function of
+    \\                    their own would leave, or its
     \\                    name or the end of it (record for Validator.record),
     \\                    looked for in the paths given, or the current
     \\                    directory if none. May be given more than once.
@@ -1405,6 +1408,7 @@ test {
     _ = @import("messages.zig");
     _ = @import("nesting.zig");
     _ = @import("params.zig");
+    _ = @import("regions.zig");
     _ = @import("report.zig");
     _ = @import("select.zig");
     _ = @import("skill.zig");

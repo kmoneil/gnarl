@@ -10,22 +10,44 @@ const Row = @import("report.zig").Row;
 
 pub const Selector = union(enum) {
     /// `path:line`: the function there, as the report prints it, or the
-    /// innermost one around that line.
-    at: struct { path: []const u8, line: u32 },
+    /// innermost one around that line. `path:A-B`: the innermost one
+    /// around lines A to B, and what those lines cost.
+    at: At,
     /// A qualified name, or its last segments.
     name: []const u8,
 
+    pub const At = struct {
+        path: []const u8,
+        line: u32,
+        /// The last line of a range, `path:A-B`; null for one line.
+        last: ?u32 = null,
+
+        /// What to say when no function is there.
+        pub fn missing(at: At) []const u8 {
+            return if (at.last == null) "no function at or around that line" else "no function holds all of those lines";
+        }
+    };
+
     pub fn parse(arena: Allocator, text: []const u8) Allocator.Error!Selector {
         if (std.mem.findScalarLast(u8, text, ':')) |colon| {
-            if (colon > 0) {
-                if (std.fmt.parseInt(u32, text[colon + 1 ..], 10)) |line| {
-                    if (line > 0) return .{ .at = .{ .path = try std.fs.path.resolveAlloc(arena, &.{text[0..colon]}), .line = line } };
-                } else |_| {}
-            }
+            if (colon > 0) if (lineOrRange(text[colon + 1 ..])) |lines| {
+                return .{ .at = .{ .path = try std.fs.path.resolveAlloc(arena, &.{text[0..colon]}), .line = lines[0], .last = lines[1] } };
+            };
         }
         return .{ .name = text };
     }
 };
+
+/// `12` as line 12, `10-20` as lines 10 to 20; null for anything else.
+fn lineOrRange(text: []const u8) ?struct { u32, ?u32 } {
+    const dash = std.mem.findScalar(u8, text, '-');
+    const first = std.fmt.parseInt(u32, if (dash) |d| text[0..d] else text, 10) catch return null;
+    if (first == 0) return null;
+    const d = dash orelse return .{ first, null };
+    const last = std.fmt.parseInt(u32, text[d + 1 ..], 10) catch return null;
+    if (last < first) return null;
+    return .{ first, last };
+}
 
 pub const NameMatch = enum { none, exact, tail };
 
@@ -121,6 +143,11 @@ test "Selector: path:line, or a name" {
     try std.testing.expectEqualStrings("Validator.record", (try Selector.parse(arena, "Validator.record")).name);
     try std.testing.expectEqualStrings("a.zig:", (try Selector.parse(arena, "a.zig:")).name);
     try std.testing.expectEqualStrings("a.zig:x", (try Selector.parse(arena, "a.zig:x")).name);
+    const range = (try Selector.parse(arena, "a.zig:10-20")).at;
+    try std.testing.expectEqual(10, range.line);
+    try std.testing.expectEqual(20, range.last.?);
+    try std.testing.expectEqual(null, at.last);
+    try std.testing.expectEqualStrings("a.zig:20-10", (try Selector.parse(arena, "a.zig:20-10")).name);
 }
 
 test "matchName: the whole name, or its end after a dot" {

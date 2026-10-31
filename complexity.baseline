@@ -6,7 +6,6 @@ src/baseline.zig	ratchet	18	40	36	5	4	4
 src/children.zig	append	33	3	244	2	3	3
 src/cyclomatic.zig	note	24	31	43	3	5	5
 src/diff.zig	writeTable	18	39	48	4	4	4
-src/explain.zig	Search.file	16	41	27	4	4	4
 src/formats.zig	XmlReader.element	14	27	30	3	0	0
 src/formats.zig	readDelimited	23	29	35	4	2	2
 src/glob.zig	match	21	25	17	3	2	2
