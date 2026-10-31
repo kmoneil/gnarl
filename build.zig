@@ -48,14 +48,13 @@ pub fn build(b: *std.Build) void {
     // `zig build check`: gnarl holds its own source to complexity.baseline,
     // so a function new and over a critical threshold, or above its number
     // there, fails. What it reads is what `gnarl --check .` here reads:
-    // complexity.zon leaves the golden fixtures out. The report is
-    // left out; on a failure, stderr names each function and the --explain
-    // to run. `zig build test` runs it too.
+    // complexity.zon leaves the golden fixtures out. A pass prints
+    // nothing; a failure, what fails and the --explain to run. `zig build
+    // test` runs it too.
     const check = b.addRunArtifact(exe);
     check.addArgs(&.{ "--check", "." });
     check.setCwd(b.path("."));
     check.has_side_effects = true;
-    _ = check.captureStdOut(.{});
     check.expectExitCode(0);
     b.step("check", "Hold gnarl's own source to complexity.baseline").dependOn(&check.step);
     test_step.dependOn(&check.step);

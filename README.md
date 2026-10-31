@@ -252,11 +252,17 @@ gnarl: complexity.baseline: note: wrote 1 function over a critical threshold
 ```
 
 Commit `complexity.baseline`. From then on `gnarl --check .` passes what was
-already there and fails what is new or worse. After the report, it names
-the function, the metric, and the `--explain` to run:
+already there and fails what is new or worse. A pass prints nothing. A
+failure lists only what fails, then names the function, the metric, and
+the `--explain` to run:
 
 ```console
 $ gnarl --check .
+cyclomatic  cognitive  lines  nesting  params  weighted  location     function
+      12!        34!!   23        5!      4         4    tally.zig:7  tally
+
+1 function in 1 file: 1 over a critical threshold (!!), 0 more over a warning one (!).
+Thresholds for normal code (warning, critical): cyclomatic 10, 15; cognitive 15, 25; lines 50, 100; nesting 4; params 4.
 gnarl: --check: 1 function fails against complexity.baseline:
   tally.zig:7  tally: cognitive 34, above its baseline 33
 gnarl --explain tally.zig:7 says why the first scores what it does
@@ -264,6 +270,18 @@ gnarl --explain tally.zig:7 says why the first scores what it does
 
 When a frozen function improves, `--check` says so, and
 `--update-baseline` tightens the ratchet. Debt can only shrink.
+
+To run it with `zig build test`, add a step to `build.zig`:
+
+```zig
+const complexity = b.addSystemCommand(&.{ "gnarl", "--check", "src", "build.zig" });
+complexity.setCwd(b.path(".")); // where complexity.zon and complexity.baseline are
+complexity.has_side_effects = true; // run every time: the build does not know what gnarl reads
+b.step("complexity", "Hold the code to complexity.baseline").dependOn(&complexity.step);
+test_step.dependOn(&complexity.step);
+```
+
+A pass prints nothing, so there is no output to capture.
 
 ## Hot, normal and cold code
 

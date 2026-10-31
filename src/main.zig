@@ -81,6 +81,7 @@ const usage = synopsis ++
     \\  --check           Exit 1 if a function is over a critical threshold,
     \\                    or with a baseline, over its critical limit and
     \\                    above the baseline's number for it: new or worse.
+    \\                    Lists only what fails, so a pass prints nothing.
     \\  --baseline <file> The baseline --check holds to, or --update-baseline
     \\                    writes, rather than complexity.baseline (which
     \\                    --check holds to when it is there).
@@ -365,8 +366,8 @@ fn runReport(c: Context) !u8 {
     var rows: std.ArrayList(report.Row) = .empty;
     const measured = try readFiles(c, files, ReportSink{ .rows = &rows, .arena = c.arena });
     try report.rank(c.arena, rows.items, c.settings.classes);
-    const listed = try report.list(c.arena, rows.items, try listing(c, rows.items, picks, files));
     const check = try runCheck(c, rows.items, held, files);
+    const listed = try report.list(c.arena, rows.items, try listing(c, rows.items, picks, files, check));
     if (c.run.update_baseline) try updateBaseline(c.arena, c.io, c.cwd, c.run.baseline orelse baseline.default_path, rows.items, c.said);
     const status = c.exitStatus(if (check.failed) 1 else 0);
     report.write(c.out(), c.run.format, rows.items, listed, .{
@@ -383,8 +384,9 @@ fn runReport(c: Context) !u8 {
 
 /// Which of the ranked `rows` the report lists: --all, --top, and the
 /// functions --function picks, saying which pick none.
-fn listing(c: Context, rows: []const report.Row, picks: []const select.Selector, files: []const []const u8) !report.Listing {
+fn listing(c: Context, rows: []const report.Row, picks: []const select.Selector, files: []const []const u8, check: report.Check) !report.Listing {
     var l: report.Listing = .{ .all = c.run.all, .top = c.run.top };
+    if (check.asked) l.failing = try report.failingRows(c.arena, rows, check.failures);
     if (picks.len == 0) return l;
     const picked = try select.pick(c.arena, rows, picks);
     for (picked.unmatched) |s| switch (picks[s]) {
@@ -926,7 +928,9 @@ test "--update-baseline, then --check holds to it: new or worse fails, debt kept
     const arena = arena_state.allocator();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const Step = struct { source: []const u8, exit: u8, stderr: []const u8 };
+    // What fails is listed, ending its row with the function's name, and
+    // what does not, is not: a pass prints nothing.
+    const Step = struct { source: []const u8, exit: u8, stderr: []const u8, listed: []const u8 = "", unlisted: []const u8 = "" };
     const held_at = try branchy(arena, "f", 16);
     const steps = [_]Step{
         // No baseline yet: any critical crossing fails.
@@ -957,14 +961,15 @@ test "--update-baseline, then --check holds to it: new or worse fails, debt kept
         .{ .source = held_at, .exit = 0, .stderr = "" },
         // Worse than its baseline: fails, saying by how much. Its lines
         // rise too, but within their limit, which is allowed.
-        .{ .source = try branchy(arena, "f", 18), .exit = 1, .stderr =
+        .{ .source = try branchy(arena, "f", 18), .exit = 1, .listed = " f\n", .stderr =
         \\gnarl: --check: 1 function fails against complexity.baseline:
         \\  a.zig:1  f: cyclomatic 19, above its baseline 17
         \\gnarl --explain a.zig:1 says why the first scores what it does
         \\
         },
-        // A new function over: fails; f is held still.
-        .{ .source = try std.mem.concat(arena, u8, &.{ held_at, try branchy(arena, "g", 15) }), .exit = 1, .stderr =
+        // A new function over: fails, and is all that is listed; f is held
+        // still.
+        .{ .source = try std.mem.concat(arena, u8, &.{ held_at, try branchy(arena, "g", 15) }), .exit = 1, .listed = " g\n", .unlisted = " f\n", .stderr =
         \\gnarl: --check: 1 function fails against complexity.baseline:
         \\  a.zig:19  g: cyclomatic 16, over the critical limit 15; not in the baseline
         \\gnarl --explain a.zig:19 says why the first scores what it does
@@ -975,7 +980,7 @@ test "--update-baseline, then --check holds to it: new or worse fails, debt kept
         // Within every limit now: passes, and says the entry can go.
         .{ .source = try branchy(arena, "f", 10), .exit = 0, .stderr = "gnarl: complexity.baseline: note: 1 baselined function is within its limits now; gnarl --update-baseline drops it\n" },
         // Renamed: a new function over, and the old one gone.
-        .{ .source = try branchy(arena, "h", 16), .exit = 1, .stderr =
+        .{ .source = try branchy(arena, "h", 16), .exit = 1, .listed = " h\n", .stderr =
         \\gnarl: complexity.baseline: note: 1 baselined function is gone (renamed, moved or deleted); gnarl --update-baseline drops it
         \\gnarl: --check: 1 function fails against complexity.baseline:
         \\  a.zig:1  h: cyclomatic 17, over the critical limit 15; not in the baseline
@@ -990,6 +995,9 @@ test "--update-baseline, then --check holds to it: new or worse fails, debt kept
         defer gpa.free(result.stderr);
         try std.testing.expectEqualStrings(step.stderr, result.stderr);
         try std.testing.expectEqual(std.process.Child.Term{ .exited = step.exit }, result.term);
+        if (step.exit == 0) try std.testing.expectEqualStrings("", result.stdout);
+        if (step.listed.len > 0) try std.testing.expect(std.mem.indexOf(u8, result.stdout, step.listed) != null);
+        if (step.unlisted.len > 0) try std.testing.expect(std.mem.indexOf(u8, result.stdout, step.unlisted) == null);
     }
 }
 
@@ -1159,12 +1167,14 @@ test "--check fails on a critical threshold, by the class complexity.zon gives t
     try tmp.dir.writeFile(io, .{ .sub_path = "hot.zig", .data = thirteen });
     try tmp.dir.writeFile(io, .{ .sub_path = "normal.zig", .data = thirteen });
 
-    // No configuration: both normal, a warning each, and --check passes.
+    // No configuration: both normal, a warning each, and --check passes,
+    // saying nothing.
     {
         const result = try runGnarl(tmp.dir, &.{ "--check", "." });
         defer gpa.free(result.stdout);
         defer gpa.free(result.stderr);
         try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+        try std.testing.expectEqualStrings("", result.stdout);
         try std.testing.expectEqualStrings("", result.stderr);
     }
 
@@ -1175,8 +1185,10 @@ test "--check fails on a critical threshold, by the class complexity.zon gives t
         defer gpa.free(result.stderr);
         try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
         try std.testing.expectEqualStrings("gnarl: --check: 1 function over a critical threshold; gnarl --explain hot.zig:1 says why the worst scores what it does\n", result.stderr);
+        // Only what fails is listed: hot.zig's, not normal.zig's warning.
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "      13!!  ") != null);
-        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "      13!   ") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "      13!   ") == null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "\n1 over a limit but passing --check is not listed; --all lists every function.\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Thresholds for hot code (warning, critical): cyclomatic 8, 12;") != null);
     }
     // Without --check the same report exits 0.
@@ -1200,7 +1212,7 @@ test "--check fails on a critical threshold, by the class complexity.zon gives t
     // Excluded, hot.zig is not read under `.`, and is when named.
     try tmp.dir.writeFile(io, .{ .sub_path = "complexity.zon", .data = ".{ .hot = .{\"hot.zig\"}, .exclude = .{\"hot.zig\"} }\n" });
     {
-        const result = try runGnarl(tmp.dir, &.{ "--check", "." });
+        const result = try runGnarl(tmp.dir, &.{ "--check", "--all", "." });
         defer gpa.free(result.stdout);
         defer gpa.free(result.stderr);
         try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
