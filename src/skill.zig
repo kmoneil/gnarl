@@ -37,12 +37,12 @@ const Row = struct {
 };
 
 /// Each table row under `section` that starts with a code span.
-fn tableRows(arena: Allocator, section: []const u8) ![]const Row {
-    const start = std.mem.find(u8, text, section) orelse return error.NoSection;
-    const end = std.mem.findPos(u8, text, start + section.len, "\n## ") orelse text.len;
+fn tableRows(arena: Allocator, doc: []const u8, section: []const u8) ![]const Row {
+    const start = std.mem.find(u8, doc, section) orelse return error.NoSection;
+    const end = std.mem.findPos(u8, doc, start + section.len, "\n## ") orelse doc.len;
     var rows: std.ArrayList(Row) = .empty;
     var header: []const u8 = "";
-    var lines = std.mem.splitScalar(u8, text[start..end], '\n');
+    var lines = std.mem.splitScalar(u8, doc[start..end], '\n');
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "| Code |")) header = line;
         if (!std.mem.startsWith(u8, line, "| `")) continue;
@@ -69,13 +69,25 @@ fn firstFunction(arena: Allocator, tree: *const Ast) !functions.Function {
 }
 
 test "every example in the rules' tables measures as the skill says" {
+    try expectRulesMeasure(text);
+}
+
+test "the site's metrics page carries the same tables, and they measure as it says" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    try expectRulesMeasure(try Io.Dir.cwd().readFileAlloc(std.testing.io, "docs/metrics.md", arena_state.allocator(), .limited(1 << 20)));
+}
+
+/// Each example in the tables under `doc`'s "What it counts" measures as
+/// its row says.
+fn expectRulesMeasure(doc: []const u8) !void {
     const gpa = std.testing.allocator;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
     var checked: usize = 0;
-    for (try tableRows(arena, "## What it counts")) |row| {
+    for (try tableRows(arena, doc, "## What it counts")) |row| {
         const code = row.cells[0];
         var tree = try Ast.parse(gpa, try arena.dupeSentinel(u8, code, 0), .{});
         defer tree.deinit(gpa);

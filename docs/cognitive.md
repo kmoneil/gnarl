@@ -1,3 +1,7 @@
+---
+title: Cognitive complexity
+nav_order: 7
+---
 # Cognitive complexity
 
 Cyclomatic complexity counts the paths through a function. Cognitive

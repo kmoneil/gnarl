@@ -11,6 +11,7 @@ refactor will leave before you make it, and holds the line in CI so the
 debt you have cannot grow.
 
 [![ci](https://github.com/kmoneil/gnarl/actions/workflows/ci.yml/badge.svg)](https://github.com/kmoneil/gnarl/actions/workflows/ci.yml)
+[![docs](https://img.shields.io/badge/docs-kmoneil.github.io%2Fgnarl-blue)](https://kmoneil.github.io/gnarl/)
 
 `Zig 0.17` · `one binary` · `no build step` · `no dependencies` ·
 `all of Zig's standard library in a fifth of a second`

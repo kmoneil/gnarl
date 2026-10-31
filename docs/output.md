@@ -1,3 +1,7 @@
+---
+title: Output formats
+nav_order: 8
+---
 # gnarl's output
 
 gnarl writes a report (the default) or explanations (`--explain`) in the
