@@ -89,6 +89,39 @@ pub const Breakdown = struct {
     closer: u32 = 0,
     /// Only a function declared inside this one, which has its own count.
     nested: u32 = 0,
+
+    /// Counts a line, `text`, that holds what `s` says, in its one kind.
+    fn add(b: *Breakdown, s: Seen, text: []const u8) void {
+        if (s.code) {
+            b.counted += 1;
+        } else if (s.nested) {
+            b.nested += 1;
+        } else if (s.closer) {
+            b.closer += 1;
+        } else if (s.doc or std.mem.trim(u8, text, " \t\r").len > 0) {
+            b.comment += 1;
+        } else b.blank += 1;
+    }
+};
+
+/// What a line holds, as the tokens on it say.
+const Seen = packed struct {
+    code: bool = false,
+    nested: bool = false,
+    closer: bool = false,
+    doc: bool = false,
+
+    /// Marks a token tagged `tag` on the line: one of a nested function's,
+    /// code, a doc comment, or else a closer.
+    fn mark(s: *Seen, tag: std.zig.Token.Tag, inside_nested: bool) void {
+        if (inside_nested) {
+            s.nested = true;
+        } else if (isCode(tag)) {
+            s.code = true;
+        } else if (tag == .doc_comment or tag == .container_doc_comment) {
+            s.doc = true;
+        } else s.closer = true;
+    }
 };
 
 /// How the lines of `function` divide. Allocated with `arena`.
@@ -101,7 +134,6 @@ pub fn explain(arena: Allocator, tree: *const Ast, function: Node.Index) Allocat
     const end = tree.tokenStart(last) + tree.tokenSlice(last).len;
     const span: u32 = @intCast(std.mem.countScalar(u8, source[start..end], '\n') + 1);
 
-    const Seen = packed struct { code: bool = false, nested: bool = false, closer: bool = false, doc: bool = false };
     const seen = try arena.alloc(Seen, span);
     @memset(seen, .{});
     var line: u32 = 0;
@@ -114,14 +146,7 @@ pub fn explain(arena: Allocator, tree: *const Ast, function: Node.Index) Allocat
         line += @intCast(std.mem.countScalar(u8, source[pos..at], '\n'));
         pos = at;
         if (next_nested < nested.len and token == nested[next_nested][0]) inside_nested = true;
-        const tag = tree.tokenTag(token);
-        if (inside_nested) {
-            seen[line].nested = true;
-        } else if (isCode(tag)) {
-            seen[line].code = true;
-        } else if (tag == .doc_comment or tag == .container_doc_comment) {
-            seen[line].doc = true;
-        } else seen[line].closer = true;
+        seen[line].mark(tree.tokenTag(token), inside_nested);
         if (inside_nested and token == nested[next_nested][1]) {
             inside_nested = false;
             next_nested += 1;
@@ -130,18 +155,7 @@ pub fn explain(arena: Allocator, tree: *const Ast, function: Node.Index) Allocat
 
     var b: Breakdown = .{ .span = span };
     var it = std.mem.splitScalar(u8, source[start..end], '\n');
-    for (seen) |s| {
-        const text = it.next().?;
-        if (s.code) {
-            b.counted += 1;
-        } else if (s.nested) {
-            b.nested += 1;
-        } else if (s.closer) {
-            b.closer += 1;
-        } else if (s.doc or std.mem.trim(u8, text, " \t\r").len > 0) {
-            b.comment += 1;
-        } else b.blank += 1;
-    }
+    for (seen) |s| b.add(s, it.next().?);
     return b;
 }
 

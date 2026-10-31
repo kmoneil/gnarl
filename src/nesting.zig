@@ -107,80 +107,24 @@ const Walk = struct {
     }
 
     fn visit(w: *Walk, item: Item) Allocator.Error!void {
-        const tree = w.tree;
-        const node = item.node;
-        const d = item.depth;
-        const outer = item.frame;
-        const token = tree.nodeMainToken(node);
-        switch (tree.nodeTag(node)) {
+        switch (w.tree.nodeTag(item.node)) {
             // Measured on their own.
             .fn_decl, .test_decl => {},
-
-            .if_simple, .@"if" => {
-                const full = tree.fullIf(node).?;
-                const f = try w.open(outer, token, if (item.else_if) "else if" else "if", d + 1);
-                try w.push(.{ .node = full.ast.cond_expr, .depth = d, .frame = outer });
-                try w.push(.{ .node = full.ast.then_expr, .depth = d + 1, .frame = f, .body = true });
-                if (full.ast.else_expr.unwrap()) |e| switch (tree.nodeTag(e)) {
-                    .if_simple, .@"if" => try w.push(.{ .node = e, .depth = d, .frame = outer, .else_if = true }),
-                    else => try w.push(.{ .node = e, .depth = d + 1, .frame = f, .body = true }),
-                };
-            },
-
-            .while_simple, .while_cont, .@"while" => {
-                const full = tree.fullWhile(node).?;
-                const f = try w.open(outer, token, if (isInline(tree, token)) "inline while" else "while", d + 1);
-                try w.push(.{ .node = full.ast.cond_expr, .depth = d, .frame = outer });
-                if (full.ast.cont_expr.unwrap()) |cont| try w.push(.{ .node = cont, .depth = d, .frame = outer });
-                try w.push(.{ .node = full.ast.then_expr, .depth = d + 1, .frame = f, .body = true });
-                if (full.ast.else_expr.unwrap()) |e| try w.push(.{ .node = e, .depth = d + 1, .frame = f, .body = true });
-            },
-
-            .for_simple, .@"for" => {
-                const full = tree.fullFor(node).?;
-                const f = try w.open(outer, token, if (isInline(tree, token)) "inline for" else "for", d + 1);
-                for (full.ast.inputs) |input| try w.push(.{ .node = input, .depth = d, .frame = outer });
-                try w.push(.{ .node = full.ast.then_expr, .depth = d + 1, .frame = f, .body = true });
-                if (full.ast.else_expr.unwrap()) |e| try w.push(.{ .node = e, .depth = d + 1, .frame = f, .body = true });
-            },
-
-            .@"switch", .switch_comma => {
-                const full = tree.fullSwitch(node).?;
-                const f = try w.open(outer, token, "switch", d + 1);
-                try w.push(.{ .node = full.ast.condition, .depth = d, .frame = outer });
-                for (full.ast.cases) |case| try w.push(.{ .node = case, .depth = d + 1, .frame = f });
-            },
-
+            .if_simple, .@"if" => try w.ifElse(item),
+            .while_simple, .while_cont, .@"while" => try w.whileLoop(item),
+            .for_simple, .@"for" => try w.forLoop(item),
+            .@"switch", .switch_comma => try w.switchOn(item),
             .switch_case_one,
             .switch_case_inline_one,
             .switch_case,
             .switch_case_inline,
-            => {
-                const full = tree.fullSwitchCase(node).?;
-                for (full.ast.values) |value| try w.push(.{ .node = value, .depth = d, .frame = outer });
-                try w.push(.{ .node = full.ast.target_expr, .depth = d, .frame = outer, .body = true });
-            },
-
-            .@"catch", .@"orelse" => {
-                const lhs, const handler = tree.nodeData(node).node_and_node;
-                try w.push(.{ .node = lhs, .depth = d, .frame = outer });
-                if (isFullBlock(tree, handler)) {
-                    const f = try w.open(outer, token, tree.tokenSlice(token), d + 1);
-                    try w.push(.{ .node = handler, .depth = d + 1, .frame = f, .body = true });
-                } else try w.push(.{ .node = handler, .depth = d, .frame = outer });
-            },
-
+            => try w.prong(item),
+            .@"catch", .@"orelse" => try w.handler(item),
             .block_two,
             .block_two_semicolon,
             .block,
             .block_semicolon,
-            => if (!item.body and isLabeled(tree, node)) {
-                const label = token - 2;
-                const construct = try std.mem.concat(w.arena, u8, &.{ tree.tokenSlice(label), ":" });
-                const f = try w.open(outer, label, construct, d + 1);
-                try w.pushChildren(node, d + 1, f);
-            } else try w.pushChildren(node, d, outer),
-
+            => try w.block(item),
             .container_decl,
             .container_decl_trailing,
             .container_decl_two,
@@ -193,13 +137,93 @@ const Walk = struct {
             .tagged_union_two_trailing,
             .tagged_union_enum_tag,
             .tagged_union_enum_tag_trailing,
-            => {
-                const f = try w.open(outer, token, tree.tokenSlice(token), d + 1);
-                try w.pushChildren(node, d + 1, f);
-            },
-
-            else => try w.pushChildren(node, d, outer),
+            => try w.container(item),
+            else => try w.pushChildren(item.node, item.depth, item.frame),
         }
+    }
+
+    /// An `if` is a level for its branches; an `else if` stays on its
+    /// `if`'s level.
+    fn ifElse(w: *Walk, item: Item) Allocator.Error!void {
+        const tree = w.tree;
+        const full = tree.fullIf(item.node).?;
+        const d = item.depth;
+        const f = try w.open(item.frame, tree.nodeMainToken(item.node), if (item.else_if) "else if" else "if", d + 1);
+        try w.push(.{ .node = full.ast.cond_expr, .depth = d, .frame = item.frame });
+        try w.push(.{ .node = full.ast.then_expr, .depth = d + 1, .frame = f, .body = true });
+        if (full.ast.else_expr.unwrap()) |e| switch (tree.nodeTag(e)) {
+            .if_simple, .@"if" => try w.push(.{ .node = e, .depth = d, .frame = item.frame, .else_if = true }),
+            else => try w.push(.{ .node = e, .depth = d + 1, .frame = f, .body = true }),
+        };
+    }
+
+    fn whileLoop(w: *Walk, item: Item) Allocator.Error!void {
+        const tree = w.tree;
+        const full = tree.fullWhile(item.node).?;
+        const token = tree.nodeMainToken(item.node);
+        const f = try w.open(item.frame, token, if (isInline(tree, token)) "inline while" else "while", item.depth + 1);
+        try w.push(.{ .node = full.ast.cond_expr, .depth = item.depth, .frame = item.frame });
+        if (full.ast.cont_expr.unwrap()) |cont| try w.push(.{ .node = cont, .depth = item.depth, .frame = item.frame });
+        try w.loopBody(full.ast.then_expr, full.ast.else_expr.unwrap(), item.depth + 1, f);
+    }
+
+    fn forLoop(w: *Walk, item: Item) Allocator.Error!void {
+        const tree = w.tree;
+        const full = tree.fullFor(item.node).?;
+        const token = tree.nodeMainToken(item.node);
+        const f = try w.open(item.frame, token, if (isInline(tree, token)) "inline for" else "for", item.depth + 1);
+        for (full.ast.inputs) |input| try w.push(.{ .node = input, .depth = item.depth, .frame = item.frame });
+        try w.loopBody(full.ast.then_expr, full.ast.else_expr.unwrap(), item.depth + 1, f);
+    }
+
+    /// A loop's body and its `else`, at the loop's level `d`.
+    fn loopBody(w: *Walk, body: Node.Index, else_expr: ?Node.Index, d: u32, f: u32) Allocator.Error!void {
+        try w.push(.{ .node = body, .depth = d, .frame = f, .body = true });
+        if (else_expr) |e| try w.push(.{ .node = e, .depth = d, .frame = f, .body = true });
+    }
+
+    /// A `switch` is a level for its prongs.
+    fn switchOn(w: *Walk, item: Item) Allocator.Error!void {
+        const full = w.tree.fullSwitch(item.node).?;
+        const f = try w.open(item.frame, w.tree.nodeMainToken(item.node), "switch", item.depth + 1);
+        try w.push(.{ .node = full.ast.condition, .depth = item.depth, .frame = item.frame });
+        for (full.ast.cases) |case| try w.push(.{ .node = case, .depth = item.depth + 1, .frame = f });
+    }
+
+    /// A prong's body is the switch's level.
+    fn prong(w: *Walk, item: Item) Allocator.Error!void {
+        const full = w.tree.fullSwitchCase(item.node).?;
+        for (full.ast.values) |value| try w.push(.{ .node = value, .depth = item.depth, .frame = item.frame });
+        try w.push(.{ .node = full.ast.target_expr, .depth = item.depth, .frame = item.frame, .body = true });
+    }
+
+    /// A `catch` or `orelse` is a level when its handler is a block with
+    /// something in it.
+    fn handler(w: *Walk, item: Item) Allocator.Error!void {
+        const tree = w.tree;
+        const token = tree.nodeMainToken(item.node);
+        const lhs, const rhs = tree.nodeData(item.node).node_and_node;
+        try w.push(.{ .node = lhs, .depth = item.depth, .frame = item.frame });
+        if (!isFullBlock(tree, rhs)) return w.push(.{ .node = rhs, .depth = item.depth, .frame = item.frame });
+        const f = try w.open(item.frame, token, tree.tokenSlice(token), item.depth + 1);
+        try w.push(.{ .node = rhs, .depth = item.depth + 1, .frame = f, .body = true });
+    }
+
+    /// A labeled block is a level, unless it is a branch's body.
+    fn block(w: *Walk, item: Item) Allocator.Error!void {
+        const tree = w.tree;
+        if (item.body or !isLabeled(tree, item.node)) return w.pushChildren(item.node, item.depth, item.frame);
+        const label = tree.nodeMainToken(item.node) - 2;
+        const construct = try std.mem.concat(w.arena, u8, &.{ tree.tokenSlice(label), ":" });
+        const f = try w.open(item.frame, label, construct, item.depth + 1);
+        try w.pushChildren(item.node, item.depth + 1, f);
+    }
+
+    /// A container declared in the function is a level.
+    fn container(w: *Walk, item: Item) Allocator.Error!void {
+        const token = w.tree.nodeMainToken(item.node);
+        const f = try w.open(item.frame, token, w.tree.tokenSlice(token), item.depth + 1);
+        try w.pushChildren(item.node, item.depth + 1, f);
     }
 
     /// Records a construct at `token` that opens `level`, inside `parent`,

@@ -85,47 +85,70 @@ fn note(
     else_ifs: *std.AutoHashMapUnmanaged(Node.Index, void),
     branches: *std.ArrayList(Branch),
 ) Allocator.Error!void {
-    var token = tree.nodeMainToken(node);
+    var branch: Branch = switch (tree.nodeTag(node)) {
+        .if_simple, .@"if" => try ifBranch(arena, tree, node, else_ifs),
+        .switch_case_one,
+        .switch_case_inline_one,
+        .switch_case,
+        .switch_case_inline,
+        => try prongBranch(arena, tree, node, adds),
+        else => plainBranch(tree, node, adds) orelse return,
+    };
+    branch.adds = adds;
+    try branches.append(arena, branch);
+}
+
+/// An `if`, or an `else if`: one that is another's `else`, which that
+/// `if`, visited first, marks in `else_ifs`.
+fn ifBranch(arena: Allocator, tree: *const Ast, node: Node.Index, else_ifs: *std.AutoHashMapUnmanaged(Node.Index, void)) Allocator.Error!Branch {
+    if (tree.fullIf(node).?.ast.else_expr.unwrap()) |e| switch (tree.nodeTag(e)) {
+        .if_simple, .@"if" => try else_ifs.put(arena, e, {}),
+        else => {},
+    };
+    return .{ .token = tree.nodeMainToken(node), .construct = if (else_ifs.contains(node)) "else if" else "if", .adds = 0 };
+}
+
+/// A loop, an `and`, `or`, `orelse`, `catch` or `try`, named; null for
+/// anything else.
+fn plainBranch(tree: *const Ast, node: Node.Index, adds: u32) ?Branch {
+    const token = tree.nodeMainToken(node);
     const construct: []const u8, const why: []const u8 = switch (tree.nodeTag(node)) {
-        .if_simple, .@"if" => construct: {
-            if (tree.fullIf(node).?.ast.else_expr.unwrap()) |e| switch (tree.nodeTag(e)) {
-                .if_simple, .@"if" => try else_ifs.put(arena, e, {}),
-                else => {},
-            };
-            break :construct .{ if (else_ifs.contains(node)) "else if" else "if", "" };
-        },
         .while_simple, .while_cont, .@"while" => .{ if (isInline(tree, token)) "inline while" else "while", "" },
         .for_simple, .@"for" => .{ if (isInline(tree, token)) "inline for" else "for", "" },
         .bool_and => .{ "and", "" },
         .bool_or => .{ "or", "" },
         .@"orelse" => .{ "orelse", if (adds == 0) "orelse unreachable has no other path: it is .?" else "" },
-        .@"catch" => .{ "catch", if (adds > 0) "" else switch (tree.nodeTag(tree.nodeData(node).node_and_node[1])) {
-            .unreachable_literal => "catch unreachable has no handler",
-            else => "catch {} has no handler",
-        } },
+        .@"catch" => .{ "catch", if (adds > 0) "" else catchWhy(tree, node) },
         .@"try" => .{ "try", "a try passes an error on; it is not a branch" },
-        .switch_case_one,
-        .switch_case_inline_one,
-        .switch_case,
-        .switch_case_inline,
-        => prong: {
-            const full = tree.fullSwitchCase(node).?;
-            const values = full.ast.values;
-            const prefix = if (full.inline_token != null) "prong inline " else "prong ";
-            if (values.len == 0) {
-                token = full.inline_token orelse full.ast.arrow_token - 1;
-                break :prong .{ try std.mem.concat(arena, u8, &.{ prefix, "else" }), if (adds == 0) "the default prong" else "" };
-            }
-            token = tree.firstToken(values[0]);
-            const start = tree.tokenStart(token);
-            const last = tree.lastToken(values[values.len - 1]);
-            var text = tree.source[start .. tree.tokenStart(last) + tree.tokenSlice(last).len];
-            if (std.mem.findScalar(u8, text, '\n')) |nl| text = text[0..nl];
-            break :prong .{ try std.mem.concat(arena, u8, &.{ prefix, text }), if (adds == 0) "the default prong of a non-exhaustive enum" else "" };
-        },
-        else => return,
+        else => return null,
     };
-    try branches.append(arena, .{ .token = token, .construct = construct, .adds = adds, .why = why });
+    return .{ .token = token, .construct = construct, .adds = 0, .why = why };
+}
+
+/// Why a `catch` with no real handler adds nothing.
+fn catchWhy(tree: *const Ast, node: Node.Index) []const u8 {
+    return switch (tree.nodeTag(tree.nodeData(node).node_and_node[1])) {
+        .unreachable_literal => "catch unreachable has no handler",
+        else => "catch {} has no handler",
+    };
+}
+
+/// A switch prong, named by its values or as `else`.
+fn prongBranch(arena: Allocator, tree: *const Ast, node: Node.Index, adds: u32) Allocator.Error!Branch {
+    const full = tree.fullSwitchCase(node).?;
+    const values = full.ast.values;
+    const prefix = if (full.inline_token != null) "prong inline " else "prong ";
+    if (values.len == 0) return .{
+        .token = full.inline_token orelse full.ast.arrow_token - 1,
+        .construct = try std.mem.concat(arena, u8, &.{ prefix, "else" }),
+        .adds = 0,
+        .why = if (adds == 0) "the default prong" else "",
+    };
+    const token = tree.firstToken(values[0]);
+    const last = tree.lastToken(values[values.len - 1]);
+    var text = tree.source[tree.tokenStart(token) .. tree.tokenStart(last) + tree.tokenSlice(last).len];
+    if (std.mem.findScalar(u8, text, '\n')) |nl| text = text[0..nl];
+    return .{ .token = token, .construct = try std.mem.concat(arena, u8, &.{ prefix, text }), .adds = 0, .why = if (adds == 0) "the default prong of a non-exhaustive enum" else "" };
 }
 
 /// Whether the loop keyword at `token` is written `inline`.

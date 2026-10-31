@@ -87,43 +87,64 @@ pub fn header(w: *Writer, kind: Delimited, names: []const []const u8) Writer.Err
 /// Splits csv or tsv text into rows of fields, undoing the quoting or
 /// escaping. Allocated with `arena`.
 pub fn readDelimited(arena: std.mem.Allocator, kind: Delimited, text: []const u8) ![]const []const []const u8 {
-    var rows: std.ArrayList([]const []const u8) = .empty;
-    var fields: std.ArrayList([]const u8) = .empty;
-    var current: std.ArrayList(u8) = .empty;
-    var i: usize = 0;
-    const separator: u8 = if (kind == .csv) ',' else '\t';
-    var quoted = false;
-    while (i < text.len) : (i += 1) {
-        const c = text[i];
-        if (kind == .csv and quoted) {
-            if (c == '"') {
-                if (i + 1 < text.len and text[i + 1] == '"') {
-                    try current.append(arena, '"');
-                    i += 1;
-                } else quoted = false;
-            } else try current.append(arena, c);
-            continue;
-        }
-        if (kind == .csv and c == '"' and current.items.len == 0) {
-            quoted = true;
-        } else if (kind == .tsv and c == '\\' and i + 1 < text.len) {
-            i += 1;
-            try current.append(arena, switch (text[i]) {
-                't' => '\t',
-                'n' => '\n',
-                'r' => '\r',
-                '\\' => '\\',
-                else => return error.BadEscape,
-            });
-        } else if (c == separator) {
-            try fields.append(arena, try current.toOwnedSlice(arena));
-        } else if (c == '\n') {
-            try fields.append(arena, try current.toOwnedSlice(arena));
-            try rows.append(arena, try fields.toOwnedSlice(arena));
-        } else try current.append(arena, c);
+    var r: DelimitedReader = .{ .arena = arena, .kind = kind, .text = text };
+    while (r.i < text.len) : (r.i += 1) {
+        if (kind == .csv and r.quoted) try r.inQuotes() else try r.outside();
     }
-    if (quoted or current.items.len > 0 or fields.items.len > 0) return error.Unterminated;
-    return rows.items;
+    if (r.quoted or r.current.items.len > 0 or r.fields.items.len > 0) return error.Unterminated;
+    return r.rows.items;
+}
+
+/// Where `readDelimited` is in its text, and what it has read.
+const DelimitedReader = struct {
+    arena: std.mem.Allocator,
+    kind: Delimited,
+    text: []const u8,
+    i: usize = 0,
+    /// Inside a csv quote.
+    quoted: bool = false,
+    rows: std.ArrayList([]const []const u8) = .empty,
+    fields: std.ArrayList([]const u8) = .empty,
+    current: std.ArrayList(u8) = .empty,
+
+    /// A byte inside a csv quote: a doubled quote is one, a lone one
+    /// ends it.
+    fn inQuotes(r: *DelimitedReader) !void {
+        const c = r.text[r.i];
+        if (c != '"') return r.current.append(r.arena, c);
+        if (r.i + 1 < r.text.len and r.text[r.i + 1] == '"') {
+            try r.current.append(r.arena, '"');
+            r.i += 1;
+        } else r.quoted = false;
+    }
+
+    /// A byte outside quotes: one opening a csv quote, a tsv escape, the
+    /// separator, a line's end, or a byte of the field.
+    fn outside(r: *DelimitedReader) !void {
+        const c = r.text[r.i];
+        if (r.kind == .csv and c == '"' and r.current.items.len == 0) {
+            r.quoted = true;
+        } else if (r.kind == .tsv and c == '\\' and r.i + 1 < r.text.len) {
+            r.i += 1;
+            try r.current.append(r.arena, try unescapeTsv(r.text[r.i]));
+        } else if (c == (if (r.kind == .csv) @as(u8, ',') else '\t')) {
+            try r.fields.append(r.arena, try r.current.toOwnedSlice(r.arena));
+        } else if (c == '\n') {
+            try r.fields.append(r.arena, try r.current.toOwnedSlice(r.arena));
+            try r.rows.append(r.arena, try r.fields.toOwnedSlice(r.arena));
+        } else try r.current.append(r.arena, c);
+    }
+};
+
+/// What `\c` stands for in tsv.
+fn unescapeTsv(c: u8) error{BadEscape}!u8 {
+    return switch (c) {
+        't' => '\t',
+        'n' => '\n',
+        'r' => '\r',
+        '\\' => '\\',
+        else => error.BadEscape,
+    };
 }
 
 /// An element as the xml documents write them: a name, attributes, and
@@ -174,36 +195,42 @@ const XmlReader = struct {
 
     fn element(r: *XmlReader) anyerror!Element {
         r.skipSpace();
-        if (r.pos >= r.text.len or r.text[r.pos] != '<') return error.BadXml;
-        r.pos += 1;
+        if (!r.take("<")) return error.BadXml;
         const tag = try r.name();
         var attrs: std.ArrayList([2][]const u8) = .empty;
-        while (true) {
-            r.skipSpace();
-            if (std.mem.startsWith(u8, r.text[r.pos..], "/>")) {
-                r.pos += 2;
-                return .{ .name = tag, .attrs = attrs.items, .children = &.{} };
-            }
-            if (r.pos < r.text.len and r.text[r.pos] == '>') {
-                r.pos += 1;
-                break;
-            }
-            const key = try r.name();
-            if (!std.mem.startsWith(u8, r.text[r.pos..], "=\"")) return error.BadXml;
-            r.pos += 2;
-            const end = std.mem.findScalarPos(u8, r.text, r.pos, '"') orelse return error.BadXml;
-            try attrs.append(r.arena, .{ key, try unescape(r.arena, r.text[r.pos..end]) });
-            r.pos = end + 1;
-        }
+        while (try r.attribute()) |pair| try attrs.append(r.arena, pair);
+        if (r.take("/>")) return .{ .name = tag, .attrs = attrs.items, .children = &.{} };
+        if (!r.take(">")) return error.BadXml;
+        return .{ .name = tag, .attrs = attrs.items, .children = try r.childrenOf(tag) };
+    }
+
+    /// Moves past `s` if it comes next, and says whether it did.
+    fn take(r: *XmlReader, s: []const u8) bool {
+        if (!std.mem.startsWith(u8, r.text[r.pos..], s)) return false;
+        r.pos += s.len;
+        return true;
+    }
+
+    /// The next attribute of a tag, `key="value"`; null where the tag ends.
+    fn attribute(r: *XmlReader) !?[2][]const u8 {
+        r.skipSpace();
+        if (r.pos >= r.text.len or r.text[r.pos] == '/' or r.text[r.pos] == '>') return null;
+        const key = try r.name();
+        if (!r.take("=\"")) return error.BadXml;
+        const end = std.mem.findScalarPos(u8, r.text, r.pos, '"') orelse return error.BadXml;
+        defer r.pos = end + 1;
+        return .{ key, try unescape(r.arena, r.text[r.pos..end]) };
+    }
+
+    /// The elements inside `tag`, up to and past its closing tag.
+    fn childrenOf(r: *XmlReader, tag: []const u8) anyerror![]const Element {
         var children: std.ArrayList(Element) = .empty;
         while (true) {
             r.skipSpace();
-            if (std.mem.startsWith(u8, r.text[r.pos..], "</")) {
-                r.pos += 2;
+            if (r.take("</")) {
                 if (!std.mem.eql(u8, try r.name(), tag)) return error.Unbalanced;
-                if (r.pos >= r.text.len or r.text[r.pos] != '>') return error.BadXml;
-                r.pos += 1;
-                return .{ .name = tag, .attrs = attrs.items, .children = children.items };
+                if (!r.take(">")) return error.BadXml;
+                return children.items;
             }
             try children.append(r.arena, try r.element());
         }
