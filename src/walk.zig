@@ -44,35 +44,55 @@ pub fn collect(
         try files.append(arena, root);
         return;
     }
-    if (options.git) {
-        if (try notIgnored(arena, io, base, arg)) |listed| {
-            for (listed) |inside| {
-                if (!std.mem.endsWith(u8, inside, ".zig") or skipped(inside)) continue;
-                const path = try std.fs.path.resolveAlloc(arena, &.{ arg, inside });
-                if (excludes.under(root, path)) continue;
-                // A tracked file deleted from the work tree is not there.
-                const file = base.statFile(io, path, .{}) catch continue;
-                if (file.kind != .directory) try files.append(arena, path);
-            }
-            return;
+    const c: Collecting = .{ .arena = arena, .io = io, .base = base, .arg = arg, .root = root, .excludes = excludes, .files = files };
+    if (options.git) if (try notIgnored(arena, io, base, arg)) |listed| return c.listed(listed);
+    return c.walked();
+}
+
+/// One directory named, being collected: what `collect` lists of it.
+const Collecting = struct {
+    arena: Allocator,
+    io: Io,
+    base: Io.Dir,
+    /// As named, and cleaned.
+    arg: []const u8,
+    root: []const u8,
+    excludes: Excludes,
+    files: *std.ArrayList([]const u8),
+
+    /// The .zig files of those git lists under the directory, relative
+    /// to it, that the walk would reach and nothing leaves out.
+    fn listed(c: Collecting, inside_paths: []const []const u8) !void {
+        for (inside_paths) |inside| {
+            if (!std.mem.endsWith(u8, inside, ".zig") or skipped(inside)) continue;
+            const path = try std.fs.path.resolveAlloc(c.arena, &.{ c.arg, inside });
+            if (c.excludes.under(c.root, path)) continue;
+            // A tracked file deleted from the work tree is not there.
+            const file = c.base.statFile(c.io, path, .{}) catch continue;
+            if (file.kind != .directory) try c.files.append(c.arena, path);
         }
     }
-    var dir = try base.openDir(io, arg, .{ .iterate = true });
-    defer dir.close(io);
-    var walker = try dir.walkSelectively(arena);
-    defer walker.deinit();
-    while (try walker.next(io)) |entry| switch (entry.kind) {
-        .directory => if (!skipDir(entry.basename)) {
-            const path = try std.fs.path.resolveAlloc(arena, &.{ arg, entry.path });
-            if (!excludes.under(root, path)) try walker.enter(io, entry);
-        },
-        .file => if (entry.basename[0] != '.' and std.mem.endsWith(u8, entry.basename, ".zig")) {
-            const path = try std.fs.path.resolveAlloc(arena, &.{ arg, entry.path });
-            if (!excludes.under(root, path)) try files.append(arena, path);
-        },
-        else => {},
-    };
-}
+
+    /// The .zig files under the directory, walked, skipping what the walk
+    /// skips and nothing leaves out.
+    fn walked(c: Collecting) !void {
+        var dir = try c.base.openDir(c.io, c.arg, .{ .iterate = true });
+        defer dir.close(c.io);
+        var walker = try dir.walkSelectively(c.arena);
+        defer walker.deinit();
+        while (try walker.next(c.io)) |entry| switch (entry.kind) {
+            .directory => if (!skipDir(entry.basename)) {
+                const path = try std.fs.path.resolveAlloc(c.arena, &.{ c.arg, entry.path });
+                if (!c.excludes.under(c.root, path)) try walker.enter(c.io, entry);
+            },
+            .file => if (entry.basename[0] != '.' and std.mem.endsWith(u8, entry.basename, ".zig")) {
+                const path = try std.fs.path.resolveAlloc(c.arena, &.{ c.arg, entry.path });
+                if (!c.excludes.under(c.root, path)) try c.files.append(c.arena, path);
+            },
+            else => {},
+        };
+    }
+};
 
 pub const Options = struct {
     /// Leave out what git ignores, in a git work tree.

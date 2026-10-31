@@ -416,46 +416,58 @@ fn cell(buffer: []u8, t: Touched, metric: Metric) []const u8 {
     return w.buffered();
 }
 
-fn writeTable(w: *Writer, touched: []const Touched, c: Context, kind: enum { text, md }) Writer.Error!void {
+/// Each column's width: its header's, or its widest cell's.
+fn widthsOf(touched: []const Touched) [headers.len]usize {
     var cells: [64]u8 = undefined;
-    if (touched.len > 0) {
-        var widths: [headers.len]usize = undefined;
-        for (headers, &widths) |h, *width| width.* = h.len;
-        for (touched) |t| {
-            widths[0] = @max(widths[0], @tagName(t.change).len);
-            for (metrics, 1..) |m, i| widths[i] = @max(widths[i], cell(&cells, t, m).len);
-            widths[location_column] = @max(widths[location_column], std.fmt.count("{s}:{d}", .{ t.path, t.line }));
+    var widths: [headers.len]usize = undefined;
+    for (headers, &widths) |h, *width| width.* = h.len;
+    for (touched) |t| {
+        widths[0] = @max(widths[0], @tagName(t.change).len);
+        for (metrics, 1..) |m, i| widths[i] = @max(widths[i], cell(&cells, t, m).len);
+        widths[location_column] = @max(widths[location_column], std.fmt.count("{s}:{d}", .{ t.path, t.line }));
+    }
+    return widths;
+}
+
+fn writeRowsText(w: *Writer, touched: []const Touched) Writer.Error!void {
+    var cells: [64]u8 = undefined;
+    const widths = widthsOf(touched);
+    for (headers[0 .. headers.len - 1], widths[0 .. headers.len - 1]) |h, width| {
+        try w.writeAll(h);
+        try w.splatByteAll(' ', width - h.len + 2);
+    }
+    try w.writeAll("function\n");
+    for (touched) |t| {
+        try w.writeAll(@tagName(t.change));
+        try w.splatByteAll(' ', widths[0] - @tagName(t.change).len + 2);
+        for (metrics, 1..) |m, i| {
+            const text = cell(&cells, t, m);
+            try w.writeAll(text);
+            try w.splatByteAll(' ', widths[i] - text.len + 2);
         }
+        try w.print("{s}:{d}", .{ t.path, t.line });
+        try w.splatByteAll(' ', widths[location_column] - std.fmt.count("{s}:{d}", .{ t.path, t.line }) + 2);
+        try w.print("{s}\n", .{t.name});
+    }
+}
+
+fn writeRowsMarkdown(w: *Writer, touched: []const Touched) Writer.Error!void {
+    var cells: [64]u8 = undefined;
+    try w.writeAll("|");
+    for (headers) |h| try w.print(" {s} |", .{h});
+    try w.writeAll("\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |\n");
+    for (touched) |t| {
+        try w.print("| {t} |", .{t.change});
+        for (metrics) |m| try w.print(" {s} |", .{cell(&cells, t, m)});
+        try w.print(" `{s}:{d}` | `{s}` |\n", .{ t.path, t.line, t.name });
+    }
+}
+
+fn writeTable(w: *Writer, touched: []const Touched, c: Context, kind: enum { text, md }) Writer.Error!void {
+    if (touched.len > 0) {
         switch (kind) {
-            .text => {
-                for (headers[0 .. headers.len - 1], widths[0 .. headers.len - 1]) |h, width| {
-                    try w.writeAll(h);
-                    try w.splatByteAll(' ', width - h.len + 2);
-                }
-                try w.writeAll("function\n");
-                for (touched) |t| {
-                    try w.writeAll(@tagName(t.change));
-                    try w.splatByteAll(' ', widths[0] - @tagName(t.change).len + 2);
-                    for (metrics, 1..) |m, i| {
-                        const text = cell(&cells, t, m);
-                        try w.writeAll(text);
-                        try w.splatByteAll(' ', widths[i] - text.len + 2);
-                    }
-                    try w.print("{s}:{d}", .{ t.path, t.line });
-                    try w.splatByteAll(' ', widths[location_column] - std.fmt.count("{s}:{d}", .{ t.path, t.line }) + 2);
-                    try w.print("{s}\n", .{t.name});
-                }
-            },
-            .md => {
-                try w.writeAll("|");
-                for (headers) |h| try w.print(" {s} |", .{h});
-                try w.writeAll("\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |\n");
-                for (touched) |t| {
-                    try w.print("| {t} |", .{t.change});
-                    for (metrics) |m| try w.print(" {s} |", .{cell(&cells, t, m)});
-                    try w.print(" `{s}:{d}` | `{s}` |\n", .{ t.path, t.line, t.name });
-                }
-            },
+            .text => try writeRowsText(w, touched),
+            .md => try writeRowsMarkdown(w, touched),
         }
         try w.writeByte('\n');
     }

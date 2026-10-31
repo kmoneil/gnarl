@@ -68,39 +68,49 @@ pub fn pick(arena: Allocator, rows: []const Row, selectors: []const Selector) Al
     @memset(picked, false);
     var unmatched: std.ArrayList(usize) = .empty;
     for (selectors, 0..) |selector, s| {
-        var any = false;
-        switch (selector) {
-            .at => |at| {
-                var around: ?usize = null;
-                for (rows, 0..) |row, i| {
-                    if (!std.mem.eql(u8, row.path, at.path)) continue;
-                    if (row.line == at.line) {
-                        around = i;
-                        break;
-                    }
-                    if (row.line <= at.line and at.line <= row.end_line) {
-                        if (around == null or row.end_line - row.line < rows[around.?].end_line - rows[around.?].line) around = i;
-                    }
-                }
-                if (around) |i| {
-                    picked[i] = true;
-                    any = true;
-                }
-            },
-            .name => |name| {
-                const exact = for (rows) |row| {
-                    if (matchName(row.name, name) == .exact) break true;
-                } else false;
-                const wanted: NameMatch = if (exact) .exact else .tail;
-                for (rows, picked) |row, *p| if (matchName(row.name, name) == wanted) {
-                    p.* = true;
-                    any = true;
-                };
-            },
-        }
+        const any = switch (selector) {
+            .at => |at| pickAround(rows, picked, at),
+            .name => |name| pickNamed(rows, picked, name),
+        };
         if (!any) try unmatched.append(arena, s);
     }
     return .{ .picked = picked, .unmatched = unmatched.items };
+}
+
+/// Flags the row at `at`'s line, or else the innermost row around it, and
+/// says whether there was one.
+fn pickAround(rows: []const Row, picked: []bool, at: Selector.At) bool {
+    var around: ?usize = null;
+    for (rows, 0..) |row, i| {
+        if (!std.mem.eql(u8, row.path, at.path)) continue;
+        if (row.line == at.line) {
+            around = i;
+            break;
+        }
+        if (row.line <= at.line and at.line <= row.end_line) {
+            if (around == null or row.end_line - row.line < rows[around.?].end_line - rows[around.?].line) around = i;
+        }
+    }
+    if (around) |i| {
+        picked[i] = true;
+        return true;
+    }
+    return false;
+}
+
+/// Flags every row of exactly the name `name`, or else every row whose
+/// name ends with it, and says whether there was one.
+fn pickNamed(rows: []const Row, picked: []bool, name: []const u8) bool {
+    const exact = for (rows) |row| {
+        if (matchName(row.name, name) == .exact) break true;
+    } else false;
+    const wanted: NameMatch = if (exact) .exact else .tail;
+    var any = false;
+    for (rows, picked) |row, *p| if (matchName(row.name, name) == wanted) {
+        p.* = true;
+        any = true;
+    };
+    return any;
 }
 
 /// Line starts in a source, to turn a byte offset into a line and column.

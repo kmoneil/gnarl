@@ -95,26 +95,29 @@ pub fn writeXml(w: *Writer, items: []const Message) Writer.Error!void {
             try w.print("  <{s}/>\n", .{names[0]});
         } else {
             try w.print("  <{s}>\n", .{names[0]});
-            for (items) |m| if (m.level == names[2]) {
-                try w.print("    <{s}", .{names[1]});
-                try formats.attr(w, "path", m.path);
-                if (m.line) |line| try formats.attrInt(w, "line", line);
-                if (m.column) |column| try formats.attrInt(w, "column", column);
-                try formats.attr(w, "text", m.text);
-                if (m.more.len == 0) {
-                    try w.writeAll("/>\n");
-                } else {
-                    try w.writeAll(">\n");
-                    for (m.more) |more| {
-                        try w.writeAll("      <more");
-                        try formats.attr(w, "text", more);
-                        try w.writeAll("/>\n");
-                    }
-                    try w.print("    </{s}>\n", .{names[1]});
-                }
-            };
+            for (items) |m| if (m.level == names[2]) try writeElement(w, names[1], m);
             try w.print("  </{s}>\n", .{names[0]});
         }
+    }
+}
+
+/// One message as an element named `tag`, its further lines inside.
+fn writeElement(w: *Writer, tag: []const u8, m: Message) Writer.Error!void {
+    try w.print("    <{s}", .{tag});
+    try formats.attr(w, "path", m.path);
+    if (m.line) |line| try formats.attrInt(w, "line", line);
+    if (m.column) |column| try formats.attrInt(w, "column", column);
+    try formats.attr(w, "text", m.text);
+    if (m.more.len == 0) {
+        try w.writeAll("/>\n");
+    } else {
+        try w.writeAll(">\n");
+        for (m.more) |more| {
+            try w.writeAll("      <more");
+            try formats.attr(w, "text", more);
+            try w.writeAll("/>\n");
+        }
+        try w.print("    </{s}>\n", .{tag});
     }
 }
 

@@ -53,16 +53,7 @@ fn walk(tree: *const Ast, function: functions.Function, sink: ?Sink) std.mem.All
     var first = true;
     while (it.next()) |param| {
         defer first = false;
-        const weight: u32, const why: []const u8 = if (param.type_expr) |type_expr| judged: {
-            if (first and isSelf(tree, type_expr, function)) break :judged .{ 0, "a leading self" };
-            if (contextName(tree, type_expr)) |name| break :judged .{ 0, if (name[0] == 'A') "an Allocator: context, not input" else "an Io: context, not input" };
-            if (isTypeType(tree, type_expr)) break :judged .{ 2, "a type parameter: a contract the signature does not spell out" };
-            break :judged .{ 1, "" };
-        } else switch (tree.tokenTag(param.anytype_ellipsis3.?)) {
-            .keyword_anytype => .{ 2, "anytype: a contract the signature does not spell out" },
-            // `...` is only for extern functions, which have no body.
-            else => .{ 0, "variadic" },
-        };
+        const weight, const why = weigh(tree, function, param, first);
         if (sink) |s| try s.out.append(s.arena, .{
             .name = if (param.name_token) |t| tree.tokenSlice(t) else "",
             .type = if (param.type_expr) |t| text(tree, t) else tree.tokenSlice(param.anytype_ellipsis3.?),
@@ -74,6 +65,20 @@ fn walk(tree: *const Ast, function: functions.Function, sink: ?Sink) std.mem.All
         total.weighted += weight;
     }
     return total;
+}
+
+/// What `param` adds to the weighted count, `first` when it leads the
+/// list, and why when that is not 1.
+fn weigh(tree: *const Ast, function: functions.Function, param: Ast.full.FnProto.Param, first: bool) struct { u32, []const u8 } {
+    const type_expr = param.type_expr orelse return switch (tree.tokenTag(param.anytype_ellipsis3.?)) {
+        .keyword_anytype => .{ 2, "anytype: a contract the signature does not spell out" },
+        // `...` is only for extern functions, which have no body.
+        else => .{ 0, "variadic" },
+    };
+    if (first and isSelf(tree, type_expr, function)) return .{ 0, "a leading self" };
+    if (contextName(tree, type_expr)) |name| return .{ 0, if (name[0] == 'A') "an Allocator: context, not input" else "an Io: context, not input" };
+    if (isTypeType(tree, type_expr)) return .{ 2, "a type parameter: a contract the signature does not spell out" };
+    return .{ 1, "" };
 }
 
 /// The source of `node`, first token to last.

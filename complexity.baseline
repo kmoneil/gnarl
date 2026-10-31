@@ -4,13 +4,8 @@
 # path, name, cyclomatic, cognitive, lines, nesting, params, params_weighted
 src/children.zig	append	33	3	244	2	3	3
 src/cyclomatic.zig	note	24	31	43	3	5	5
-src/diff.zig	writeTable	18	39	48	4	4	4
 src/formats.zig	XmlReader.element	14	27	30	3	0	0
 src/formats.zig	readDelimited	23	29	35	4	2	2
 src/glob.zig	match	21	25	17	3	2	2
 src/lines.zig	explain	17	22	46	2	2	2
-src/messages.zig	writeXml	11	39	25	6	2	2
 src/nesting.zig	Walk.visit	24	31	75	3	1	1
-src/params.zig	walk	14	32	26	4	3	3
-src/select.zig	pick	18	48	29	5	2	2
-src/walk.zig	collect	19	40	36	4	5	5
