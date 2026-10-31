@@ -70,8 +70,9 @@ pub fn field(w: *Writer, kind: Delimited, first: bool, value: []const u8) Writer
     }
 }
 
-pub fn fieldInt(w: *Writer, kind: Delimited, first: bool, value: anytype) Writer.Error!void {
-    var buffer: [24]u8 = undefined;
+pub fn fieldInt(w: *Writer, kind: Delimited, first: bool, value: u64) Writer.Error!void {
+    // A u64 is at most 20 digits.
+    var buffer: [20]u8 = undefined;
     try field(w, kind, first, std.fmt.bufPrint(&buffer, "{d}", .{value}) catch unreachable);
 }
 
