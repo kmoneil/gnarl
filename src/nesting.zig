@@ -5,9 +5,10 @@
 //! Each of these opens a level for what is inside it: an `if` (its
 //! branches, not its condition), a `while` and a `for` (their bodies and
 //! `else`), a `switch` (its prongs), a labeled block, a container declared
-//! in the function, and a `catch` or `orelse` whose handler is a block
-//! with something in it. An `else if` is on its `if`'s level, not inside
-//! it.
+//! in the function's body (one in its signature, as a return or a
+//! parameter's type, is not), and a `catch` or `orelse` whose handler is a
+//! block with something in it. An `else if` is on its `if`'s level, not
+//! inside it.
 //!
 //! These open none: a plain block, whether a branch's body or one written
 //! on its own to scope a `defer`; a labeled block that is a branch's body,
@@ -94,7 +95,13 @@ const Walk = struct {
 
     fn run(w: *Walk, function: Node.Index) Allocator.Error!u32 {
         try w.frames.append(w.arena, .{ .level = .{ .token = 0, .construct = "", .level = 0 }, .parent = 0 });
-        try w.pushChildren(function, 0, 0);
+        // The body alone: a struct in the signature, as a return or a
+        // parameter's type, is no level of the code.
+        const body = switch (w.tree.nodeTag(function)) {
+            .fn_decl => w.tree.nodeData(function).node_and_node[1],
+            else => w.tree.nodeData(function).opt_token_and_node[1],
+        };
+        try w.push(.{ .node = body, .depth = 0, .frame = 0, .body = true });
         while (w.stack.pop()) |item| try w.visit(item);
         return w.deepest;
     }
@@ -501,6 +508,23 @@ test "a container declared inside is a level; its functions are measured on thei
         // for > struct; inner: if > if, from 0.
         \\outer 2
         \\outer.S.inner 2
+        \\
+    );
+}
+
+test "a container in the signature is no level; nesting is of the body" {
+    try expectDepths(
+        \\fn returns() struct { a: u8 } {
+        \\    return .{ .a = 1 };
+        \\}
+        \\fn takes(x: struct { a: u8 }) u8 {
+        \\    if (x.a > 0) return 1;
+        \\    return 0;
+        \\}
+    ,
+        // nothing; the if.
+        \\returns 0
+        \\takes 1
         \\
     );
 }
