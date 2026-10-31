@@ -24,7 +24,7 @@ A function starts at 0.
 | each run of `and` or of `or` | 1 |
 | `catch` or `orelse` with a value or a jump | 1 |
 | a labeled block used as a value | 1 |
-| a `return` inside a loop | 1 |
+| a `return` inside a loop or a labeled `switch` | 1 |
 | a `break` or `continue` that jumps past a loop, a labeled `switch` or a labeled block | 1 |
 | an `errdefer` | 1 |
 | `try`, a capture, a plain block, `defer`, a `break` or `continue` past nothing, a call | 0 |
@@ -254,9 +254,10 @@ A jump costs 1, at any depth, when it ends more than the construct it
 names, the function for a `return`: a reader must hold where it lands
 and what it cut short on the way.
 
-- A `return` inside a loop costs 1, since it ends the loop as well as
-  the function. Outside any loop it costs nothing: a guard clause,
-  `if (bad) return error.Bad;`, costs its `if` and no more.
+- A `return` inside a loop or a labeled `switch` costs 1, since it ends
+  the loop or the state machine as well as the function. Outside them it
+  costs nothing: a guard clause, `if (bad) return error.Bad;`, costs its
+  `if` and no more.
 - A labeled `break` or `continue` costs 1 when a loop, a labeled
   `switch` or a labeled block stands between it and the construct its
   label names, since it ends that too. With nothing of the kind
@@ -314,7 +315,10 @@ A labeled `switch` whose prongs `continue` to it is a state machine: a
 loop and a `switch` in one structure, and it costs as one. The `switch`
 costs 1 and 1 more for each level, and a `continue` to it straight from
 a prong costs nothing, as an unlabeled `continue` in a loop does. One
-sent from inside a loop in a prong ends that loop too, and costs 1.
+sent from inside a loop in a prong ends that loop too, and costs 1. A
+`return` from a prong ends the machine, and costs 1 as one from a loop
+does; a `switch` is labeled to be continued to, so any labeled `switch`
+counts.
 
 ```zig
 fn run(start: State) void {
@@ -345,6 +349,22 @@ fn drain(it: *Iter) void {
 ```
 
 Cognitive 7.
+
+```zig
+fn lex(src: []const u8) ?usize {
+    var i: usize = 0;
+    sw: switch (State.start) { // 1
+        .start => {
+            if (i == src.len) return null; // 2, and 1: a return from the machine
+            i += 1;
+            continue :sw .word;
+        },
+        .word => return i, // 1: a return from the machine
+    }
+}
+```
+
+Cognitive 5.
 
 ## defer and errdefer
 

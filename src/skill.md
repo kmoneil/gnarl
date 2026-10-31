@@ -61,11 +61,11 @@ is a block or a `switch`, costs 1 and 1 more for each level it is in.
 An `else if`, an `else` and a loop's `else` cost 1, but not the `else` of
 an `if` whose branches are both expressions. Each run of `and` or of
 `or` costs 1, as do a `catch` or `orelse` with a value or a jump for its
-handler, a labeled block used as a value, a `return` inside a loop, a
-labeled `break` or `continue` that ends a loop or block on its way, and
-an `errdefer`. Nothing for a `try`, a `defer`, a capture or a guard
-clause's `return`. docs/cognitive.md in gnarl's repository has the rules,
-an example each.
+handler, a labeled block used as a value, a `return` inside a loop or a
+labeled `switch`, a labeled `break` or `continue` that ends a loop or
+block on its way, and an `errdefer`. Nothing for a `try`, a `defer`, a
+capture or a guard clause's `return`. docs/cognitive.md in gnarl's
+repository has the rules, an example each.
 
 | Code | cyclomatic | cognitive |
 | --- | ---: | ---: |

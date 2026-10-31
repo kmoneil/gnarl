@@ -9,10 +9,11 @@
 //! `else` of an `if` whose branches are both expressions costs nothing.
 //! These cost 1 at any depth: each run of `and` or of `or`, a `catch` or
 //! `orelse` with a value or a jump for its handler, a labeled block used as
-//! a value, a `return` inside a loop, a labeled `break` or `continue` that
-//! ends a loop, a labeled `switch` or a labeled block on its way, and an
-//! `errdefer`. A `catch` or `orelse` with no real handler (`catch
-//! unreachable`, `catch {}`, `orelse unreachable`) costs nothing.
+//! a value, a `return` inside a loop or a labeled `switch` (a state
+//! machine), a labeled `break` or `continue` that ends a loop, a labeled
+//! `switch` or a labeled block on its way, and an `errdefer`. A `catch` or
+//! `orelse` with no real handler (`catch unreachable`, `catch {}`,
+//! `orelse unreachable`) costs nothing.
 //!
 //! What opens a level: the branches of an `if` (an `else if` stays on its
 //! `if`'s level), a loop's body and `else`, a `switch`'s prongs, a handler
@@ -282,7 +283,7 @@ const Walk = struct {
         const keyword = tree.nodeMainToken(item.node);
         try w.pushChildren(item.node, item.depth, item.frame, .other);
         if (tree.nodeTag(item.node) == .@"return") {
-            if (w.inLoop(item.frame)) try w.add(.{ .token = keyword, .construct = "return", .adds = 1, .why = "inside a loop: it ends the loop too" });
+            if (w.endedByReturn(item.frame)) |why| try w.add(.{ .token = keyword, .construct = "return", .adds = 1, .why = why });
             return;
         }
         const label = tree.nodeData(item.node).opt_token_and_opt_node[0].unwrap() orelse return;
@@ -310,12 +311,18 @@ const Walk = struct {
         return null;
     }
 
-    fn inLoop(w: *Walk, from: u32) bool {
+    /// What a `return` at `from` ends besides the function, said as why it
+    /// costs: the innermost loop or labeled `switch` around it, if any.
+    fn endedByReturn(w: *Walk, from: u32) ?[]const u8 {
         var f = from;
         while (f != 0) : (f = w.frames.items[f].parent) {
-            if (w.frames.items[f].kind == .loop) return true;
+            switch (w.frames.items[f].kind) {
+                .loop => return "inside a loop: it ends the loop too",
+                .@"switch" => return "inside a labeled switch: it ends the state machine too",
+                .function, .block => {},
+            }
         }
-        return false;
+        return null;
     }
 
     fn open(w: *Walk, parent: u32, kind: Frame.Kind, label: ?Ast.TokenIndex) Allocator.Error!u32 {
@@ -492,7 +499,7 @@ test "every example in docs/cognitive.md: its count, and each line's costs as it
             try std.testing.expectEqual(want, got);
         }
     }
-    try std.testing.expectEqual(20, examples);
+    try std.testing.expectEqual(21, examples);
 }
 
 /// Checks each function in `source` has its expected count, given a line
@@ -643,7 +650,7 @@ test "comptime code counts as any other; a container inside costs nothing" {
     );
 }
 
-test "a return from a labeled switch is not inside a loop" {
+test "a return from a labeled switch ends the machine, and a labeled block is no loop" {
     try expectCounts(
         \\fn machine(s: S) void {
         \\    sw: switch (s) {
@@ -653,8 +660,22 @@ test "a return from a labeled switch is not inside a loop" {
         \\}
     ,
         // switch 1; the continue straight from a prong free; the return
-        // is in no while or for.
-        \\machine 1
+        // ends the machine, 1.
+        \\machine 2
+        \\
+    );
+    try expectCounts(
+        \\fn value(c: bool) u8 {
+        \\    const v = blk: {
+        \\        if (c) return 0;
+        \\        break :blk 1;
+        \\    };
+        \\    return v;
+        \\}
+    ,
+        // blk 1; if one level in 2; a return from a labeled block ends no
+        // loop or machine, so is free.
+        \\value 3
         \\
     );
 }
