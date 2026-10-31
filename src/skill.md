@@ -222,10 +222,26 @@ breakdown and `params.each`. csv and tsv
 carry the rows alone, errors on stderr only; their `over` column lists
 each limit passed as `metric:level:limit`, separated by spaces.
 
-To replace a function whole with `hunk quote`, take its lines from the
-report's tsv, naming the function by `path:line`. That picks exactly one,
-the innermost function around the line; a name picks every function that
-ends with it, and the first row would be a guess.
+To read or replace a function whole, take its lines from the report's
+tsv, naming the function by `path:line`. That picks exactly one, the
+innermost function around the line; a name picks every function that
+ends with it, and the first row would be a guess. The first three
+columns are `path`, `line` and `end_line`:
+
+```sh
+gnarl --function src/cli.zig:384 --format tsv | awk -F'\t' 'NR == 2 { print $1, $2, $3 }'
+# src/cli.zig 384 395, so: sed -n '384,395p' src/cli.zig
+```
+
+Those are the lines to read, or to give an editor that takes a range.
+`line` is the `fn` line, so a doc comment above stays out, which is right
+for replacing a function and wrong for deleting or moving one: its
+comment is left behind. `--explain` gives the same `line` and `end_line`
+in its json, and refuses a name more than one function answers to.
+
+With hunk (github.com/kmoneil/hunk), a separate tool and not needed for
+anything else here, the replacement is one pipe; where it is not
+installed, the pipe stops at "command not found" and changes nothing:
 
 ```sh
 gnarl --function src/cli.zig:384 --format tsv \
@@ -235,12 +251,8 @@ gnarl --function src/cli.zig:384 --format tsv \
 ```
 
 `new.zig` holds the function as it is to stand, indented as the old one
-is: hunk puts it in as written. `line` is the `fn` line, so a doc comment
-above stays out of the quote, which is right for replacing a function
-and wrong for deleting or moving one: its comment is left behind. Not
-`path` for the variable: in zsh it is `PATH`. `--explain` gives the same
-`line` and `end_line` in its json, and refuses a name more than one
-function answers to.
+is: hunk puts it in as written. Not `path` for the variable: in zsh it is
+`PATH`.
 
 The summary counts every function measured, whatever is listed: with
 `--function` or `--top` the table has fewer rows than the summary
