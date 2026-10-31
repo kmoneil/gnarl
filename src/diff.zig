@@ -188,7 +188,7 @@ test "dropGlobbed: what a glob covers below the path named, not the path named" 
     try files.appendSlice(arena, &all);
     try dropGlobbed(arena, &files, &.{"."}, &.{"test/golden"});
     try std.testing.expectEqual(1, files.items.len);
-    try std.testing.expectEqualStrings("src/a.zig", files.items[0].path);
+    try std.testing.expectEqualStrings("src/a.zig", files.items[0].git_path);
 
     files.clearRetainingCapacity();
     try files.appendSlice(arena, &all);
