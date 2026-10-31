@@ -25,9 +25,9 @@ A function starts at 0.
 | `catch` or `orelse` with a value or a jump | 1 |
 | a labeled block used as a value | 1 |
 | a `return` inside a loop | 1 |
-| a `break` or `continue` with a label, but to the innermost loop or as a labeled block's value | 1 |
+| a `break` or `continue` that jumps past a loop, a labeled `switch` or a labeled block | 1 |
 | an `errdefer` | 1 |
-| `try`, a capture, a plain block, `defer`, an unlabeled `break` or `continue`, a call | 0 |
+| `try`, a capture, a plain block, `defer`, a `break` or `continue` past nothing, a call | 0 |
 
 These open a level for what is inside them: the branches of an `if`
 (each `else if` and `else` on the `if`'s own level), a loop's body and
@@ -201,10 +201,10 @@ Cognitive 2.
 An `orelse` or a `catch` is a branch, as an `if` is. With a block for its
 handler it costs as an `if` does, 1 and 1 more for each level, and opens
 a level for the block. With a value or a jump for its handler (`orelse
-0`, `orelse continue`, `catch |err| return err`) it reads as one line,
-and costs 1 at any depth. With no real handler, `catch unreachable`,
-`catch {}` or `orelse unreachable`, it costs nothing, as in the
-cyclomatic count.
+0`, `orelse continue`, `catch |err| return err`, `catch @panic("no")`)
+it reads as one line, and costs 1 at any depth. With no real handler,
+`catch unreachable`, `catch {}` or `orelse unreachable`, it costs
+nothing, as in the cyclomatic count.
 
 ```zig
 fn lookup(map: *const Map, keys: []const []const u8) u32 {
@@ -250,26 +250,30 @@ Cognitive 1.
 
 ## Jumps
 
-A jump that leaves more than the step it is in costs 1, at any depth: a
-reader must hold where it lands. These do:
+A jump costs 1, at any depth, when it ends more than the construct it
+names, the function for a `return`: a reader must hold where it lands
+and what it cut short on the way.
 
-- a `return` inside a loop, which ends the loop too;
-- a `break` or `continue` with a label, but for one to the innermost
-  loop around it (where an unlabeled one does the same) and one that
-  gives a labeled block its value;
-- a labeled block used as a value, which costs 1 for itself, however
-  many `break`s give it its value, and opens a level.
-
-An unlabeled `break` or `continue`, and a `return` outside any loop,
-cost nothing: they end the step a reader is already in. So a guard
-clause, `if (bad) return error.Bad;`, costs its `if` and no more.
+- A `return` inside a loop costs 1, since it ends the loop as well as
+  the function. Outside any loop it costs nothing: a guard clause,
+  `if (bad) return error.Bad;`, costs its `if` and no more.
+- A labeled `break` or `continue` costs 1 when a loop, a labeled
+  `switch` or a labeled block stands between it and the construct its
+  label names, since it ends that too. With nothing of the kind
+  between, the label changes nothing: a `continue` to the loop or
+  labeled `switch` it sits in, and a `break` that gives the block it
+  sits in its value, cost nothing.
+- An unlabeled `break` or `continue` costs nothing: it ends only the
+  step a reader is already in.
+- A labeled block used as a value costs 1 for itself, however many
+  `break`s give it its value, and opens a level.
 
 ```zig
 fn firstShared(xs: []const u8, ys: []const u8) ?u8 {
     outer: for (xs) |x| { // 1
         for (ys) |y| { // 2
             if (x == y) return x; // 3, and 1: a return inside a loop
-            if (y > x) continue :outer; // 3, and 1: a continue to an outer loop
+            if (y > x) continue :outer; // 3, and 1: a continue past the inner loop
         }
     }
     return null;
@@ -290,20 +294,57 @@ fn width(kind: Kind, bits: u16) u16 {
 
 Cognitive 3.
 
-A labeled `switch` whose prongs `continue` to it is a state machine:
-each `continue` to it is a jump.
+A `break` that gives a block its value from inside a loop in that block
+ends the loop too, and costs 1:
+
+```zig
+fn firstOdd(xs: []const u32) u32 {
+    return blk: { // 1: a labeled block used as a value
+        for (xs) |x| { // 2
+            if (x % 2 == 1) break :blk x; // 3, and 1: a break past the loop
+        }
+        break :blk 0; // 0: nothing between it and its block
+    };
+}
+```
+
+Cognitive 7.
+
+A labeled `switch` whose prongs `continue` to it is a state machine: a
+loop and a `switch` in one structure, and it costs as one. The `switch`
+costs 1 and 1 more for each level, and a `continue` to it straight from
+a prong costs nothing, as an unlabeled `continue` in a loop does. One
+sent from inside a loop in a prong ends that loop too, and costs 1.
 
 ```zig
 fn run(start: State) void {
     sw: switch (start) { // 1
-        .a => continue :sw .b, // 1
-        .b => continue :sw .done, // 1
+        .a => continue :sw .b,
+        .b => continue :sw .done,
         .done => {},
     }
 }
 ```
 
-Cognitive 3.
+Cognitive 1.
+
+```zig
+fn drain(it: *Iter) void {
+    sw: switch (it.state()) { // 1
+        .pending => {
+            while (it.next()) |v| { // 2
+                if (v == 0) continue :sw .done; // 3, and 1: a continue past the loop
+                feed(v);
+            }
+            continue :sw .flush; // 0: nothing between it and the switch
+        },
+        .flush => flush(it),
+        .done => {},
+    }
+}
+```
+
+Cognitive 7.
 
 ## defer and errdefer
 
