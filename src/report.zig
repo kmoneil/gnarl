@@ -245,24 +245,7 @@ fn writeXml(w: *Writer, rows: []const Row, listed: Listed, c: Context) Writer.Er
         }
         try w.writeAll("  </check>\n");
     }
-    try w.writeAll("  <thresholds>\n");
-    for (std.enums.values(Class)) |class| {
-        try w.writeAll("    <class");
-        try formats.attr(w, "name", @tagName(class));
-        try w.writeAll(">\n");
-        const limits = c.classes.get(class);
-        for (std.enums.values(Metric)) |metric| {
-            const limit = limits.of(metric);
-            if (limit.warning == null and limit.critical == null) continue;
-            try w.writeAll("      <limit");
-            try formats.attr(w, "metric", @tagName(metric));
-            if (limit.warning) |n| try formats.attrInt(w, "warning", n);
-            if (limit.critical) |n| try formats.attrInt(w, "critical", n);
-            try w.writeAll("/>\n");
-        }
-        try w.writeAll("    </class>\n");
-    }
-    try w.writeAll("  </thresholds>\n");
+    try writeThresholdsXml(w, c.classes);
     try messages.writeXml(w, c.messages);
     try w.writeAll("  <functions>\n");
     for (listed.rows) |row| {
@@ -462,24 +445,53 @@ fn writeSummary(w: *Writer, rows: []const Row, listed: Listed, files: usize, cla
         for (rows) |row| {
             if (row.class == class) break;
         } else continue;
-        try w.print("{s}Thresholds for {t} code (warning, critical):", .{ gap, class });
-        const limits = classes.get(class);
-        var first = true;
-        for (std.enums.values(Metric)) |metric| {
-            const limit = limits.of(metric);
-            if (limit.warning == null and limit.critical == null) continue;
-            try w.print("{s} {t}", .{ if (first) "" else ";", metric });
-            first = false;
-            if (limit.warning) |n| try w.print(" {d}", .{n}) else try w.writeAll(" -");
-            if (limit.critical) |n| try w.print(", {d}", .{n});
-        }
-        try w.writeAll(if (first) " none." else ".");
+        try w.writeAll(gap);
+        try writeThresholds(w, classes, class);
     }
     try w.writeByte('\n');
 }
 
 fn plural(n: usize) []const u8 {
     return if (n == 1) "" else "s";
+}
+
+/// `Thresholds for normal code (warning, critical): cyclomatic 10, 15;
+/// ...`, with no line end.
+pub fn writeThresholds(w: *Writer, classes: Classes, class: Class) Writer.Error!void {
+    try w.print("Thresholds for {t} code (warning, critical):", .{class});
+    const limits = classes.get(class);
+    var first = true;
+    for (std.enums.values(Metric)) |metric| {
+        const limit = limits.of(metric);
+        if (limit.warning == null and limit.critical == null) continue;
+        try w.print("{s} {t}", .{ if (first) "" else ";", metric });
+        first = false;
+        if (limit.warning) |n| try w.print(" {d}", .{n}) else try w.writeAll(" -");
+        if (limit.critical) |n| try w.print(", {d}", .{n});
+    }
+    try w.writeAll(if (first) " none." else ".");
+}
+
+/// The `<thresholds>` element of an xml document.
+pub fn writeThresholdsXml(w: *Writer, classes: Classes) Writer.Error!void {
+    try w.writeAll("  <thresholds>\n");
+    for (std.enums.values(Class)) |class| {
+        try w.writeAll("    <class");
+        try formats.attr(w, "name", @tagName(class));
+        try w.writeAll(">\n");
+        const limits = classes.get(class);
+        for (std.enums.values(Metric)) |metric| {
+            const limit = limits.of(metric);
+            if (limit.warning == null and limit.critical == null) continue;
+            try w.writeAll("      <limit");
+            try formats.attr(w, "metric", @tagName(metric));
+            if (limit.warning) |n| try formats.attrInt(w, "warning", n);
+            if (limit.critical) |n| try formats.attrInt(w, "critical", n);
+            try w.writeAll("/>\n");
+        }
+        try w.writeAll("    </class>\n");
+    }
+    try w.writeAll("  </thresholds>\n");
 }
 
 fn isAre(n: usize) []const u8 {

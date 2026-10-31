@@ -110,6 +110,20 @@ test "docs/output.md lists every field of the report, and no other" {
     try expectSame(arena, doc, "## The report", null, out.written());
 }
 
+test "docs/output.md lists every field of a diff, and no other" {
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const doc = try std.Io.Dir.cwd().readFileAlloc(io, doc_path, arena, .limited(1 << 20));
+    const diff = @import("diff.zig");
+    const values: diff.Values = .{ .cyclomatic = 16, .lines = 3, .nesting = 0, .params = 0, .params_weighted = 0 };
+    const touched = [_]diff.Touched{.{ .path = "a.zig", .line = 1, .name = "f", .kind = .@"fn", .class = .normal, .change = .worse, .before = values, .after = values, .trips = &.{.{ .metric = .cyclomatic, .level = .critical, .limit = 15 }} }};
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try diff.write(&out.writer, .json, &touched, .{ .version = "0.0.0", .ref = "main", .files = 1, .classes = .defaults, .messages = &said });
+    try expectSame(arena, doc, "## A diff", "## The report", out.written());
+}
+
 test "docs/output.md lists every field of an explanation, and no other" {
     const io = std.testing.io;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);

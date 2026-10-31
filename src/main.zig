@@ -9,6 +9,7 @@ const build_options = @import("build_options");
 const test_options = @import("test_options");
 const baseline = @import("baseline.zig");
 const config = @import("config.zig");
+const diff = @import("diff.zig");
 const explain = @import("explain.zig");
 const measure = @import("measure.zig");
 const messages = @import("messages.zig");
@@ -24,6 +25,7 @@ const usage =
     \\             [--all] [--top <n>] [--function <function>]... [--no-ignore]
     \\             [--format <format>] [--json] [<path>...]
     \\       gnarl --explain <function>... [<path>...]
+    \\       gnarl --diff <ref> [<path>...]
     \\       gnarl skill [--install <dir>]
     \\       gnarl --version | --help
     \\
@@ -74,6 +76,11 @@ const usage =
     \\                    name or the end of it (record for Validator.record),
     \\                    looked for in the paths given, or the current
     \\                    directory if none. May be given more than once.
+    \\  --diff <ref>      Rather than report, list each function the change
+    \\                    from the commit <ref> to the work tree touched,
+    \\                    uncommitted edits and new files included, with its
+    \\                    numbers before and after: worse first, then added,
+    \\                    the same, better and removed.
     \\  --format <format> text (the default, a table); md (a Markdown table,
     \\                    for a review); json or xml (every field and all
     \\                    that stderr says, versioned); csv or tsv (a header,
@@ -139,6 +146,7 @@ pub fn main(init: std.process.Init) !u8 {
     var said: messages.Messages = .{ .arena = arena };
     const settings = try loadConfig(gpa, arena, io, cwd, run.config, &said) orelse
         return stopEarly(out, &stdout_writer, run, said.items.items);
+    if (run.diff) |ref| return runDiff(gpa, arena, io, cwd, run, ref, settings, &said, out, &stdout_writer);
     // A baseline is read only to check against it.
     const held: ?Held = if (run.check) switch (try loadBaseline(arena, io, cwd, run.baseline, &said)) {
         .none => null,
@@ -266,6 +274,72 @@ pub fn main(init: std.process.Init) !u8 {
 
 fn plural(n: usize) []const u8 {
     return if (n == 1) "" else "s";
+}
+
+/// `--diff ref`: each function the change touched, before and after.
+fn runDiff(
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    io: Io,
+    cwd: Io.Dir,
+    run: Run,
+    ref: []const u8,
+    settings: config.Config,
+    said: *messages.Messages,
+    out: *Io.Writer,
+    stdout_writer: *const Io.File.Writer,
+) !u8 {
+    const paths: []const []const u8 = if (run.paths.len > 0) run.paths else &.{"."};
+    const changed = try diff.changedFiles(arena, io, ref, paths, run.excludes, said) orelse &.{};
+    var file_arena: std.heap.ArenaAllocator = .init(gpa);
+    defer file_arena.deinit();
+    var touched: std.ArrayList(diff.Touched) = .empty;
+    for (changed) |file| {
+        _ = file_arena.reset(.retain_capacity);
+        const scratch = file_arena.allocator();
+        var before: ?Ast = null;
+        defer if (before) |*t| t.deinit(gpa);
+        if (file.status != .added) {
+            const source = try diff.oldSource(scratch, io, ref, file) orelse {
+                try said.fail(file.path, "git could not show it as it was at {s}", .{ref});
+                continue;
+            };
+            before = try Ast.parse(gpa, source, .{});
+            if (before.?.errors.len > 0) {
+                try sayParseErrors(said, try std.fmt.allocPrint(arena, "{s}:{s}", .{ ref, file.path }), &before.?);
+                continue;
+            }
+        }
+        var after: ?Ast = null;
+        defer if (after) |*t| t.deinit(gpa);
+        if (file.status != .removed) {
+            const source = cwd.readFileAllocOptions(io, file.path, scratch, .limited(max_source_bytes), .of(u8), 0) catch |err| switch (err) {
+                error.OutOfMemory => |e| return e,
+                else => {
+                    try said.fail(file.path, "{t}", .{err});
+                    continue;
+                },
+            };
+            after = try Ast.parse(gpa, source, .{});
+            if (after.?.errors.len > 0) {
+                try sayParseErrors(said, file.path, &after.?);
+                continue;
+            }
+        }
+        const class = settings.classOf(file.path);
+        try diff.compareFile(arena, scratch, file.path, if (before) |*t| t else null, if (after) |*t| t else null, class, settings.classes.get(class), &touched);
+    }
+    diff.sort(touched.items);
+    const status: u8 = if (said.errors() > 0) 2 else 0;
+    diff.write(out, run.format, touched.items, .{
+        .version = build_options.version,
+        .ref = ref,
+        .files = changed.len,
+        .classes = settings.classes,
+        .messages = said.items.items,
+    }) catch |err| return closedEarly(err, stdout_writer, status);
+    out.flush() catch |err| return closedEarly(err, stdout_writer, status);
+    return status;
 }
 
 /// When a configuration or baseline cannot be used, a document that
@@ -441,6 +515,8 @@ const Run = struct {
     /// The baseline file named, if one is.
     baseline: ?[]const u8,
     update_baseline: bool,
+    /// The commit to diff the work tree against, if one is given.
+    diff: ?[]const u8,
 };
 
 /// `-h` and `--help`, `--version`, and an unknown option take effect where
@@ -467,6 +543,7 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
     var no_ignore = false;
     var baseline_path: ?[]const u8 = null;
     var update_baseline = false;
+    var diff_ref: ?[]const u8 = null;
     var to_list: std.ArrayList([]const u8) = .empty;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -505,6 +582,9 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
         } else if (optionValue(args, &i, "--explain")) |function| {
             if (function.len == 0) return .{ .usage_error = "--explain needs a function: path:line, or a name" };
             try to_explain.append(arena, function);
+        } else if (optionValue(args, &i, "--diff")) |ref| {
+            if (ref.len == 0) return .{ .usage_error = "--diff needs a commit: HEAD, main, a hash" };
+            diff_ref = ref;
         } else if (optionValue(args, &i, "--baseline")) |path| {
             if (path.len == 0) return .{ .usage_error = "--baseline needs a file" };
             baseline_path = path;
@@ -522,6 +602,9 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
         return .{ .usage_error = "--check, --all, --top, --function, --baseline and --update-baseline are for the report, not --explain" };
     }
     if (check and update_baseline) return .{ .usage_error = "--update-baseline writes the baseline and --check holds to it: one at a time" };
+    if (diff_ref != null and (check or update_baseline or baseline_path != null or all or top != null or to_list.items.len > 0 or to_explain.items.len > 0)) {
+        return .{ .usage_error = "--diff takes paths, --exclude, --config and --format; not --check, --explain, the baseline flags, --all, --top or --function" };
+    }
     if (baseline_path != null and !check and !update_baseline) return .{ .usage_error = "--baseline is for --check or --update-baseline" };
     return .{ .run = .{
         .paths = paths.items,
@@ -535,6 +618,7 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
         .no_ignore = no_ignore,
         .baseline = baseline_path,
         .update_baseline = update_baseline,
+        .diff = diff_ref,
         .functions = to_list.items,
     } };
 }
@@ -730,6 +814,51 @@ test "a baseline that cannot be used stops the run, and says where" {
         \\
     ++ thresholds_line, "gnarl: missing.zig: FileNotFound\ngnarl: b.txt: not written: a file that could not be read would be left out of it\n");
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "b.txt", .{}));
+}
+
+test "--diff: the functions a change touched, before and after, worse first" {
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const git_there = std.process.run(arena, io, .{ .argv = &.{ "git", "--version" } }) catch return error.SkipZigTest;
+    if (git_there.term != .exited or git_there.term.exited != 0) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "proj");
+    var proj = try tmp.dir.openDir(io, "proj", .{});
+    defer proj.close(io);
+    try proj.writeFile(io, .{ .sub_path = "a.zig", .data = "fn grows(c: bool) void {\n    if (c) {}\n}\nfn tidied() void {}\nfn dropped() void {}\nfn kept() void {}\n" });
+    try proj.writeFile(io, .{ .sub_path = "b.zig", .data = "fn gone() void {}\n" });
+    for ([_][]const []const u8{
+        &.{ "git", "init", "-q" },
+        &.{ "git", "add", "." },
+        &.{ "git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", "start" },
+    }) |argv| {
+        const r = try std.process.run(arena, io, .{ .argv = argv, .cwd = .{ .dir = proj } });
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+    }
+    // grows gets worse, tidied gets a comment, dropped goes, fresh comes;
+    // kept only moves down; b.zig is deleted; c.zig is new and untracked.
+    try proj.writeFile(io, .{ .sub_path = "a.zig", .data = "fn grows(c: bool) void {\n    if (c) {}\n    if (c) {}\n}\nfn tidied() void {\n    // why\n}\n\nfn kept() void {}\nfn fresh() void {}\n" });
+    try proj.deleteFile(io, "b.zig");
+    try proj.writeFile(io, .{ .sub_path = "c.zig", .data = "fn made() void {}\n" });
+
+    try expectRun(proj, &.{ "--diff", "HEAD" }, 0,
+        \\change   cyclomatic  lines   nesting  params  weighted  location  function
+        \\worse    2 -> 3      2 -> 3  1        1       1         a.zig:1   grows
+        \\added    1           1       0        0       0         a.zig:10  fresh
+        \\added    1           1       0        0       0         c.zig:1   made
+        \\same     1           1       0        0       0         a.zig:5   tidied
+        \\removed  1           1       0        0       0         a.zig:5   dropped
+        \\removed  1           1       0        0       0         b.zig:1   gone
+        \\
+        \\6 functions touched in 3 files since HEAD: 1 worse, 2 added, 1 the same, 0 better, 2 removed.
+        \\gnarl --explain a.zig:1 says why grows, the worst of those that got worse, scores what it does now.
+        \\
+    ++ thresholds_line, "");
+    try expectRun(proj, &.{ "--diff", "nope" }, 2, "No function touched since nope.\n", "gnarl: nope: not a commit git knows here\n");
 }
 
 test "a reader that stops early ends the report quietly" {
@@ -1156,6 +1285,15 @@ test "parseArgs: --baseline and --update-baseline" {
     try std.testing.expectEqualStrings("--baseline needs a file", (try parseArgs(arena, &.{ "--check", "--baseline" })).usage_error);
 }
 
+test "parseArgs: --diff" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expectEqualStrings("main", (try parseArgs(arena, &.{ "--diff", "main", "src" })).run.diff.?);
+    try std.testing.expectEqualStrings("--diff needs a commit: HEAD, main, a hash", (try parseArgs(arena, &.{"--diff"})).usage_error);
+    try std.testing.expectEqualStrings("--diff takes paths, --exclude, --config and --format; not --check, --explain, the baseline flags, --all, --top or --function", (try parseArgs(arena, &.{ "--diff", "HEAD", "--check" })).usage_error);
+}
+
 test "parseArgs: gnarl skill" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
@@ -1216,6 +1354,7 @@ test {
     _ = @import("baseline.zig");
     _ = @import("children.zig");
     _ = @import("config.zig");
+    _ = @import("diff.zig");
     _ = @import("docs.zig");
     _ = @import("explain.zig");
     _ = @import("formats.zig");

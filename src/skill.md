@@ -21,9 +21,12 @@ as often as it helps.
    its name (or the end of it: `record` finds `Validator.record`). It
    lists each construct counted and where, the deepest nesting chain, how
    the lines divide, and each parameter: aim the refactor at those lines.
-3. Change the code, then `gnarl --function <function> src` measures just
-   that function again, whatever its numbers. A function split in two is
-   two rows, and the old name may be gone: run step 1 again.
+3. Change the code, then `gnarl --diff HEAD` lists each function the
+   change touched (uncommitted edits and new files included) with its
+   numbers before and after: worse first, then added, the same, better
+   and removed, and says plainly when nothing got worse. A function split
+   in two shows as one changed and one added. `gnarl --function <function>
+   src` measures one function again, whatever its numbers.
 4. `gnarl --check src` in CI exits 1 when a function is over a critical
    threshold, and names the `--explain` to run for the worst.
 
@@ -136,6 +139,12 @@ out, and why), `check` (`asked`, `failed`, `critical`), `thresholds`,
 `path`, `line`, `end_line`, `column`, `name`, `kind`, `class`, the five
 metrics (`cyclomatic`, `lines`, `nesting`, `params`, `params_weighted`)
 and `trips` (`metric`, `level`, `limit`). An `--explain` document has
+A `--diff` document has `ref`, `changes` (how many `worse`, `added`,
+`same`, `better`, `removed`) and `functions`, each with `change`,
+`before` and `after` (null for the side it does not have). For a pull
+request comment, `gnarl --diff origin/main --format md`.
+
+An `--explain` document has
 `explanations` instead, each with `cyclomatic.branches`,
 `nesting.chain`, the `lines` breakdown and `params.each`. csv and tsv
 carry the rows alone, errors on stderr only; their `over` column lists

@@ -115,7 +115,7 @@ fn notIgnored(arena: Allocator, io: Io, base: Io.Dir, dir: []const u8) Allocator
 
 /// Whether a path git lists, with `/`, is one the walk would not reach: a
 /// hidden file, or one inside a directory it does not walk into.
-fn skipped(path: []const u8) bool {
+pub fn skipped(path: []const u8) bool {
     var it = std.mem.splitScalar(u8, path, '/');
     while (it.next()) |part| {
         if (part.len == 0) continue;
@@ -126,7 +126,7 @@ fn skipped(path: []const u8) bool {
 }
 
 /// Whether `path` is one of `excludes`, or inside one.
-fn excluded(path: []const u8, excludes: []const []const u8) bool {
+pub fn excluded(path: []const u8, excludes: []const []const u8) bool {
     for (excludes) |exclude| {
         if (!std.mem.startsWith(u8, path, exclude)) continue;
         if (path.len == exclude.len or std.fs.path.isSep(path[exclude.len])) return true;

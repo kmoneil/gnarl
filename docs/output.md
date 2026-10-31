@@ -121,6 +121,34 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
         out of both.
       - `why`: why it is left out, or weighs 2.
 
+## A diff
+
+- `schema`, `gnarl`, `thresholds`, `errors`, `notes`: as in the report.
+- `ref`: the commit the work tree was compared with.
+- `files`: how many files the change touched.
+- `changes`: how many functions each change came to:
+  - `worse`: a number went up.
+  - `added`: new since the commit.
+  - `same`: the text changed, the numbers did not.
+  - `better`: a number went down, none up.
+  - `removed`: gone since the commit.
+- `functions`: each function the change touched, worse first, then
+  added, the same, better and removed:
+  - `path`, `name`, `kind`, `class`, `trips`: as in the report's
+    `functions`; `trips` are those of its numbers after the change.
+  - `line`: where it is now; for a removed function, where it was.
+  - `change`: one of `changes`' names.
+  - `before`, `after`: its numbers at the commit and now, each with
+    the report's five metrics; null for an added function's `before`
+    and a removed one's `after`.
+
+A function is touched when its own source changed: a function declared
+inside it is not its own. In csv and tsv, the columns are `path`,
+`line`, `name`, `kind`, `class`, `change`, each metric `_before` and
+`_after` (empty for the side a function does not have), and `over`.
+
+## The csv and tsv explanation rows
+
 In csv and tsv, an explanation is a row per item, with the columns
 `path`, `line`, `name` (the function's), `metric`, `item`, `at`
 (`line:column`, when the item is a place), `value` and `why`. Each metric
