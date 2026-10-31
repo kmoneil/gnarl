@@ -52,24 +52,24 @@ params have a warning limit only, so they mark a row `!` but never fail
 On a codebase with debt already, write a baseline and commit it:
 
 ```console
-$ gnarl --update-baseline
+$ gnarl --update-baseline .
 gnarl: complexity.baseline: note: wrote 1 function over a critical threshold
 ```
 
 `complexity.baseline` is sorted plain text, a function a line, so a change
-to it reads as a diff. From then on `gnarl --check` holds to it: a
+to it reads as a diff. From then on `gnarl --check .` holds to it: a
 function not in it over a critical limit fails, and so does one above its
 number there. Within its limits, a function may change freely.
 
 ```console
-$ gnarl --check
+$ gnarl --check .
 gnarl: --check: 1 function fails against complexity.baseline:
   tally.zig:7  tally: cognitive 34, above its baseline 33
 gnarl --explain tally.zig:7 says why the first scores what it does
 ```
 
 When a frozen function gets better, `--check` says so, and
-`gnarl --update-baseline` tightens the ratchet; when it is within every
+`gnarl --update-baseline .` tightens the ratchet; when it is within every
 limit again, the update drops it. Debt can only shrink.
 
 {: .note }
@@ -79,7 +79,7 @@ another file is a new function: update the baseline in the same change.
 ## In a pull request
 
 ```sh
-gnarl --check                          # the gate
+gnarl --check .                        # the gate
 gnarl --diff origin/main --format md   # what the change did, for the review
 ```
 
@@ -94,7 +94,7 @@ A released binary, pinned and checked against its release's checksums:
 ```yaml
 - name: install gnarl
   env:
-    GNARL: v0.1.0
+    GNARL: v0.2.0
   run: |
     dir="$RUNNER_TEMP/gnarl" && mkdir -p "$dir" && cd "$dir"
     base="https://github.com/kmoneil/gnarl/releases/download/$GNARL"
@@ -103,7 +103,7 @@ A released binary, pinned and checked against its release's checksums:
     mv gnarl-linux-amd64 gnarl && chmod +x gnarl
     echo "$dir" >> "$GITHUB_PATH"
 - name: complexity
-  run: gnarl --check
+  run: gnarl --check .
 ```
 
 On a runner with Zig 0.17 it can be built instead:

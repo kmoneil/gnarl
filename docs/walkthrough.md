@@ -43,7 +43,7 @@ pub fn tally(items: []const Item, wanted: []const u8, strict: bool, out: *std.St
 ## 1. Find it
 
 ```console
-$ gnarl
+$ gnarl .
 cyclomatic  cognitive  lines  nesting  params  weighted  location     function
       11!        33!!   23        5!      4         4    tally.zig:7  tally
 
@@ -59,7 +59,7 @@ Cognitive complexity 33 is over the critical limit for normal code, 25.
 of the function that carry it (abridged):
 
 ```console
-$ gnarl --explain tally
+$ gnarl --explain tally .
 cognitive 33, over the critical limit (25): the sum of these
   9:5    for   +1
   10:9   if    +2  1 for its depth

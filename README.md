@@ -23,7 +23,7 @@ no semantic analysis, nothing to configure before the first run.
 ## What it looks like
 
 ```console
-$ gnarl
+$ gnarl .
 cyclomatic  cognitive  lines  nesting  params  weighted  location     function
       11!        33!!   23        5!      4         4    tally.zig:7  tally
 
@@ -105,11 +105,11 @@ info, so that message comes without a symbolized stack trace.
 ## The loop
 
 ```sh
-gnarl                      # what is over a limit, worst first
-gnarl --explain tally      # why, construct by construct, and where to cut
+gnarl .                    # what is over a limit, worst first
+gnarl --explain tally .    # why, construct by construct, and where to cut
 # ...refactor...
 gnarl --diff HEAD          # what your change did, function by function
-gnarl --check              # in CI: exit 1 on what is new or worse
+gnarl --check .            # in CI: exit 1 on what is new or worse
 ```
 
 ## One function, start to finish
@@ -154,7 +154,7 @@ pub fn tally(items: []const Item, wanted: []const u8, strict: bool, out: *std.St
 here) and then the parts of the function that carry it:
 
 ```console
-$ gnarl --explain tally
+$ gnarl --explain tally .
 cognitive 33, over the critical limit (25): the sum of these
   9:5    for   +1
   10:9   if    +2  1 for its depth
@@ -232,7 +232,7 @@ inferred error set, rather than leaving it out. `gnarl --files` lists
 each file's fan-out and fan-in:
 
 ```console
-$ gnarl --files --top 3
+$ gnarl --files --top 3 .
 fan-out  fan-in  modules  file
      27       0        4  src/main.zig
      16       2        1  src/explain.zig
@@ -247,16 +247,16 @@ are in [docs/cognitive.md](docs/cognitive.md).
 On a codebase with debt already, freeze it. After the report, gnarl says:
 
 ```console
-$ gnarl --update-baseline
+$ gnarl --update-baseline .
 gnarl: complexity.baseline: note: wrote 1 function over a critical threshold
 ```
 
-Commit `complexity.baseline`. From then on `gnarl --check` passes what was
+Commit `complexity.baseline`. From then on `gnarl --check .` passes what was
 already there and fails what is new or worse. After the report, it names
 the function, the metric, and the `--explain` to run:
 
 ```console
-$ gnarl --check
+$ gnarl --check .
 gnarl: --check: 1 function fails against complexity.baseline:
   tally.zig:7  tally: cognitive 34, above its baseline 33
 gnarl --explain tally.zig:7 says why the first scores what it does
@@ -316,7 +316,7 @@ in it is measured as it says.
 ## gnarl measures itself
 
 `zig build test` runs the tests, checks the formatting, and runs
-`gnarl --check` on gnarl's own source against its own baseline. The
+`gnarl --check .` on gnarl's own source against its own baseline. The
 baseline holds one function: a `switch` over every syntax node tag with
 no `else`, so that a new Zig release that adds a tag breaks the build
 rather than a count. It has cyclomatic complexity 33 and cognitive 3,

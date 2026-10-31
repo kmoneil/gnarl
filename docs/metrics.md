@@ -124,7 +124,7 @@ not follow. A file many import is risky to change; one that imports many
 knows too much.
 
 ```console
-$ gnarl --files --top 3
+$ gnarl --files --top 3 .
 fan-out  fan-in  modules  file
      27       0        4  src/main.zig
      16       2        1  src/explain.zig
