@@ -1016,6 +1016,7 @@ test "--diff: the functions a change touched, before and after, worse first" {
         \\
         \\6 functions touched in 3 files since HEAD: 1 worse, 0 mixed, 2 added, 1 the same, 0 better, 2 removed.
         \\gnarl --explain a.zig:1 says why grows, the worst of those that got worse, scores what it does now.
+        \\None of them is over a critical limit now.
         \\
     ++ thresholds_line, "");
     try expectRun(proj, &.{ "--diff", "nope" }, 2, "No function touched since nope.\n", "gnarl: nope: not a commit git knows here\n");

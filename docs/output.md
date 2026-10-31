@@ -208,6 +208,9 @@ lists `imports`, `imported_by` and `modules`, each separated by spaces.
 - `schema`, `gnarl`, `thresholds`, `errors`, `notes`: as in the report.
 - `ref`: the commit the work tree was compared with.
 - `files`: how many files the change touched.
+- `critical`: how many of the functions touched are over a critical
+  limit now; the text says so after the counts, so no `--check` is
+  needed to learn it.
 - `changes`: how many functions each change came to:
   - `worse`: a number went up, none down.
   - `mixed`: some numbers went up and some down.

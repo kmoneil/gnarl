@@ -351,6 +351,25 @@ fn listedBefore(_: void, a: Touched, b: Touched) bool {
 /// What to do next, after a diff's counts: the --explain for the worst of
 /// those that got worse, or with none, of the mixed; or that nothing got
 /// worse. `touched` is sorted, so the first is that worst.
+/// How many of `touched`, as they are now, are over a critical limit.
+pub fn countCritical(touched: []const Touched) usize {
+    var n: usize = 0;
+    for (touched) |t| {
+        for (t.trips) |trip| if (trip.level == .critical) {
+            n += 1;
+            break;
+        };
+    }
+    return n;
+}
+
+/// Whether the change leaves any function it touched over a critical
+/// limit, so the loop's last step needs no --check of its own.
+fn writeCritical(w: *Writer, n: usize) Writer.Error!void {
+    if (n == 0) return w.writeAll("None of them is over a critical limit now.");
+    try w.print("{d} of them {s} over a critical limit now.", .{ n, if (n == 1) "is" else "are" });
+}
+
 fn writeNext(w: *Writer, touched: []const Touched, n: Counts) Writer.Error!void {
     const first = touched[0];
     if (n.worse > 0) {
@@ -480,6 +499,8 @@ fn writeTable(w: *Writer, touched: []const Touched, c: Context, kind: enum { tex
     });
     try w.writeAll(gap);
     try writeNext(w, touched, n);
+    try w.writeAll(gap);
+    try writeCritical(w, countCritical(touched));
     for (std.enums.values(Class)) |class| {
         for (touched) |t| {
             if (t.class == class) break;
@@ -501,6 +522,7 @@ fn writeJson(w: *Writer, touched: []const Touched, c: Context) Writer.Error!void
     try std.json.Stringify.value(c.ref, .{}, w);
     try w.print(",\"files\":{d},\"changes\":", .{c.files});
     try std.json.Stringify.value(count(touched), .{}, w);
+    try w.print(",\"critical\":{d}", .{countCritical(touched)});
     try w.writeAll(",\"thresholds\":");
     try std.json.Stringify.value(c.classes, .{}, w);
     try messages.writeJson(w, c.messages);
@@ -518,6 +540,7 @@ fn writeXml(w: *Writer, touched: []const Touched, c: Context) Writer.Error!void 
     try formats.attr(w, "version", c.version);
     try formats.attr(w, "ref", c.ref);
     try formats.attrInt(w, "files", c.files);
+    try formats.attrInt(w, "critical", countCritical(touched));
     try w.writeAll(">\n  <changes");
     const n = count(touched);
     inline for (comptime std.enums.values(Change)) |change| try formats.attrInt(w, @tagName(change), @field(n, @tagName(change)));
@@ -687,6 +710,7 @@ test "write: the table, and the summary saying when nothing got worse" {
         \\
         \\2 functions touched in 2 files since main: 1 worse, 0 mixed, 0 added, 0 the same, 0 better, 1 removed.
         \\gnarl --explain a.zig:3 says why grows, the worst of those that got worse, scores what it does now.
+        \\1 of them is over a critical limit now.
         \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; cognitive 15, 25; lines 50, 100; nesting 4; params 4.
         \\
     , out.written());
@@ -713,9 +737,10 @@ test "write: the table, and the summary saying when nothing got worse" {
     // The others read back.
     var json: Writer.Allocating = .init(arena);
     try write(&json.writer, .json, &touched, context);
-    const Doc = struct { schema: u32, gnarl: []const u8, ref: []const u8, files: usize, changes: Counts, thresholds: Classes, errors: []const std.json.Value, notes: []const std.json.Value, functions: []const Touched };
+    const Doc = struct { schema: u32, gnarl: []const u8, ref: []const u8, files: usize, changes: Counts, critical: usize, thresholds: Classes, errors: []const std.json.Value, notes: []const std.json.Value, functions: []const Touched };
     const doc = try std.json.parseFromSliceLeaky(Doc, arena, json.written(), .{});
     try std.testing.expectEqual(1, doc.changes.worse);
+    try std.testing.expectEqual(1, doc.critical);
     try std.testing.expectEqual(16, doc.functions[0].after.?.cyclomatic);
     try std.testing.expectEqual(null, doc.functions[1].after);
 
