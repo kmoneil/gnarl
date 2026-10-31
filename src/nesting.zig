@@ -29,18 +29,49 @@ const Item = struct {
     node: Node.Index,
     /// The levels it is inside.
     depth: u32,
+    /// The innermost construct it is inside, an index into the frames.
+    frame: u32,
     /// Whether it is a branch's body: then a block is that branch's level,
     /// labeled or not.
-    body: bool,
+    body: bool = false,
+    /// Whether it is an if that is another if's else.
+    else_if: bool = false,
+};
+
+/// A construct that opens a level.
+pub const Level = struct {
+    /// Its keyword, operator or label.
+    token: Ast.TokenIndex,
+    /// As written: `if`, `else if`, `inline for`, `switch`, `blk:`,
+    /// `struct`, `catch`.
+    construct: []const u8,
+    /// The level it opens: 1 for one in the function's body.
+    level: u32,
+};
+
+const Frame = struct {
+    level: Level,
+    /// The frame it is inside; the function's own, 0, is its own parent.
+    parent: u32,
 };
 
 /// The nesting depth of `function`, a `fn_decl` or `test_decl`. The working
 /// memory is allocated with `arena`.
 pub fn depth(arena: Allocator, tree: *const Ast, function: Node.Index) Allocator.Error!u32 {
     var w: Walk = .{ .arena = arena, .tree = tree };
-    try w.pushChildren(function, 0);
-    while (w.stack.pop()) |item| try w.visit(item);
-    return w.deepest;
+    return w.run(function);
+}
+
+/// The depth of `function`, as `depth` gives it, with the constructs that
+/// reach it appended to `chain`, outermost first. Allocated with `arena`.
+pub fn explain(arena: Allocator, tree: *const Ast, function: Node.Index, chain: *std.ArrayList(Level)) Allocator.Error!u32 {
+    var w: Walk = .{ .arena = arena, .tree = tree };
+    const deepest = try w.run(function);
+    const first = chain.items.len;
+    var f = w.deepest_frame;
+    while (f != 0) : (f = w.frames.items[f].parent) try chain.append(arena, w.frames.items[f].level);
+    std.mem.reverse(Level, chain.items[first..]);
+    return deepest;
 }
 
 const Walk = struct {
@@ -48,49 +79,60 @@ const Walk = struct {
     tree: *const Ast,
     stack: std.ArrayList(Item) = .empty,
     kids: std.ArrayList(Node.Index) = .empty,
+    frames: std.ArrayList(Frame) = .empty,
     deepest: u32 = 0,
+    deepest_frame: u32 = 0,
+
+    fn run(w: *Walk, function: Node.Index) Allocator.Error!u32 {
+        try w.frames.append(w.arena, .{ .level = .{ .token = 0, .construct = "", .level = 0 }, .parent = 0 });
+        try w.pushChildren(function, 0, 0);
+        while (w.stack.pop()) |item| try w.visit(item);
+        return w.deepest;
+    }
 
     fn visit(w: *Walk, item: Item) Allocator.Error!void {
         const tree = w.tree;
         const node = item.node;
         const d = item.depth;
+        const outer = item.frame;
+        const token = tree.nodeMainToken(node);
         switch (tree.nodeTag(node)) {
             // Measured on their own.
             .fn_decl, .test_decl => {},
 
             .if_simple, .@"if" => {
                 const full = tree.fullIf(node).?;
-                w.reach(d + 1);
-                try w.push(full.ast.cond_expr, d, false);
-                try w.push(full.ast.then_expr, d + 1, true);
+                const f = try w.open(outer, token, if (item.else_if) "else if" else "if", d + 1);
+                try w.push(.{ .node = full.ast.cond_expr, .depth = d, .frame = outer });
+                try w.push(.{ .node = full.ast.then_expr, .depth = d + 1, .frame = f, .body = true });
                 if (full.ast.else_expr.unwrap()) |e| switch (tree.nodeTag(e)) {
-                    .if_simple, .@"if" => try w.push(e, d, false),
-                    else => try w.push(e, d + 1, true),
+                    .if_simple, .@"if" => try w.push(.{ .node = e, .depth = d, .frame = outer, .else_if = true }),
+                    else => try w.push(.{ .node = e, .depth = d + 1, .frame = f, .body = true }),
                 };
             },
 
             .while_simple, .while_cont, .@"while" => {
                 const full = tree.fullWhile(node).?;
-                w.reach(d + 1);
-                try w.push(full.ast.cond_expr, d, false);
-                if (full.ast.cont_expr.unwrap()) |cont| try w.push(cont, d, false);
-                try w.push(full.ast.then_expr, d + 1, true);
-                if (full.ast.else_expr.unwrap()) |e| try w.push(e, d + 1, true);
+                const f = try w.open(outer, token, if (isInline(tree, token)) "inline while" else "while", d + 1);
+                try w.push(.{ .node = full.ast.cond_expr, .depth = d, .frame = outer });
+                if (full.ast.cont_expr.unwrap()) |cont| try w.push(.{ .node = cont, .depth = d, .frame = outer });
+                try w.push(.{ .node = full.ast.then_expr, .depth = d + 1, .frame = f, .body = true });
+                if (full.ast.else_expr.unwrap()) |e| try w.push(.{ .node = e, .depth = d + 1, .frame = f, .body = true });
             },
 
             .for_simple, .@"for" => {
                 const full = tree.fullFor(node).?;
-                w.reach(d + 1);
-                for (full.ast.inputs) |input| try w.push(input, d, false);
-                try w.push(full.ast.then_expr, d + 1, true);
-                if (full.ast.else_expr.unwrap()) |e| try w.push(e, d + 1, true);
+                const f = try w.open(outer, token, if (isInline(tree, token)) "inline for" else "for", d + 1);
+                for (full.ast.inputs) |input| try w.push(.{ .node = input, .depth = d, .frame = outer });
+                try w.push(.{ .node = full.ast.then_expr, .depth = d + 1, .frame = f, .body = true });
+                if (full.ast.else_expr.unwrap()) |e| try w.push(.{ .node = e, .depth = d + 1, .frame = f, .body = true });
             },
 
             .@"switch", .switch_comma => {
                 const full = tree.fullSwitch(node).?;
-                w.reach(d + 1);
-                try w.push(full.ast.condition, d, false);
-                for (full.ast.cases) |case| try w.push(case, d + 1, false);
+                const f = try w.open(outer, token, "switch", d + 1);
+                try w.push(.{ .node = full.ast.condition, .depth = d, .frame = outer });
+                for (full.ast.cases) |case| try w.push(.{ .node = case, .depth = d + 1, .frame = f });
             },
 
             .switch_case_one,
@@ -99,28 +141,29 @@ const Walk = struct {
             .switch_case_inline,
             => {
                 const full = tree.fullSwitchCase(node).?;
-                for (full.ast.values) |value| try w.push(value, d, false);
-                try w.push(full.ast.target_expr, d, true);
+                for (full.ast.values) |value| try w.push(.{ .node = value, .depth = d, .frame = outer });
+                try w.push(.{ .node = full.ast.target_expr, .depth = d, .frame = outer, .body = true });
             },
 
             .@"catch", .@"orelse" => {
                 const lhs, const handler = tree.nodeData(node).node_and_node;
-                try w.push(lhs, d, false);
+                try w.push(.{ .node = lhs, .depth = d, .frame = outer });
                 if (isFullBlock(tree, handler)) {
-                    w.reach(d + 1);
-                    try w.push(handler, d + 1, true);
-                } else try w.push(handler, d, false);
+                    const f = try w.open(outer, token, tree.tokenSlice(token), d + 1);
+                    try w.push(.{ .node = handler, .depth = d + 1, .frame = f, .body = true });
+                } else try w.push(.{ .node = handler, .depth = d, .frame = outer });
             },
 
             .block_two,
             .block_two_semicolon,
             .block,
             .block_semicolon,
-            => {
-                const level = if (!item.body and isLabeled(tree, node)) d + 1 else d;
-                w.reach(level);
-                try w.pushChildren(node, level);
-            },
+            => if (!item.body and isLabeled(tree, node)) {
+                const label = token - 2;
+                const construct = try std.mem.concat(w.arena, u8, &.{ tree.tokenSlice(label), ":" });
+                const f = try w.open(outer, label, construct, d + 1);
+                try w.pushChildren(node, d + 1, f);
+            } else try w.pushChildren(node, d, outer),
 
             .container_decl,
             .container_decl_trailing,
@@ -135,29 +178,43 @@ const Walk = struct {
             .tagged_union_enum_tag,
             .tagged_union_enum_tag_trailing,
             => {
-                w.reach(d + 1);
-                try w.pushChildren(node, d + 1);
+                const f = try w.open(outer, token, tree.tokenSlice(token), d + 1);
+                try w.pushChildren(node, d + 1, f);
             },
 
-            else => try w.pushChildren(node, d),
+            else => try w.pushChildren(node, d, outer),
         }
     }
 
-    fn reach(w: *Walk, level: u32) void {
-        w.deepest = @max(w.deepest, level);
+    /// Records a construct at `token` that opens `level`, inside `parent`,
+    /// and returns its frame.
+    fn open(w: *Walk, parent: u32, token: Ast.TokenIndex, construct: []const u8, level: u32) Allocator.Error!u32 {
+        try w.frames.append(w.arena, .{ .level = .{ .token = token, .construct = construct, .level = level }, .parent = parent });
+        const f: u32 = @intCast(w.frames.items.len - 1);
+        if (level > w.deepest) {
+            w.deepest = level;
+            w.deepest_frame = f;
+        }
+        return f;
     }
 
-    fn push(w: *Walk, node: Node.Index, d: u32, body: bool) Allocator.Error!void {
-        try w.stack.append(w.arena, .{ .node = node, .depth = d, .body = body });
+    fn push(w: *Walk, item: Item) Allocator.Error!void {
+        try w.stack.append(w.arena, item);
     }
 
-    /// Pushes every child of `node` at depth `d`, none of them a body.
-    fn pushChildren(w: *Walk, node: Node.Index, d: u32) Allocator.Error!void {
+    /// Pushes every child of `node` at depth `d` inside `frame`, none of
+    /// them a body.
+    fn pushChildren(w: *Walk, node: Node.Index, d: u32, frame: u32) Allocator.Error!void {
         w.kids.clearRetainingCapacity();
         try children.append(w.arena, w.tree, node, &w.kids);
-        for (w.kids.items) |kid| try w.push(kid, d, false);
+        for (w.kids.items) |kid| try w.push(.{ .node = kid, .depth = d, .frame = frame });
     }
 };
+
+/// Whether the loop keyword at `token` is written `inline`.
+fn isInline(tree: *const Ast, token: Ast.TokenIndex) bool {
+    return token > 0 and tree.tokenTag(token - 1) == .keyword_inline;
+}
 
 /// Whether `node` is a block with a statement in it.
 fn isFullBlock(tree: *const Ast, node: Node.Index) bool {
@@ -186,9 +243,56 @@ fn expectDepths(source: [:0]const u8, expected: []const u8) !void {
 
     var got: std.ArrayList(u8) = .empty;
     for (try functions.list(arena, &tree)) |function| {
-        try got.print(arena, "{s} {d}\n", .{ function.name, try depth(arena, &tree, function.node) });
+        const d = try depth(arena, &tree, function.node);
+        try got.print(arena, "{s} {d}\n", .{ function.name, d });
+        // The explanation is a chain from level 1 to the depth.
+        var chain: std.ArrayList(Level) = .empty;
+        try std.testing.expectEqual(d, try explain(arena, &tree, function.node, &chain));
+        try std.testing.expectEqual(d, chain.items.len);
+        for (chain.items, 1..) |level, n| try std.testing.expectEqual(n, level.level);
     }
     try std.testing.expectEqualStrings(expected, got.items);
+}
+
+test "explain: the deepest chain, outermost first, as each construct is written" {
+    const functions = @import("functions.zig");
+    const gpa = std.testing.allocator;
+    const source =
+        \\fn f(xs: []const u8, c: bool) u8 {
+        \\    if (c) {}
+        \\    for (xs) |x| {
+        \\        if (x == 0) {} else if (c) {
+        \\            const v = blk: {
+        \\                break :blk switch (x) {
+        \\                    else => 1,
+        \\                };
+        \\            };
+        \\            _ = v;
+        \\        }
+        \\    }
+        \\    return 0;
+        \\}
+    ;
+    var tree = try Ast.parse(gpa, source, .{});
+    defer tree.deinit(gpa);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var chain: std.ArrayList(Level) = .empty;
+    try std.testing.expectEqual(4, try explain(arena, &tree, (try functions.list(arena, &tree))[0].node, &chain));
+    var got: std.ArrayList(u8) = .empty;
+    for (chain.items) |level| {
+        const loc = tree.tokenLocation(0, level.token);
+        try got.print(arena, "{d}:{d} {s} {d}\n", .{ loc.line + 1, loc.column + 1, level.construct, level.level });
+    }
+    // for > else if (on the if's level; its if keyword) > blk: > switch.
+    try std.testing.expectEqualStrings(
+        \\3:5 for 1
+        \\4:29 else if 2
+        \\5:23 blk: 3
+        \\6:28 switch 4
+        \\
+    , got.items);
 }
 
 // One test per construct. Each depth is worked out by hand in the comment

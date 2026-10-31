@@ -21,6 +21,30 @@ pub const Count = struct {
 
 /// The parameters of `function`. A test block has none.
 pub fn count(tree: *const Ast, function: functions.Function) Count {
+    return walk(tree, function, null) catch unreachable;
+}
+
+/// One parameter, and what it adds.
+pub const Param = struct {
+    /// Its name, or "" when it has none.
+    name: []const u8,
+    /// Its type as written, or `anytype`.
+    type: []const u8,
+    /// What it adds to the weighted count; 0 when it is left out of both.
+    weight: u32,
+    /// Why it is left out or weighs 2.
+    why: []const u8,
+};
+
+/// The counts of `function`, as `count` gives them, with each parameter
+/// appended to `out`. Allocated with `arena`.
+pub fn explain(arena: std.mem.Allocator, tree: *const Ast, function: functions.Function, out: *std.ArrayList(Param)) std.mem.Allocator.Error!Count {
+    return walk(tree, function, .{ .arena = arena, .out = out });
+}
+
+const Sink = struct { arena: std.mem.Allocator, out: *std.ArrayList(Param) };
+
+fn walk(tree: *const Ast, function: functions.Function, sink: ?Sink) std.mem.Allocator.Error!Count {
     var total: Count = .{ .count = 0, .weighted = 0 };
     if (function.kind == .@"test") return total;
     var buffer: [1]Node.Index = undefined;
@@ -29,20 +53,33 @@ pub fn count(tree: *const Ast, function: functions.Function) Count {
     var first = true;
     while (it.next()) |param| {
         defer first = false;
-        const weight: u32 = if (param.type_expr) |type_expr| weight: {
-            if (first and isSelf(tree, type_expr, function)) break :weight 0;
-            if (isContext(tree, type_expr)) break :weight 0;
-            break :weight if (isTypeType(tree, type_expr)) 2 else 1;
+        const weight: u32, const why: []const u8 = if (param.type_expr) |type_expr| judged: {
+            if (first and isSelf(tree, type_expr, function)) break :judged .{ 0, "a leading self" };
+            if (contextName(tree, type_expr)) |name| break :judged .{ 0, if (name[0] == 'A') "an Allocator: context, not input" else "an Io: context, not input" };
+            if (isTypeType(tree, type_expr)) break :judged .{ 2, "a type parameter: a contract the signature does not spell out" };
+            break :judged .{ 1, "" };
         } else switch (tree.tokenTag(param.anytype_ellipsis3.?)) {
-            .keyword_anytype => 2,
+            .keyword_anytype => .{ 2, "anytype: a contract the signature does not spell out" },
             // `...` is only for extern functions, which have no body.
-            else => 0,
+            else => .{ 0, "variadic" },
         };
+        if (sink) |s| try s.out.append(s.arena, .{
+            .name = if (param.name_token) |t| tree.tokenSlice(t) else "",
+            .type = if (param.type_expr) |t| text(tree, t) else tree.tokenSlice(param.anytype_ellipsis3.?),
+            .weight = weight,
+            .why = why,
+        });
         if (weight == 0) continue;
         total.count += 1;
         total.weighted += weight;
     }
     return total;
+}
+
+/// The source of `node`, first token to last.
+fn text(tree: *const Ast, node: Node.Index) []const u8 {
+    const last = tree.lastToken(node);
+    return tree.source[tree.tokenStart(tree.firstToken(node)) .. tree.tokenStart(last) + tree.tokenSlice(last).len];
 }
 
 /// Whether `type_expr`, the first parameter's type, is the container the
@@ -81,14 +118,15 @@ fn isThis(tree: *const Ast, node: Node.Index) bool {
 
 /// Whether the type `node` is an `Allocator` or an `Io`, named alone or as
 /// the last field of a path (`std.mem.Allocator`).
-fn isContext(tree: *const Ast, node: Node.Index) bool {
+fn contextName(tree: *const Ast, node: Node.Index) ?[]const u8 {
     const name_token = switch (tree.nodeTag(node)) {
         .identifier => tree.nodeMainToken(node),
         .field_access => tree.nodeData(node).node_and_token[1],
-        else => return false,
+        else => return null,
     };
     const name = tree.tokenSlice(name_token);
-    return std.mem.eql(u8, name, "Allocator") or std.mem.eql(u8, name, "Io");
+    if (std.mem.eql(u8, name, "Allocator") or std.mem.eql(u8, name, "Io")) return name;
+    return null;
 }
 
 /// Whether the type `node` is `type`.
@@ -111,8 +149,41 @@ fn expectCounts(source: [:0]const u8, expected: []const u8) !void {
     for (try functions.list(arena, &tree)) |function| {
         const c = count(&tree, function);
         try got.print(arena, "{s} {d} {d}\n", .{ function.name, c.count, c.weighted });
+        // The explanation gives the same counts.
+        var each: std.ArrayList(Param) = .empty;
+        try std.testing.expectEqual(c, try explain(arena, &tree, function, &each));
+        var weighted: u32 = 0;
+        for (each.items) |p| weighted += p.weight;
+        try std.testing.expectEqual(c.weighted, weighted);
     }
     try std.testing.expectEqualStrings(expected, got.items);
+}
+
+test "explain: each parameter, its type as written, and why it is left out or weighs 2" {
+    const gpa = std.testing.allocator;
+    const source =
+        \\const S = struct {
+        \\    fn m(s: *const S, gpa: std.mem.Allocator, comptime T: type, x: anytype, n: []const T) void {}
+        \\};
+    ;
+    var tree = try Ast.parse(gpa, source, .{});
+    defer tree.deinit(gpa);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var each: std.ArrayList(Param) = .empty;
+    const c = try explain(arena, &tree, (try functions.list(arena, &tree))[0], &each);
+    try std.testing.expectEqual(Count{ .count = 3, .weighted = 5 }, c);
+    var got: std.ArrayList(u8) = .empty;
+    for (each.items) |p| try got.print(arena, "{s}|{s}|{d}|{s}\n", .{ p.name, p.type, p.weight, p.why });
+    try std.testing.expectEqualStrings(
+        \\s|*const S|0|a leading self
+        \\gpa|std.mem.Allocator|0|an Allocator: context, not input
+        \\T|type|2|a type parameter: a contract the signature does not spell out
+        \\x|anytype|2|anytype: a contract the signature does not spell out
+        \\n|[]const T|1|
+        \\
+    , got.items);
 }
 
 // Each count is worked out by hand in the comment beside it.

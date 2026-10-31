@@ -20,17 +20,7 @@ const children = @import("children.zig");
 /// The logical lines of `function`, a `fn_decl` or `test_decl`. The working
 /// memory is allocated with `arena`.
 pub fn count(arena: Allocator, tree: *const Ast, function: Node.Index) Allocator.Error!u32 {
-    // The tokens of the functions declared inside, first and last, in
-    // source order. They do not overlap: none is looked inside.
-    var nested: std.ArrayList([2]Ast.TokenIndex) = .empty;
-    var stack: std.ArrayList(Node.Index) = .empty;
-    try children.append(arena, tree, function, &stack);
-    while (stack.pop()) |node| switch (tree.nodeTag(node)) {
-        .fn_decl, .test_decl => try nested.append(arena, .{ tree.firstToken(node), tree.lastToken(node) }),
-        else => try children.append(arena, tree, node, &stack),
-    };
-    std.mem.sort([2]Ast.TokenIndex, nested.items, {}, startsBefore);
-
+    const nested = try nestedRanges(arena, tree, function);
     const first = tree.firstToken(function);
     const last = tree.lastToken(function);
     var lines: u32 = 0;
@@ -41,8 +31,8 @@ pub fn count(arena: Allocator, tree: *const Ast, function: Node.Index) Allocator
     var next_nested: usize = 0;
     var token = first;
     while (token <= last) : (token += 1) {
-        if (next_nested < nested.items.len and token == nested.items[next_nested][0]) {
-            token = nested.items[next_nested][1];
+        if (next_nested < nested.len and token == nested[next_nested][0]) {
+            token = nested[next_nested][1];
             next_nested += 1;
             continue;
         }
@@ -58,8 +48,90 @@ pub fn count(arena: Allocator, tree: *const Ast, function: Node.Index) Allocator
     return lines;
 }
 
+/// The first and last tokens of the functions declared inside `function`,
+/// in source order. They do not overlap: none is looked inside.
+fn nestedRanges(arena: Allocator, tree: *const Ast, function: Node.Index) Allocator.Error![]const [2]Ast.TokenIndex {
+    var nested: std.ArrayList([2]Ast.TokenIndex) = .empty;
+    var stack: std.ArrayList(Node.Index) = .empty;
+    try children.append(arena, tree, function, &stack);
+    while (stack.pop()) |node| switch (tree.nodeTag(node)) {
+        .fn_decl, .test_decl => try nested.append(arena, .{ tree.firstToken(node), tree.lastToken(node) }),
+        else => try children.append(arena, tree, node, &stack),
+    };
+    std.mem.sort([2]Ast.TokenIndex, nested.items, {}, startsBefore);
+    return nested.items;
+}
+
 fn startsBefore(_: void, a: [2]Ast.TokenIndex, b: [2]Ast.TokenIndex) bool {
     return a[0] < b[0];
+}
+
+/// How a function's lines, from its signature to its closing brace,
+/// divide. Each is in exactly one: `counted` is what `count` gives.
+pub const Breakdown = struct {
+    span: u32 = 0,
+    counted: u32 = 0,
+    blank: u32 = 0,
+    /// Only a comment, or a doc comment.
+    comment: u32 = 0,
+    /// Only closing brackets and the `;` or `,` after them.
+    closer: u32 = 0,
+    /// Only a function declared inside this one, which has its own count.
+    nested: u32 = 0,
+};
+
+/// How the lines of `function` divide. Allocated with `arena`.
+pub fn explain(arena: Allocator, tree: *const Ast, function: Node.Index) Allocator.Error!Breakdown {
+    const nested = try nestedRanges(arena, tree, function);
+    const first = tree.firstToken(function);
+    const last = tree.lastToken(function);
+    const source = tree.source;
+    const start = if (std.mem.findScalarLast(u8, source[0..tree.tokenStart(first)], '\n')) |nl| nl + 1 else 0;
+    const end = tree.tokenStart(last) + tree.tokenSlice(last).len;
+    const span: u32 = @intCast(std.mem.countScalar(u8, source[start..end], '\n') + 1);
+
+    const Seen = packed struct { code: bool = false, nested: bool = false, closer: bool = false, doc: bool = false };
+    const seen = try arena.alloc(Seen, span);
+    @memset(seen, .{});
+    var line: u32 = 0;
+    var pos = start;
+    var next_nested: usize = 0;
+    var inside_nested = false;
+    var token = first;
+    while (token <= last) : (token += 1) {
+        const at = tree.tokenStart(token);
+        line += @intCast(std.mem.countScalar(u8, source[pos..at], '\n'));
+        pos = at;
+        if (next_nested < nested.len and token == nested[next_nested][0]) inside_nested = true;
+        const tag = tree.tokenTag(token);
+        if (inside_nested) {
+            seen[line].nested = true;
+        } else if (isCode(tag)) {
+            seen[line].code = true;
+        } else if (tag == .doc_comment or tag == .container_doc_comment) {
+            seen[line].doc = true;
+        } else seen[line].closer = true;
+        if (inside_nested and token == nested[next_nested][1]) {
+            inside_nested = false;
+            next_nested += 1;
+        }
+    }
+
+    var b: Breakdown = .{ .span = span };
+    var it = std.mem.splitScalar(u8, source[start..end], '\n');
+    for (seen) |s| {
+        const text = it.next().?;
+        if (s.code) {
+            b.counted += 1;
+        } else if (s.nested) {
+            b.nested += 1;
+        } else if (s.closer) {
+            b.closer += 1;
+        } else if (s.doc or std.mem.trim(u8, text, " \t\r").len > 0) {
+            b.comment += 1;
+        } else b.blank += 1;
+    }
+    return b;
 }
 
 /// Whether a line holding a token tagged `tag` holds code. A line with only
@@ -85,9 +157,46 @@ fn expectCounts(source: [:0]const u8, expected: []const u8) !void {
 
     var got: std.ArrayList(u8) = .empty;
     for (try functions.list(arena, &tree)) |function| {
-        try got.print(arena, "{s} {d}\n", .{ function.name, try count(arena, &tree, function.node) });
+        const n = try count(arena, &tree, function.node);
+        try got.print(arena, "{s} {d}\n", .{ function.name, n });
+        // The breakdown counts the same lines, and every line once.
+        const b = try explain(arena, &tree, function.node);
+        try std.testing.expectEqual(n, b.counted);
+        try std.testing.expectEqual(b.span, b.counted + b.blank + b.comment + b.closer + b.nested);
     }
     try std.testing.expectEqualStrings(expected, got.items);
+}
+
+test "explain: every line from signature to closing brace in one kind" {
+    const functions = @import("functions.zig");
+    const gpa = std.testing.allocator;
+    const source =
+        \\/// Not in the span: before the signature.
+        \\fn outer() void {
+        \\    a();
+        \\
+        \\    // why
+        \\    const S = struct {
+        \\        /// How many.
+        \\        n: u8 = 0,
+        \\        fn inner() void {
+        \\            b();
+        \\        }
+        \\    };
+        \\    c(.{
+        \\        .d = 1,
+        \\    });
+        \\}
+    ;
+    var tree = try Ast.parse(gpa, source, .{});
+    defer tree.deinit(gpa);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const b = try explain(arena, &tree, (try functions.list(arena, &tree))[0].node);
+    // Counted: fn outer, a(), const S, n, c(.{, .d. Comment: // why, ///
+    // How many. Nested: fn inner, b(), its }. Closer: };, });, }.
+    try std.testing.expectEqual(Breakdown{ .span = 15, .counted = 6, .blank = 1, .comment = 2, .closer = 3, .nested = 3 }, b);
 }
 
 // Each count is worked out by hand in the comment beside it.
