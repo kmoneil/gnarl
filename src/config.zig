@@ -4,6 +4,7 @@
 //!     .{
 //!         .hot = .{ "src/scan.zig", "src/parse/**" },
 //!         .cold = .{ "build.zig", "test/**" },
+//!         .exclude = .{ "test/fixtures", "**/*_gen.zig" },
 //!         .thresholds = .{
 //!             .hot = .{ .cyclomatic = .{ .warning = 6, .critical = 10 } },
 //!             .normal = .{ .params_weighted = .{ .warning = 6 } },
@@ -14,7 +15,9 @@
 //! against paths as gnarl prints them, relative to the current directory.
 //! A path both a hot and a cold glob match is hot; one no glob matches is
 //! normal. A metric named under a class replaces both its limits there; a
-//! metric not named keeps the class's default.
+//! metric not named keeps the class's default. What an `.exclude` glob
+//! matches, or what is inside it, is not read when gnarl walks a directory
+//! above it, as what git ignores is not; named outright, it is read.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -32,6 +35,7 @@ pub const default_path = "complexity.zon";
 pub const Config = struct {
     hot: []const []const u8 = &.{},
     cold: []const []const u8 = &.{},
+    exclude: []const []const u8 = &.{},
     classes: Classes = .defaults,
 
     pub fn classOf(c: Config, path: []const u8) Class {
@@ -45,6 +49,7 @@ pub const Config = struct {
 const File = struct {
     hot: []const []const u8 = &.{},
     cold: []const []const u8 = &.{},
+    exclude: []const []const u8 = &.{},
     thresholds: struct {
         hot: Overrides = .{},
         normal: Overrides = .{},
@@ -74,7 +79,7 @@ pub fn parse(
     problem: *Problem,
 ) error{ OutOfMemory, ParseZon, Invalid }!Config {
     const file = try std.zon.parse.fromSlice(File, .{ .gpa = gpa, .arena = arena, .source = source, .diagnostics = diagnostics });
-    var config: Config = .{ .hot = file.hot, .cold = file.cold };
+    var config: Config = .{ .hot = file.hot, .cold = file.cold, .exclude = file.exclude };
     inline for (comptime std.enums.values(Class)) |class| {
         const overrides = @field(file.thresholds, @tagName(class));
         const t = config.classes.getPtr(class);
@@ -117,6 +122,16 @@ test "globs give the classes; hot wins over cold" {
     try std.testing.expectEqual(.cold, config.classOf("src/other.zig"));
     try std.testing.expectEqual(.cold, config.classOf("build.zig"));
     try std.testing.expectEqual(.normal, config.classOf("tools/gen.zig"));
+}
+
+test "exclude: globs, read as written" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    var diagnostics: std.zon.parse.Diagnostics = undefined;
+    var problem: Problem = undefined;
+    const config = try parse(std.testing.allocator, arena_state.allocator(), ".{ .exclude = .{ \"test/golden\", \"**/*_gen.zig\" } }", &diagnostics, &problem);
+    try std.testing.expectEqual(2, config.exclude.len);
+    try std.testing.expectEqualStrings("**/*_gen.zig", config.exclude[1]);
 }
 
 test "a metric named under a class replaces both its limits; the rest keep the defaults" {

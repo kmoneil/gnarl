@@ -106,9 +106,9 @@ fn git(arena: Allocator, io: Io, argv: []const []const u8) Allocator.Error!?Git 
 
 /// The .zig files the change from `ref` to the work tree touches under
 /// `paths`, sorted, as walk would list them (no hidden or build-output
-/// paths, none of `excludes`). Null when git cannot say; why is said in
-/// `said`.
-pub fn changedFiles(arena: Allocator, io: Io, ref: []const u8, paths: []const []const u8, excludes: []const []const u8, said: *messages.Messages) Allocator.Error!?[]const File {
+/// paths, nothing `excludes` leaves out). Null when git cannot say; why is
+/// said in `said`.
+pub fn changedFiles(arena: Allocator, io: Io, ref: []const u8, paths: []const []const u8, excludes: walk.Excludes, said: *messages.Messages) Allocator.Error!?[]const File {
     const inside = try git(arena, io, &.{ "git", "rev-parse", "--is-inside-work-tree" }) orelse {
         try said.fail("--diff", "git is not there to ask what changed", .{});
         return null;
@@ -136,7 +136,7 @@ pub fn changedFiles(arena: Allocator, io: Io, ref: []const u8, paths: []const []
     while (it.next()) |status| {
         if (status.len == 0) continue;
         const path = it.next() orelse break;
-        try keep(arena, &files, path, excludes, switch (status[0]) {
+        try keep(arena, &files, path, excludes.paths, switch (status[0]) {
             'A' => .added,
             'D' => .removed,
             else => .modified,
@@ -149,10 +149,46 @@ pub fn changedFiles(arena: Allocator, io: Io, ref: []const u8, paths: []const []
     const untracked = (try git(arena, io, argv.items)).?;
     if (untracked.ok) {
         var new = std.mem.splitScalar(u8, untracked.stdout, 0);
-        while (new.next()) |path| if (path.len > 0) try keep(arena, &files, path, excludes, .added);
+        while (new.next()) |path| if (path.len > 0) try keep(arena, &files, path, excludes.paths, .added);
     }
+    try dropGlobbed(arena, &files, paths, excludes.globs);
     std.mem.sort(File, files.items, {}, byPath);
     return files.items;
+}
+
+/// Leaves out of `files` what one of `globs` covers below the path among
+/// `paths` each was found under, as `walk.collect` does.
+fn dropGlobbed(arena: Allocator, files: *std.ArrayList(File), paths: []const []const u8, globs: []const []const u8) Allocator.Error!void {
+    if (globs.len == 0) return;
+    const roots = try arena.alloc([]const u8, paths.len);
+    for (paths, roots) |path, *root| root.* = try std.fs.path.resolveAlloc(arena, &.{path});
+    var kept: usize = 0;
+    for (files.items) |file| {
+        if (walk.globbed(walk.rootOf(roots, file.path) orelse ".", file.path, globs)) continue;
+        files.items[kept] = file;
+        kept += 1;
+    }
+    files.shrinkRetainingCapacity(kept);
+}
+
+test "dropGlobbed: what a glob covers below the path named, not the path named" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const all = [_]File{
+        .{ .path = "src/a.zig", .git_path = "src/a.zig", .status = .modified },
+        .{ .path = "test/golden/f.zig", .git_path = "test/golden/f.zig", .status = .modified },
+    };
+    var files: std.ArrayList(File) = .empty;
+    try files.appendSlice(arena, &all);
+    try dropGlobbed(arena, &files, &.{"."}, &.{"test/golden"});
+    try std.testing.expectEqual(1, files.items.len);
+    try std.testing.expectEqualStrings("src/a.zig", files.items[0].path);
+
+    files.clearRetainingCapacity();
+    try files.appendSlice(arena, &all);
+    try dropGlobbed(arena, &files, &.{ ".", "test/golden" }, &.{"test/golden"});
+    try std.testing.expectEqual(2, files.items.len);
 }
 
 fn keep(arena: Allocator, files: *std.ArrayList(File), git_path: []const u8, excludes: []const []const u8, status: @FieldType(File, "status")) Allocator.Error!void {

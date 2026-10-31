@@ -4,6 +4,8 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
+const glob = @import("glob.zig");
+
 /// Appends what `arg`, relative to `base`, names to `files`: `arg` itself if
 /// it is a file, whatever its extension, or every `.zig` file under it if it
 /// is a directory, as `arg` joined with the path inside it. Hidden files
@@ -16,8 +18,8 @@ const Allocator = std.mem.Allocator;
 /// src/a.zig`, is one string, and is read and reported once. The
 /// appended paths are allocated with `arena`.
 ///
-/// Nothing that is one of `excludes`, or inside one, is listed or walked
-/// into. They must be cleaned the same way.
+/// What `excludes` leaves out is not listed or walked into; see
+/// `Excludes`.
 ///
 /// In a git work tree, a directory's files are those git does not ignore,
 /// as git itself says: tracked files, and untracked ones no ignore rule
@@ -31,13 +33,13 @@ pub fn collect(
     io: Io,
     base: Io.Dir,
     arg: []const u8,
-    excludes: []const []const u8,
+    excludes: Excludes,
     files: *std.ArrayList([]const u8),
     options: Options,
 ) !void {
     const stat = try base.statFile(io, arg, .{});
     const root = try std.fs.path.resolveAlloc(arena, &.{arg});
-    if (excluded(root, excludes)) return;
+    if (excluded(root, excludes.paths)) return;
     if (stat.kind != .directory) {
         try files.append(arena, root);
         return;
@@ -47,7 +49,7 @@ pub fn collect(
             for (listed) |inside| {
                 if (!std.mem.endsWith(u8, inside, ".zig") or skipped(inside)) continue;
                 const path = try std.fs.path.resolveAlloc(arena, &.{ arg, inside });
-                if (excluded(path, excludes)) continue;
+                if (excludes.under(root, path)) continue;
                 // A tracked file deleted from the work tree is not there.
                 const file = base.statFile(io, path, .{}) catch continue;
                 if (file.kind != .directory) try files.append(arena, path);
@@ -62,11 +64,11 @@ pub fn collect(
     while (try walker.next(io)) |entry| switch (entry.kind) {
         .directory => if (!skipDir(entry.basename)) {
             const path = try std.fs.path.resolveAlloc(arena, &.{ arg, entry.path });
-            if (!excluded(path, excludes)) try walker.enter(io, entry);
+            if (!excludes.under(root, path)) try walker.enter(io, entry);
         },
         .file => if (entry.basename[0] != '.' and std.mem.endsWith(u8, entry.basename, ".zig")) {
             const path = try std.fs.path.resolveAlloc(arena, &.{ arg, entry.path });
-            if (!excluded(path, excludes)) try files.append(arena, path);
+            if (!excludes.under(root, path)) try files.append(arena, path);
         },
         else => {},
     };
@@ -76,6 +78,51 @@ pub const Options = struct {
     /// Leave out what git ignores, in a git work tree.
     git: bool = true,
 };
+
+/// What a walk leaves out besides what it always skips.
+pub const Excludes = struct {
+    /// The paths `--exclude` names, cleaned as `collect` cleans what it
+    /// lists: neither they nor anything inside them is read, even when
+    /// named outright.
+    paths: []const []const u8 = &.{},
+    /// The globs complexity.zon's `.exclude` gives: what one matches, or
+    /// what is inside it, is left out when found under a directory named,
+    /// as what git ignores is, and read when named outright.
+    globs: []const []const u8 = &.{},
+
+    /// Whether `path`, found under the path `root` named, is left out.
+    pub fn under(e: Excludes, root: []const u8, path: []const u8) bool {
+        return excluded(path, e.paths) or globbed(root, path, e.globs);
+    }
+};
+
+/// Whether one of `globs` matches `path`, or a directory it is in that is
+/// below `root`, the path named that it was found under. `path` itself,
+/// named outright, is never globbed.
+pub fn globbed(root: []const u8, path: []const u8, globs: []const []const u8) bool {
+    if (std.mem.eql(u8, root, path)) return false;
+    // Paths found under `.` do not start with it.
+    const base = if (std.mem.eql(u8, root, ".")) 0 else root.len;
+    for (globs) |pattern| {
+        if (glob.match(pattern, path)) return true;
+        for (path[base..], base..) |c, i| {
+            if (i > base and std.fs.path.isSep(c) and glob.match(pattern, path[0..i])) return true;
+        }
+    }
+    return false;
+}
+
+/// Of the cleaned `roots`, the one `path` is found under: the deepest
+/// that is it or holds it, `.` holding every relative path. Null if none.
+pub fn rootOf(roots: []const []const u8, path: []const u8) ?[]const u8 {
+    var best: ?[]const u8 = null;
+    for (roots) |root| {
+        const holds = std.mem.eql(u8, root, ".") or std.mem.eql(u8, root, path) or
+            (path.len > root.len and std.mem.startsWith(u8, path, root) and std.fs.path.isSep(path[root.len]));
+        if (holds and (best == null or root.len > best.?.len)) best = root;
+    }
+    return best;
+}
 
 /// The files under the directory `dir` that git does not ignore, relative
 /// to it, as git lists them (with `/`). Null when git cannot say (no git,
@@ -183,10 +230,10 @@ test "collect: .zig files under a directory, skipping build output and hidden fi
     }
 
     var files: std.ArrayList([]const u8) = .empty;
-    try collect(arena, io, tmp.dir, "proj", &.{}, &files, .{ .git = false });
-    try collect(arena, io, tmp.dir, "proj/notes.txt", &.{}, &files, .{ .git = false });
+    try collect(arena, io, tmp.dir, "proj", .{}, &files, .{ .git = false });
+    try collect(arena, io, tmp.dir, "proj/notes.txt", .{}, &files, .{ .git = false });
     // Named outright, a hidden file is still listed.
-    try collect(arena, io, tmp.dir, "proj/sub/.#b.zig", &.{}, &files, .{ .git = false });
+    try collect(arena, io, tmp.dir, "proj/sub/.#b.zig", .{}, &files, .{ .git = false });
     sortUnique(&files);
 
     try expectPaths(arena, &.{ "proj/a.zig", "proj/notes.txt", "proj/sub/.#b.zig", "proj/sub/b.zig" }, files.items);
@@ -207,9 +254,9 @@ test "collect: one file reached several ways is listed once" {
     var files: std.ArrayList([]const u8) = .empty;
     // A leading `./`, a trailing separator, `/` where Windows uses `\`, and
     // a file both walked to and named.
-    try collect(arena, io, tmp.dir, "./proj/", &.{}, &files, .{ .git = false });
-    try collect(arena, io, tmp.dir, "proj/a.zig", &.{}, &files, .{ .git = false });
-    try collect(arena, io, tmp.dir, "proj", &.{}, &files, .{ .git = false });
+    try collect(arena, io, tmp.dir, "./proj/", .{}, &files, .{ .git = false });
+    try collect(arena, io, tmp.dir, "proj/a.zig", .{}, &files, .{ .git = false });
+    try collect(arena, io, tmp.dir, "proj", .{}, &files, .{ .git = false });
     sortUnique(&files);
 
     try expectPaths(arena, &.{ "proj/a.zig", "proj/sub/b.zig" }, files.items);
@@ -229,7 +276,7 @@ test "collect: a missing path is an error" {
     var files: std.ArrayList([]const u8) = .empty;
     try std.testing.expectError(
         error.FileNotFound,
-        collect(std.testing.allocator, std.testing.io, tmp.dir, "nope", &.{}, &files, .{ .git = false }),
+        collect(std.testing.allocator, std.testing.io, tmp.dir, "nope", .{}, &files, .{ .git = false }),
     );
 }
 
@@ -271,20 +318,20 @@ test "collect: in a git work tree, what git ignores is left out; named outright,
     try tmp.dir.deleteFile(io, "proj/gone.zig");
 
     var files: std.ArrayList([]const u8) = .empty;
-    try collect(arena, io, tmp.dir, "proj", &.{}, &files, .{});
+    try collect(arena, io, tmp.dir, "proj", .{}, &files, .{});
     sortUnique(&files);
     try expectPaths(arena, &.{ "proj/a.zig", "proj/kept/forced.zig", "proj/sub/c.zig" }, files.items);
 
     // Named outright, an ignored file or directory is read.
     files.clearRetainingCapacity();
-    try collect(arena, io, tmp.dir, "proj/_tmp/b.zig", &.{}, &files, .{});
-    try collect(arena, io, tmp.dir, "proj/kept", &.{}, &files, .{});
+    try collect(arena, io, tmp.dir, "proj/_tmp/b.zig", .{}, &files, .{});
+    try collect(arena, io, tmp.dir, "proj/kept", .{}, &files, .{});
     sortUnique(&files);
     try expectPaths(arena, &.{ "proj/_tmp/b.zig", "proj/kept/forced.zig" }, files.items);
 
     // With git off, every file is listed, as outside a work tree.
     files.clearRetainingCapacity();
-    try collect(arena, io, tmp.dir, "proj", &.{}, &files, .{ .git = false });
+    try collect(arena, io, tmp.dir, "proj", .{}, &files, .{ .git = false });
     sortUnique(&files);
     try expectPaths(arena, &.{ "proj/_tmp/b.zig", "proj/a.zig", "proj/kept/forced.zig", "proj/sub/c.zig" }, files.items);
 }
@@ -323,11 +370,55 @@ test "collect: an excluded directory is not walked into, an excluded file not li
         try std.fs.path.resolveAlloc(arena, &.{"proj/gen/c.zig"}),
     };
     var files: std.ArrayList([]const u8) = .empty;
-    try collect(arena, io, tmp.dir, "proj", &excludes, &files, .{ .git = false });
+    try collect(arena, io, tmp.dir, "proj", .{ .paths = &excludes }, &files, .{ .git = false });
     // Named outright, an excluded file is still skipped.
-    try collect(arena, io, tmp.dir, "proj/_tmp/wt/a.zig", &excludes, &files, .{ .git = false });
+    try collect(arena, io, tmp.dir, "proj/_tmp/wt/a.zig", .{ .paths = &excludes }, &files, .{ .git = false });
     sortUnique(&files);
 
     // `_tmpfile.zig` shares `_tmp`'s first letters but is not inside it.
     try expectPaths(arena, &.{ "proj/_tmpfile.zig", "proj/a.zig", "proj/gen/b.zig" }, files.items);
+}
+
+test "collect: what a complexity.zon glob matches is left out under a directory named, and read named outright" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    for ([_][]const u8{
+        "proj/a.zig",
+        "proj/fixtures/f.zig",
+        "proj/fixtures/deep/g.zig",
+        "proj/src/b.zig",
+        "proj/src/b_gen.zig",
+    }) |sub_path| {
+        if (std.fs.path.dirname(sub_path)) |parent| try tmp.dir.createDirPath(io, parent);
+        try tmp.dir.writeFile(io, .{ .sub_path = sub_path, .data = "" });
+    }
+    const excludes: Excludes = .{ .globs = &.{ "proj/fixtures", "**/*_gen.zig" } };
+
+    var files: std.ArrayList([]const u8) = .empty;
+    try collect(arena, io, tmp.dir, "proj", excludes, &files, .{ .git = false });
+    try expectPaths(arena, &.{ "proj/a.zig", "proj/src/b.zig" }, files.items);
+
+    // Named outright, the directory and the file are read.
+    files.clearRetainingCapacity();
+    try collect(arena, io, tmp.dir, "proj/fixtures", excludes, &files, .{ .git = false });
+    try collect(arena, io, tmp.dir, "proj/src/b_gen.zig", excludes, &files, .{ .git = false });
+    sortUnique(&files);
+    try expectPaths(arena, &.{ "proj/fixtures/deep/g.zig", "proj/fixtures/f.zig", "proj/src/b_gen.zig" }, files.items);
+}
+
+test "globbed: the path or a directory it is in below the root; rootOf: the deepest root holding it" {
+    const globs = [_][]const u8{"test/golden"};
+    try std.testing.expect(globbed(".", "test/golden/a.zig", &globs));
+    try std.testing.expect(globbed("test", "test/golden/a.zig", &globs));
+    try std.testing.expect(!globbed("test/golden", "test/golden/a.zig", &globs));
+    try std.testing.expect(!globbed("test/golden", "test/golden", &globs));
+    try std.testing.expect(!globbed(".", "test/goldenrod.zig", &globs));
+    try std.testing.expectEqualStrings("test/golden", rootOf(&.{ ".", "test/golden", "test" }, "test/golden/a.zig").?);
+    try std.testing.expectEqualStrings(".", rootOf(&.{ ".", "src" }, "test/a.zig").?);
+    try std.testing.expectEqual(null, rootOf(&.{"src"}, "srcs/a.zig"));
 }

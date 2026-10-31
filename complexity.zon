@@ -1,0 +1,5 @@
+// What gnarl reads of itself: the golden fixtures are complex on purpose,
+// test data rather than gnarl's own code.
+.{
+    .exclude = .{"test/golden"},
+}

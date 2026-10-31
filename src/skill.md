@@ -202,6 +202,9 @@ every file is normal. Default limits, warning then critical:
 
 `*` matches within a path segment, `**` across them, `?` one character.
 A metric named under a class replaces both its limits there.
+`.exclude = .{ "test/fixtures" }` leaves out what a glob matches, or
+what is inside it, as what git ignores is: not read under a directory
+named, read when named outright.
 
 ## Exit status
 

@@ -48,6 +48,8 @@ const usage =
     \\The thresholds depend on the class of code a file is in, hot, normal
     \\or cold, which complexity.zon in the current directory gives by globs,
     \\with any thresholds of its own. With no such file every file is normal.
+    \\Its .exclude globs leave out what they match, as what git ignores is:
+    \\not read under a directory named, read when named outright.
     \\
     \\  --exclude <path>  Skip this file or directory, named as gnarl prints
     \\                    paths: relative to the current directory. May be
@@ -175,7 +177,7 @@ pub fn main(init: std.process.Init) !u8 {
     var files: std.ArrayList([]const u8) = .empty;
     for (paths.items) |arg| {
         const before = files.items.len;
-        walk.collect(arena, io, cwd, arg, run.excludes, &files, .{ .git = !run.no_ignore }) catch |err| switch (err) {
+        walk.collect(arena, io, cwd, arg, .{ .paths = run.excludes, .globs = settings.exclude }, &files, .{ .git = !run.no_ignore }) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             else => {
                 try said.fail(arg, "{t}", .{err});
@@ -292,7 +294,7 @@ fn runDiff(
     stdout_writer: *const Io.File.Writer,
 ) !u8 {
     const paths: []const []const u8 = if (run.paths.len > 0) run.paths else &.{"."};
-    const changed = try diff.changedFiles(arena, io, ref, paths, run.excludes, said) orelse &.{};
+    const changed = try diff.changedFiles(arena, io, ref, paths, .{ .paths = run.excludes, .globs = settings.exclude }, said) orelse &.{};
     var file_arena: std.heap.ArenaAllocator = .init(gpa);
     defer file_arena.deinit();
     var touched: std.ArrayList(diff.Touched) = .empty;
@@ -993,6 +995,21 @@ test "--check fails on a critical threshold, by the class complexity.zon gives t
         defer gpa.free(result.stderr);
         try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
     }
+    // Excluded, hot.zig is not read under `.`, and is when named.
+    try tmp.dir.writeFile(io, .{ .sub_path = "complexity.zon", .data = ".{ .hot = .{\"hot.zig\"}, .exclude = .{\"hot.zig\"} }\n" });
+    {
+        const result = try runGnarl(tmp.dir, &.{ "--check", "." });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "1 function in 1 file") != null);
+    }
+    {
+        const result = try runGnarl(tmp.dir, &.{ "--check", "hot.zig" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+    }
 }
 
 test "--explain: by path:line or by name; a name that fits none or several is an error" {
@@ -1055,7 +1072,7 @@ test "a configuration that cannot be used is an error, and nothing is measured" 
     try expectRun(tmp.dir, &.{ "--config=limits.zon", "." }, 2, "", "gnarl: limits.zon: thresholds.hot.lines: the warning limit, 9, is not below the critical one, 9\n");
     try expectRun(tmp.dir, &.{ "--config", "typo.zon", "." }, 2, "",
         \\gnarl: typo.zon:1:5: unexpected field 'hott'
-        \\gnarl: typo.zon:1:5: note: supported: 'hot', 'cold', 'thresholds'
+        \\gnarl: typo.zon:1:5: note: supported: 'hot', 'cold', 'exclude', 'thresholds'
         \\
     );
 
@@ -1069,7 +1086,7 @@ test "a configuration that cannot be used is an error, and nothing is measured" 
     try std.testing.expectEqual(0, doc.value.functions.len);
     try std.testing.expectEqualStrings("unexpected field 'hott'", doc.value.errors[0].text);
     try std.testing.expectEqual(5, doc.value.errors[0].column.?);
-    try std.testing.expectEqualStrings("supported: 'hot', 'cold', 'thresholds'", doc.value.notes[0].text);
+    try std.testing.expectEqualStrings("supported: 'hot', 'cold', 'exclude', 'thresholds'", doc.value.notes[0].text);
 }
 
 /// The report's json document, read back whole: an unknown field is an
