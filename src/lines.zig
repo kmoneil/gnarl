@@ -61,7 +61,7 @@ fn walk(arena: Allocator, tree: *const Ast, function: Node.Index, sink: ?*std.Ar
 
 /// The first and last tokens of the functions declared inside `function`,
 /// in source order. They do not overlap: none is looked inside.
-fn nestedRanges(arena: Allocator, tree: *const Ast, function: Node.Index) Allocator.Error![]const [2]Ast.TokenIndex {
+pub fn nestedRanges(arena: Allocator, tree: *const Ast, function: Node.Index) Allocator.Error![]const [2]Ast.TokenIndex {
     var nested: std.ArrayList([2]Ast.TokenIndex) = .empty;
     var stack: std.ArrayList(Node.Index) = .empty;
     try children.append(arena, tree, function, &stack);

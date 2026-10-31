@@ -28,7 +28,9 @@ as often as it helps.
    the lines divide, and each parameter: aim the refactor at those lines.
    `gnarl --explain path:A-B` says what lines A to B cost and about what
    moving them into a function of their own would leave, before you do,
-   and names each return, break or continue that leaves them.
+   and names each return, break or continue that leaves them, and what
+   the new function would take (the names the lines read from the rest)
+   and give back (the names they assign or declare that are read after).
 3. Change the code, then `gnarl --diff HEAD` lists each function the
    change touched (uncommitted edits and new files included) with its
    numbers before and after: worse first, then mixed (some numbers up and

@@ -398,7 +398,9 @@ fn blockLabel(tree: *const Ast, node: Node.Index) ?Ast.TokenIndex {
 /// range's outermost ones sit deep, and what the old one keeps. Jumps out
 /// of the range, which would need reworking, are not accounted for.
 pub const Extracted = struct {
-    helper: struct { cyclomatic: u32, cognitive: u32, nesting: u32 },
+    /// `params` is what the lines read that the function declares outside
+    /// them, an Allocator or Io aside; set by whoever knows it.
+    helper: struct { cyclomatic: u32, cognitive: u32, nesting: u32, params: u32 = 0 },
     rest: struct { cyclomatic: u32, cognitive: u32, lines: u32 },
 
     /// `range`, of a function whose totals are `whole`, lifted out.

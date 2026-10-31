@@ -11,6 +11,7 @@ const cognitive = @import("cognitive.zig");
 const comptime_tally = @import("comptime_tally.zig");
 const cyclomatic = @import("cyclomatic.zig");
 const formats = @import("formats.zig");
+const flow = @import("flow.zig");
 const functions = @import("functions.zig");
 const messages = @import("messages.zig");
 const Message = messages.Message;
@@ -108,6 +109,12 @@ pub const Range = struct {
     /// Each `return`, `break` or `continue` in the lines that lands outside
     /// them: moved out with them, it would need reworking.
     leaving: []const Leaving,
+    /// What the lines read that the function declares outside them: what
+    /// a function of their own would take.
+    needs: []const flow.Name,
+    /// What the lines assign or declare that is read after them: what it
+    /// would give back.
+    gives: []const flow.Given,
     /// Moved into a function of its own, about: that function's numbers
     /// and what this one keeps.
     extracted: regions.Extracted,
@@ -404,7 +411,7 @@ const Reading = struct {
         const facts: regions.Facts = try .of(r.scratch, r.tree, function.node);
         const span = r.tokensOn(function, first_line, last_line);
         const sum: regions.Sum = if (span) |s| .of(facts, s[0], s[1]) else .{};
-        return .{
+        var out: Range = .{
             .first_line = first_line,
             .last_line = last_line,
             .cyclomatic = sum.cyclomatic,
@@ -413,8 +420,30 @@ const Reading = struct {
             .lines = sum.lines,
             .nesting = sum.nesting,
             .leaving = if (span) |s| try r.leavingIn(function, s) else &.{},
+            .needs = &.{},
+            .gives = &.{},
             .extracted = .of(sum, .{ .cyclomatic = e.cyclomatic.value, .cognitive = e.cognitive.value, .lines = e.lines.value }),
         };
+        const s = span orelse return out;
+        try r.flowIn(function, s, &out);
+        return out;
+    }
+
+    /// What the tokens of `span` need and give back, copied to outlive the
+    /// tree, and the parameters that makes.
+    fn flowIn(r: Reading, function: functions.Function, span: [2]Ast.TokenIndex, out: *Range) Allocator.Error!void {
+        const f = try flow.of(r.scratch, r.tree, function, span[0], span[1]);
+        const needs = try r.arena.alloc(flow.Name, f.needs.len);
+        var params_count: u32 = 0;
+        for (f.needs, needs) |n, *o| {
+            o.* = .{ .name = try r.arena.dupe(u8, n.name), .type = try r.arena.dupe(u8, n.type) };
+            params_count += @intFromBool(!isContext(n.type));
+        }
+        const gives = try r.arena.alloc(flow.Given, f.gives.len);
+        for (f.gives, gives) |g, *o| o.* = .{ .name = try r.arena.dupe(u8, g.name), .type = try r.arena.dupe(u8, g.type), .why = g.why };
+        out.needs = needs;
+        out.gives = gives;
+        out.extracted.helper.params = params_count;
     }
 
     /// The jumps among the tokens of `span` that land outside them.
@@ -449,6 +478,22 @@ const Reading = struct {
         return span;
     }
 };
+
+/// Whether a parameter typed `type_text` is context the parameter count
+/// leaves out: an Allocator or an Io.
+fn isContext(type_text: []const u8) bool {
+    return std.mem.endsWith(u8, type_text, "Allocator") or std.mem.eql(u8, type_text, "Io") or std.mem.endsWith(u8, type_text, ".Io");
+}
+
+/// What a range's lines would take and give back, moved out.
+fn writeFlow(w: *Writer, r: Range) Writer.Error!void {
+    try w.writeAll("it would take ");
+    if (r.needs.len == 0) try w.writeAll("nothing");
+    for (r.needs, 0..) |n, i| try w.print("{s}{s}{s}{s}", .{ if (i == 0) "" else ", ", n.name, if (n.type.len > 0) ": " else "", n.type });
+    try w.writeAll("; and give back ");
+    if (r.gives.len == 0) try w.writeAll("nothing");
+    for (r.gives, 0..) |g, i| try w.print("{s}{s} ({s}, read after them)", .{ if (i == 0) "" else ", ", g.name, g.why });
+}
 
 /// Writes `explanations` in `format`.
 pub fn write(w: *Writer, format: report.Format, explanations: []const Explanation, context: Context) Writer.Error!void {
@@ -664,7 +709,9 @@ fn putRegions(row: Item, e: Explanation) Writer.Error!void {
     const at = std.fmt.bufPrint(&buffer, "{d}-{d}", .{ range.first_line, range.last_line }) catch unreachable;
     inline for (.{ "cyclomatic", "cognitive", "depth", "lines", "nesting" }) |field| try row.put("range", field, at, @field(range, field), "");
     for (range.leaving) |l| try row.putAt("range", l.construct, l.line, l.column, 1, "leaves the lines");
-    inline for (.{ "cyclomatic", "cognitive", "nesting" }) |field| try row.put("range", "helper." ++ field, at, @field(range.extracted.helper, field), "");
+    for (range.needs) |n| try row.put("range", "needs", at, 1, n.name);
+    for (range.gives) |g| try row.put("range", "gives", at, 1, g.name);
+    inline for (.{ "cyclomatic", "cognitive", "nesting", "params" }) |field| try row.put("range", "helper." ++ field, at, @field(range.extracted.helper, field), "");
     inline for (.{ "cyclomatic", "cognitive", "lines" }) |field| try row.put("range", "rest." ++ field, at, @field(range.extracted.rest, field), "");
 }
 
@@ -689,8 +736,21 @@ fn writeRegionsXml(w: *Writer, e: Explanation) Writer.Error!void {
         try formats.attr(w, "construct", l.construct);
         try w.writeAll("/>\n");
     }
+    for (range.needs) |n| {
+        try w.writeAll("        <needs");
+        try formats.attr(w, "name", n.name);
+        try formats.attr(w, "type", n.type);
+        try w.writeAll("/>\n");
+    }
+    for (range.gives) |g| {
+        try w.writeAll("        <gives");
+        try formats.attr(w, "name", g.name);
+        try formats.attr(w, "type", g.type);
+        try formats.attr(w, "why", g.why);
+        try w.writeAll("/>\n");
+    }
     try w.writeAll("        <extracted>\n          <helper");
-    inline for (.{ "cyclomatic", "cognitive", "nesting" }) |field| try formats.attrInt(w, field, @field(range.extracted.helper, field));
+    inline for (.{ "cyclomatic", "cognitive", "nesting", "params" }) |field| try formats.attrInt(w, field, @field(range.extracted.helper, field));
     try w.writeAll("/>\n          <rest");
     inline for (.{ "cyclomatic", "cognitive", "lines" }) |field| try formats.attrInt(w, field, @field(range.extracted.rest, field));
     try w.writeAll("/>\n        </extracted>\n      </range>\n");
@@ -811,7 +871,9 @@ fn writeRegionsMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
 fn writeRangeMarkdown(w: *Writer, e: Explanation, r: Range) Writer.Error!void {
     try w.print("**lines {d}-{d}**: cyclomatic +{d}, cognitive +{d} ({d} of it for depth), {d} logical lines, the deepest level {d}.\n\n", .{ r.first_line, r.last_line, r.cyclomatic, r.cognitive, r.depth, r.lines, r.nesting });
     const x = r.extracted;
-    try w.print("Moved into a function of its own, about: that function cyclomatic {d}, cognitive {d}, nesting {d}; `{s}` keeps cyclomatic {d}, cognitive {d}, lines {d}.\n\n", .{ x.helper.cyclomatic, x.helper.cognitive, x.helper.nesting, e.name, x.rest.cyclomatic, x.rest.cognitive, x.rest.lines });
+    try w.print("Moved into a function of its own, about: that function cyclomatic {d}, cognitive {d}, nesting {d}, params {d}; `{s}` keeps cyclomatic {d}, cognitive {d}, lines {d}.\n\nIt ", .{ x.helper.cyclomatic, x.helper.cognitive, x.helper.nesting, x.helper.params, e.name, x.rest.cyclomatic, x.rest.cognitive, x.rest.lines });
+    try writeFlow(w, r);
+    try w.writeAll(".\n\n");
     try writeLeaving(w, r.leaving);
     try w.writeAll(".\n");
 }
@@ -821,7 +883,9 @@ fn writeRangeMarkdown(w: *Writer, e: Explanation, r: Range) Writer.Error!void {
 fn writeRangeText(w: *Writer, e: Explanation, r: Range) Writer.Error!void {
     try w.print("lines {d}-{d}: cyclomatic +{d}, cognitive +{d} ({d} of it for depth), {d} logical lines, the deepest level {d}\n", .{ r.first_line, r.last_line, r.cyclomatic, r.cognitive, r.depth, r.lines, r.nesting });
     const x = r.extracted;
-    try w.print("moved into a function of its own, about: that function cyclomatic {d}, cognitive {d}, nesting {d}; {s} keeps cyclomatic {d}, cognitive {d}, lines {d}\n", .{ x.helper.cyclomatic, x.helper.cognitive, x.helper.nesting, e.name, x.rest.cyclomatic, x.rest.cognitive, x.rest.lines });
+    try w.print("moved into a function of its own, about: that function cyclomatic {d}, cognitive {d}, nesting {d}, params {d}; {s} keeps cyclomatic {d}, cognitive {d}, lines {d}\n", .{ x.helper.cyclomatic, x.helper.cognitive, x.helper.nesting, x.helper.params, e.name, x.rest.cyclomatic, x.rest.cognitive, x.rest.lines });
+    try writeFlow(w, r);
+    try w.writeByte('\n');
     try writeLeaving(w, r.leaving);
     try w.writeByte('\n');
 }
@@ -833,7 +897,7 @@ fn writeLeaving(w: *Writer, leaving: []const Leaving) Writer.Error!void {
     for (leaving, 0..) |l, i| try w.print("{s}{s} at {d}:{d}", .{ if (i == 0) "" else ", ", l.construct, l.line, l.column });
 }
 
-/// Writes `explanations` in `format`.
+/// One row of the csv or tsv explanation, for `writeDelimited`.
 const Item = struct {
     w: *Writer,
     kind: formats.Delimited,
@@ -1181,7 +1245,8 @@ test "a range: what its lines add, and about what moving them out would leave" {
         \\a.zig:2  S.pick  (normal code)
         \\
         \\lines 4-7: cyclomatic +2, cognitive +6 (3 of it for depth), 2 logical lines, the deepest level 3
-        \\moved into a function of its own, about: that function cyclomatic 3, cognitive 4, nesting 2; S.pick keeps cyclomatic 3, cognitive 2, lines 4
+        \\moved into a function of its own, about: that function cyclomatic 3, cognitive 4, nesting 2, params 2; S.pick keeps cyclomatic 3, cognitive 2, lines 4
+        \\it would take s: *S, x: u8; and give back nothing
         \\1 jump leaves those lines and would need reworking if they moved: return at 6:31
         \\
     , out.written());

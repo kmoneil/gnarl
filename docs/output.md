@@ -177,11 +177,21 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
       lands outside them (a `return` always does), which moved out with
       them would need reworking:
       - `line`, `column`, `construct`: as for a branch.
+    - `needs`: what the lines read that the function declares outside
+      them (its parameters, locals and captures), which a function of
+      their own would take:
+      - `name`: the name.
+      - `type`: its type where its declaration writes one; empty if not.
+    - `gives`: what the lines assign or declare that is read after them,
+      which it would give back:
+      - `name`, `type`: as for `needs`.
+      - `why`: `assigned in the lines` or `declared in the lines`.
     - `extracted`: the lines moved into a function of their own, about,
       the jumps that leave them aside:
       - `helper`: that function's `cyclomatic`, `cognitive` and
         `nesting`, its structures as much shallower as the lines'
-        outermost sat deep.
+        outermost sat deep, and `params`, how many of `needs` are not an
+        Allocator or Io.
       - `rest`: this function's `cyclomatic`, `cognitive` and `lines`
         after, the call a line of its own.
 
