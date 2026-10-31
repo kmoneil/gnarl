@@ -30,7 +30,21 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = test_module }));
     run_tests.setCwd(b.path("."));
     run_tests.has_side_effects = true;
-    b.step("test", "Run the tests").dependOn(&run_tests.step);
+    const test_step = b.step("test", "Run the tests");
+    test_step.dependOn(&run_tests.step);
+
+    // `zig build check`: gnarl holds its own source to complexity.baseline,
+    // so a function new and over a critical threshold, or above its number
+    // there, fails. The report is left out; on a failure, stderr names each
+    // function and the --explain to run. `zig build test` runs it too.
+    const check = b.addRunArtifact(exe);
+    check.addArgs(&.{ "--check", "src", "build.zig" });
+    check.setCwd(b.path("."));
+    check.has_side_effects = true;
+    _ = check.captureStdOut(.{});
+    check.expectExitCode(0);
+    b.step("check", "Hold gnarl's own source to complexity.baseline").dependOn(&check.step);
+    test_step.dependOn(&check.step);
 }
 
 fn gnarlModule(
