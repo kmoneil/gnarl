@@ -184,7 +184,9 @@ one). gnarl still reports what it could read.
 - Paths are as gnarl prints them, relative to the current directory:
   pass `--explain` and `--function` the same form.
 - `--exclude <path>` skips a file or directory; hidden directories,
-  `zig-out` and `zig-pkg` are always skipped.
+  `zig-out` and `zig-pkg` are always skipped. In a git work tree, what
+  git ignores is skipped too, unless named outright; `--no-ignore` reads
+  it. A file you expect and do not see may be ignored.
 - `gnarl --help` prints every flag and `gnarl --version` the version (the
   json's `gnarl`); `gnarl skill --install <dir>` writes this file to
   `<dir>/gnarl/SKILL.md`.

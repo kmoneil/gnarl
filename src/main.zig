@@ -19,7 +19,7 @@ const walk = @import("walk.zig");
 
 const usage =
     \\Usage: gnarl [--exclude <path>]... [--config <file>] [--check]
-    \\             [--all] [--top <n>] [--function <function>]...
+    \\             [--all] [--top <n>] [--function <function>]... [--no-ignore]
     \\             [--format <format>] [--json] [<path>...]
     \\       gnarl --explain <function>... [<path>...]
     \\       gnarl skill [--install <dir>]
@@ -32,7 +32,8 @@ const usage =
     \\counted twice). One row per function over a threshold, worst first,
     \\and a summary of them all; a number over its warning threshold is
     \\marked !, over its critical one !!. Hidden files and directories,
-    \\zig-out and zig-pkg are skipped.
+    \\zig-out and zig-pkg are skipped, and in a git work tree what git
+    \\ignores, unless the file or directory is named outright.
     \\
     \\gnarl skill prints what an AI agent needs to work with gnarl: the
     \\loop, the rules with examples, the output; --install <dir> writes it
@@ -45,6 +46,7 @@ const usage =
     \\  --exclude <path>  Skip this file or directory, named as gnarl prints
     \\                    paths: relative to the current directory. May be
     \\                    given more than once.
+    \\  --no-ignore       Read what git ignores too.
     \\  --config <file>   Read the classes and thresholds from this file
     \\                    rather than complexity.zon.
     \\  --check           Exit 1 if a function is over a critical threshold.
@@ -164,7 +166,7 @@ pub fn main(init: std.process.Init) !u8 {
     var files: std.ArrayList([]const u8) = .empty;
     for (paths.items) |arg| {
         const before = files.items.len;
-        walk.collect(arena, io, cwd, arg, run.excludes, &files) catch |err| switch (err) {
+        walk.collect(arena, io, cwd, arg, run.excludes, &files, .{ .git = !run.no_ignore }) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             else => {
                 try said.fail(arg, "{t}", .{err});
@@ -174,7 +176,7 @@ pub fn main(init: std.process.Init) !u8 {
         // Listing nothing would read exactly like a directory with no
         // functions in it.
         if (files.items.len == before) {
-            try said.fail(arg, "no .zig file to read (hidden files and directories, zig-out, zig-pkg and excluded paths are skipped)", .{});
+            try said.fail(arg, "no .zig file to read (hidden files and directories, zig-out, zig-pkg, excluded paths and what git ignores are skipped)", .{});
         }
     }
     walk.sortUnique(&files);
@@ -327,6 +329,8 @@ const Command = union(enum) {
         explain: []const []const u8,
         all: bool,
         top: ?usize,
+        /// Read what git ignores too.
+        no_ignore: bool,
         /// The functions the report is to list, as given; none for all.
         functions: []const []const u8,
     },
@@ -359,6 +363,7 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
     var to_explain: std.ArrayList([]const u8) = .empty;
     var all = false;
     var top: ?usize = null;
+    var no_ignore = false;
     var to_list: std.ArrayList([]const u8) = .empty;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -375,6 +380,10 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
         }
         if (std.mem.eql(u8, arg, "--all")) {
             all = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--no-ignore")) {
+            no_ignore = true;
             continue;
         }
         if (optionValue(args, &i, "--exclude")) |path| {
@@ -411,6 +420,7 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
         .explain = to_explain.items,
         .all = all,
         .top = top,
+        .no_ignore = no_ignore,
         .functions = to_list.items,
     } };
 }
@@ -471,6 +481,42 @@ test "a row per function, worst first, from every file read" {
         \\3 functions in 3 files: 0 over a critical threshold (!!), 0 more over a warning one (!).
         \\
     ++ thresholds_line, "");
+}
+
+test "in a git work tree, what git ignores is not read; --no-ignore reads it" {
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const git = std.process.run(arena, io, .{ .argv = &.{ "git", "--version" } }) catch return error.SkipZigTest;
+    if (git.term != .exited or git.term.exited != 0) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "proj/_tmp");
+    try tmp.dir.writeFile(io, .{ .sub_path = "proj/.gitignore", .data = "_tmp/\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "proj/a.zig", .data = "fn a() void {}\n" });
+    // Scratch that does not even parse: read, it would fail the run.
+    try tmp.dir.writeFile(io, .{ .sub_path = "proj/_tmp/b.zig", .data = "fn b( {}\n" });
+    var proj = try tmp.dir.openDir(io, "proj", .{});
+    defer proj.close(io);
+    const init = try std.process.run(arena, io, .{ .argv = &.{ "git", "init", "-q" }, .cwd = .{ .dir = proj } });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, init.term);
+
+    // gnarl walks its own current directory here, as a person running it
+    // in a repository does.
+    try expectRun(proj, &.{"--all"}, 0,
+        \\cyclomatic  lines  nesting  params  weighted  location  function
+        \\       1      1        0       0         0    a.zig:1   a
+        \\
+        \\1 function in 1 file: 0 over a critical threshold (!!), 0 more over a warning one (!).
+        \\
+    ++ thresholds_line, "");
+    const all = try runGnarl(proj, &.{ "--all", "--no-ignore" });
+    defer std.testing.allocator.free(all.stdout);
+    defer std.testing.allocator.free(all.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 2 }, all.term);
+    try std.testing.expect(std.mem.startsWith(u8, all.stderr, "gnarl: _tmp" ++ std.fs.path.sep_str ++ "b.zig:1:7: "));
 }
 
 test "a reader that stops early ends the report quietly" {
@@ -769,8 +815,8 @@ test "a path that is missing or holds no .zig file is an error" {
         \\
     ++ thresholds_line,
         \\gnarl: nope: FileNotFound
-        \\gnarl: empty: no .zig file to read (hidden files and directories, zig-out, zig-pkg and excluded paths are skipped)
-        \\gnarl: gen: no .zig file to read (hidden files and directories, zig-out, zig-pkg and excluded paths are skipped)
+        \\gnarl: empty: no .zig file to read (hidden files and directories, zig-out, zig-pkg, excluded paths and what git ignores are skipped)
+        \\gnarl: gen: no .zig file to read (hidden files and directories, zig-out, zig-pkg, excluded paths and what git ignores are skipped)
         \\
     );
 }
@@ -781,7 +827,7 @@ test "--version, --help and usage errors" {
     try expectRun(tmp.dir, &.{"--version"}, 0, "gnarl " ++ build_options.version ++ "\n", "");
     try expectRun(tmp.dir, &.{"--help"}, 0, usage, "");
     // No path is the current directory: here, one with no .zig file.
-    try expectRun(tmp.dir, &.{}, 2, "0 functions in 0 files: 0 over a critical threshold (!!), 0 more over a warning one (!).\n", "gnarl: .: no .zig file to read (hidden files and directories, zig-out, zig-pkg and excluded paths are skipped)\n");
+    try expectRun(tmp.dir, &.{}, 2, "0 functions in 0 files: 0 over a critical threshold (!!), 0 more over a warning one (!).\n", "gnarl: .: no .zig file to read (hidden files and directories, zig-out, zig-pkg, excluded paths and what git ignores are skipped)\n");
     try expectRun(tmp.dir, &.{ "src", "--frobnicate" }, 2, "", "gnarl: unknown option '--frobnicate'\n\n" ++ usage);
 }
 
@@ -802,6 +848,8 @@ test "parseArgs: paths and excludes, in any order" {
     try std.testing.expect(!run.check);
     try std.testing.expect(!run.all);
     try std.testing.expectEqual(null, run.top);
+    try std.testing.expect(!run.no_ignore);
+    try std.testing.expect((try parseArgs(arena, &.{"--no-ignore"})).run.no_ignore);
 }
 
 test "parseArgs: --all, --top and --function" {
