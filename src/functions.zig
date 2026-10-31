@@ -34,6 +34,11 @@ pub const Function = struct {
     /// The token's line and column, both from 1. The column counts bytes.
     line: u32,
     column: u32,
+    /// The container the function is declared in: a container declaration,
+    /// or `.root` for the file.
+    container: Node.Index,
+    /// The name a `const` or `var` gives that container, if one does.
+    container_name: ?Ast.TokenIndex,
 };
 
 /// One link in the chain of names from a node up to the file.
@@ -44,10 +49,16 @@ const Scope = struct {
     parent: u32,
 };
 
-/// A node still to visit, and the scope it is in.
+/// A node still to visit, and where it is.
 const Item = struct {
     node: Node.Index,
     scope: u32,
+    /// The container it is in, and the name given that container.
+    container: Node.Index,
+    container_name: ?Ast.TokenIndex,
+    /// The name the `const` or `var` it is part of gives it, if it is one's
+    /// type or value.
+    given_name: ?Ast.TokenIndex,
 };
 
 /// Every function and test block in `tree`, in source order. Allocated with
@@ -61,7 +72,7 @@ pub fn list(arena: Allocator, tree: *const Ast) Allocator.Error![]Function {
     // runs out of call stack.
     var stack: std.ArrayList(Item) = .empty;
     var kids: std.ArrayList(Node.Index) = .empty;
-    try stack.append(arena, .{ .node = .root, .scope = 0 });
+    try stack.append(arena, .{ .node = .root, .scope = 0, .container = .root, .container_name = null, .given_name = null });
     while (stack.pop()) |item| {
         var scope = item.scope;
         if (givesName(tree, item.node)) {
@@ -74,11 +85,24 @@ pub fn list(arena: Allocator, tree: *const Ast) Allocator.Error![]Function {
                 .token = nameToken(tree, item.node),
                 .line = 0,
                 .column = 0,
+                .container = item.container,
+                .container_name = item.container_name,
             });
         }
+        var next = item;
+        next.scope = scope;
+        next.given_name = null;
+        if (isContainer(tree.nodeTag(item.node))) {
+            next.container = item.node;
+            next.container_name = item.given_name;
+        }
+        if (tree.fullVarDecl(item.node) != null) next.given_name = nameToken(tree, item.node);
         kids.clearRetainingCapacity();
         try children.append(arena, tree, item.node, &kids);
-        for (kids.items) |kid| try stack.append(arena, .{ .node = kid, .scope = scope });
+        for (kids.items) |kid| {
+            next.node = kid;
+            try stack.append(arena, next);
+        }
     }
 
     std.mem.sort(Function, found.items, {}, before);
@@ -105,6 +129,25 @@ fn locate(tree: *const Ast, functions: []Function) void {
         function.line = line;
         function.column = @intCast(offset - line_start + 1);
     }
+}
+
+fn isContainer(tag: Node.Tag) bool {
+    return switch (tag) {
+        .container_decl,
+        .container_decl_trailing,
+        .container_decl_two,
+        .container_decl_two_trailing,
+        .container_decl_arg,
+        .container_decl_arg_trailing,
+        .tagged_union,
+        .tagged_union_trailing,
+        .tagged_union_two,
+        .tagged_union_two_trailing,
+        .tagged_union_enum_tag,
+        .tagged_union_enum_tag_trailing,
+        => true,
+        else => false,
+    };
 }
 
 fn kindOf(tree: *const Ast, node: Node.Index) ?Kind {
