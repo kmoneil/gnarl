@@ -123,7 +123,7 @@ A released binary, pinned and checked against its release's checksums:
 ```yaml
 - name: install gnarl
   env:
-    GNARL: v0.3.0
+    GNARL: v0.3.1
   run: |
     dir="$RUNNER_TEMP/gnarl" && mkdir -p "$dir" && cd "$dir"
     base="https://github.com/kmoneil/gnarl/releases/download/$GNARL"

@@ -102,8 +102,8 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
 - `schema`, `gnarl`, `errors`, `notes`: as in the report.
 - `explanations`: one for each function `--explain` names, in the order
   named:
-  - `path`, `line`, `column`, `name`, `kind`, `class`, `trips`: as in the
-    report's `functions`.
+  - `path`, `line`, `end_line`, `column`, `name`, `kind`, `class`,
+    `trips`: as in the report's `functions`.
   - `cyclomatic`: the count and what made it:
     - `value`: the count: 1, and the `adds` of each branch.
     - `branches`: each construct counted, and each that a reader may
