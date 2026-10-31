@@ -39,8 +39,12 @@ names, and elements for what is a list or an object in json.
     - `limit`: its critical limit.
     - `baselined`: the baseline's number for it; null when the baseline
       does not hold the function.
-  - `improved`: how many baselined functions are under the baseline's
-    numbers now (`--update-baseline` tightens it).
+  - `improved`: how many baselined functions, still over a critical
+    limit, are under the baseline's numbers now (`--update-baseline`
+    tightens it).
+  - `unneeded`: how many baselined functions are within every critical
+    limit now, their entries holding nothing back (`--update-baseline`
+    drops them).
   - `gone`: how many baselined functions of a file read are no longer
     there: renamed, moved or deleted.
 - `thresholds`: the limits in force, by class of code:

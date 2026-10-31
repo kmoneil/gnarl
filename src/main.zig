@@ -361,16 +361,26 @@ fn runCheck(c: Context, rows: []const report.Row, held: ?Held, files: []const []
     check.failed = r.failures.len > 0;
     check.failures = r.failures;
     check.improved = r.improved;
+    check.unneeded = r.unneeded;
     check.gone = r.gone;
     const h = held orelse return check;
     check.baseline = h.path;
-    if (r.improved > 0) try c.said.add(.{ .level = .note, .path = h.path, .text = try std.fmt.allocPrint(c.arena, "{d} baselined function{s} {s} under the baseline's numbers now; gnarl --update-baseline tightens it", .{
+    try sayBaselineNotes(c, h.path, r);
+    return check;
+}
+
+/// What in the baseline at `path` --update-baseline would change: entries
+/// to tighten, to drop as within their limits, and to drop as gone.
+fn sayBaselineNotes(c: Context, path: []const u8, r: baseline.Ratchet) !void {
+    if (r.improved > 0) try c.said.add(.{ .level = .note, .path = path, .text = try std.fmt.allocPrint(c.arena, "{d} baselined function{s} {s} under the baseline's numbers now; gnarl --update-baseline tightens it", .{
         r.improved, plural(r.improved), if (r.improved == 1) "is" else "are",
     }) });
-    if (r.gone > 0) try c.said.add(.{ .level = .note, .path = h.path, .text = try std.fmt.allocPrint(c.arena, "{d} baselined function{s} {s} gone (renamed, moved or deleted); gnarl --update-baseline drops {s}", .{
+    if (r.unneeded > 0) try c.said.add(.{ .level = .note, .path = path, .text = try std.fmt.allocPrint(c.arena, "{d} baselined function{s} {s} within {s} limits now; gnarl --update-baseline drops {s}", .{
+        r.unneeded, plural(r.unneeded), if (r.unneeded == 1) "is" else "are", if (r.unneeded == 1) "its" else "their", if (r.unneeded == 1) "it" else "them",
+    }) });
+    if (r.gone > 0) try c.said.add(.{ .level = .note, .path = path, .text = try std.fmt.allocPrint(c.arena, "{d} baselined function{s} {s} gone (renamed, moved or deleted); gnarl --update-baseline drops {s}", .{
         r.gone, plural(r.gone), if (r.gone == 1) "is" else "are", if (r.gone == 1) "it" else "them",
     }) });
-    return check;
 }
 
 fn plural(n: usize) []const u8 {
@@ -888,6 +898,8 @@ test "--update-baseline, then --check holds to it: new or worse fails, debt kept
         },
         // Better than its baseline, still over: passes, and says to tighten.
         .{ .source = try branchy(arena, "f", 15), .exit = 0, .stderr = "gnarl: complexity.baseline: note: 1 baselined function is under the baseline's numbers now; gnarl --update-baseline tightens it\n" },
+        // Within every limit now: passes, and says the entry can go.
+        .{ .source = try branchy(arena, "f", 10), .exit = 0, .stderr = "gnarl: complexity.baseline: note: 1 baselined function is within its limits now; gnarl --update-baseline drops it\n" },
         // Renamed: a new function over, and the old one gone.
         .{ .source = try branchy(arena, "h", 16), .exit = 1, .stderr =
         \\gnarl: complexity.baseline: note: 1 baselined function is gone (renamed, moved or deleted); gnarl --update-baseline drops it

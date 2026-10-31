@@ -209,9 +209,14 @@ pub const Failure = struct {
 pub const Ratchet = struct {
     /// Worst first, as the rows are.
     failures: []const Failure,
-    /// Baselined functions now under the baseline's number on a metric:
-    /// --update-baseline would tighten the ratchet.
+    /// Baselined functions still over a critical limit, but under the
+    /// baseline's number on a metric: --update-baseline would tighten the
+    /// ratchet.
     improved: usize,
+    /// Baselined functions now within every critical limit: their entries
+    /// hold nothing back but let them grow, and --update-baseline drops
+    /// them.
+    unneeded: usize,
     /// Baselined functions of a file read that are no longer there:
     /// renamed, moved or deleted.
     gone: usize,
@@ -225,34 +230,16 @@ pub fn ratchet(arena: Allocator, rows: []const Row, classes: Classes, base: ?Bas
     const row_keys = try keys(arena, rows);
     var failures: std.ArrayList(Failure) = .empty;
     var improved: usize = 0;
+    var unneeded: usize = 0;
     var present: std.StringHashMapUnmanaged(void) = .empty;
     for (rows, row_keys) |row, key| {
         try present.put(arena, key, {});
         const held = if (base) |b| b.get(key) else null;
-        const limits = classes.get(row.class);
-        var better = false;
-        var failed = false;
-        inline for (metrics, 0..) |metric, m| {
-            const value = @field(row, @tagName(metric));
-            if (limits.of(metric).critical) |limit| {
-                const allowed = if (held) |h| @max(limit, h.values[m]) else limit;
-                if (value > allowed) {
-                    failed = true;
-                    try failures.append(arena, .{
-                        .path = row.path,
-                        .line = row.line,
-                        .name = row.name,
-                        .metric = metric,
-                        .value = value,
-                        .limit = limit,
-                        .baselined = if (held) |h| h.values[m] else null,
-                    });
-                } else if (held) |h| {
-                    if (h.values[m] > limit and value < h.values[m]) better = true;
-                }
-            }
-        }
-        if (better and !failed) improved += 1;
+        const s = try judge(arena, row, held, classes.get(row.class), &failures);
+        if (held == null or s.failed) continue;
+        if (!s.over) {
+            unneeded += 1;
+        } else if (s.better) improved += 1;
     }
     var gone: usize = 0;
     if (base) |b| {
@@ -263,7 +250,45 @@ pub fn ratchet(arena: Allocator, rows: []const Row, classes: Classes, base: ?Bas
             if (read.contains(path) and !present.contains(entry.key)) gone += 1;
         }
     }
-    return .{ .failures = failures.items, .improved = improved, .gone = gone };
+    return .{ .failures = failures.items, .improved = improved, .unneeded = unneeded, .gone = gone };
+}
+
+/// How a function stands against its limits and its baseline entry.
+const Standing = struct {
+    /// Over what it may be on a metric.
+    failed: bool = false,
+    /// Over a critical limit on a metric.
+    over: bool = false,
+    /// Under its baseline's number on a metric that is over its limit.
+    better: bool = false,
+};
+
+/// How `row` stands, held to `limits` and the entry `held`; each metric it
+/// fails on appended to `failures`.
+fn judge(arena: Allocator, row: Row, held: ?Entry, limits: thresholds.Thresholds, failures: *std.ArrayList(Failure)) Allocator.Error!Standing {
+    var s: Standing = .{};
+    inline for (metrics, 0..) |metric, m| {
+        const value = @field(row, @tagName(metric));
+        if (limits.of(metric).critical) |limit| {
+            s.over = s.over or value > limit;
+            const allowed = if (held) |h| @max(limit, h.values[m]) else limit;
+            if (value > allowed) {
+                s.failed = true;
+                try failures.append(arena, .{
+                    .path = row.path,
+                    .line = row.line,
+                    .name = row.name,
+                    .metric = metric,
+                    .value = value,
+                    .limit = limit,
+                    .baselined = if (held) |h| h.values[m] else null,
+                });
+            } else if (held) |h| {
+                if (h.values[m] > limit and value < h.values[m]) s.better = true;
+            }
+        }
+    }
+    return s;
 }
 
 /// How many functions `failures` names; they are grouped by function.
@@ -334,6 +359,7 @@ test "ratchet: new over a limit, above its baseline, newly over another; within 
         "src/a.zig\tkept\t20\t0\t60\t0\t0\t0\n" ++
         "src/a.zig\tbetter\t40\t0\t10\t0\t0\t0\n" ++
         "src/a.zig\tgone\t50\t0\t10\t0\t0\t0\n" ++
+        "src/a.zig\tsettled\t20\t0\t10\t0\t0\t0\n" ++
         "src/other.zig\telsewhere\t50\t0\t10\t0\t0\t0\n", &problem);
     var rows = [_]Row{
         sampleRow("src/a.zig", 1, "worse", 31, 120),
@@ -341,6 +367,7 @@ test "ratchet: new over a limit, above its baseline, newly over another; within 
         sampleRow("src/a.zig", 40, "better", 25, 10),
         sampleRow("src/a.zig", 60, "new", 16, 10),
         sampleRow("src/a.zig", 80, "fine", 15, 100),
+        sampleRow("src/a.zig", 100, "settled", 12, 10),
     };
     try @import("report.zig").rank(arena, &rows, .defaults);
     const r = try ratchet(arena, &rows, .defaults, base, &.{"src/a.zig"});
@@ -353,7 +380,9 @@ test "ratchet: new over a limit, above its baseline, newly over another; within 
         if (std.mem.eql(u8, f.name, "kept")) try std.testing.expectEqual(.lines, f.metric);
         if (std.mem.eql(u8, f.name, "new")) try std.testing.expectEqual(null, f.baselined);
     }
+    // better is still over its limit, settled within every one.
     try std.testing.expectEqual(1, r.improved);
+    try std.testing.expectEqual(1, r.unneeded);
     try std.testing.expectEqual(1, r.gone);
 
     // With no baseline, every critical crossing fails.

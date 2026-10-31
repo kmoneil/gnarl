@@ -2,7 +2,6 @@
 # written. gnarl --check fails a function that is new and over one, or
 # above its number here; gnarl --update-baseline rewrites this file.
 # path, name, cyclomatic, cognitive, lines, nesting, params, params_weighted
-src/baseline.zig	ratchet	18	40	36	5	4	4
 src/children.zig	append	33	3	244	2	3	3
 src/cyclomatic.zig	note	24	31	43	3	5	5
 src/diff.zig	writeTable	18	39	48	4	4	4

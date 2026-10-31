@@ -160,8 +160,11 @@ pub const Check = struct {
     /// What fails it, worst first: each metric of a function over what it
     /// may be (its critical limit, or its baseline's number if higher).
     failures: []const baseline.Failure = &.{},
-    /// Baselined functions now under the baseline's numbers.
+    /// Baselined functions still over a limit, now under the baseline's
+    /// numbers.
     improved: usize = 0,
+    /// Baselined functions now within every critical limit.
+    unneeded: usize = 0,
     /// Baselined functions of a file read that are no longer there.
     gone: usize = 0,
 };
@@ -228,6 +231,7 @@ fn writeXml(w: *Writer, rows: []const Row, listed: Listed, c: Context) Writer.Er
     try formats.attrInt(w, "critical", c.check.critical);
     if (c.check.baseline) |path| try formats.attr(w, "baseline", path);
     try formats.attrInt(w, "improved", c.check.improved);
+    try formats.attrInt(w, "unneeded", c.check.unneeded);
     try formats.attrInt(w, "gone", c.check.gone);
     if (c.check.failures.len == 0) {
         try w.writeAll("/>\n");
