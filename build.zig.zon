@@ -1,6 +1,6 @@
 .{
     .name = .gnarl,
-    .version = "0.0.0",
+    .version = "0.1.0",
     .fingerprint = 0x26d14b605f52b1cd, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.0",
     // std.zig.Ast, the compiler's own parser, is the only parser.

@@ -79,3 +79,17 @@ jobs:
           version: 0.17.0
       - name: zig build test
         run: zig build test -Doptimize=${{ matrix.optimize }} --summary all
+
+  # Every binary a release carries, built on every change, so a tag never
+  # finds a target that does not build.
+  targets:
+    name: release targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+      - name: zig build release
+        run: zig build release && ls -l zig-out/release
