@@ -60,6 +60,16 @@ a field added leaves it.
 every example in it against the binary. A new flag, metric or format is
 named there in the same change.
 
+## The site
+
+GitHub Pages builds <https://kmoneil.github.io/gnarl/> from `docs/` on
+`main`, with the just-the-docs theme (`docs/_config.yml`); there is no
+workflow for it here. The reference pages, `docs/cognitive.md` and
+`docs/output.md`, are the same files the repository shows. The site's own
+pages repeat parts of the README and of `gnarl skill`, and a change to one
+is a change to the others; the tables on `docs/metrics.md` are measured by
+the same test as the skill's.
+
 ## Writing
 
 Messages say what is wrong and what to do next, in plain words. Every

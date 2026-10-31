@@ -28,6 +28,7 @@ const usage =
     \\             [--format <format>] [--json] [<path>...]
     \\       gnarl --explain <function>... [<path>...]
     \\       gnarl --diff <ref> [<path>...]
+    \\       gnarl --files [--top <n>] [<path>...]
     \\       gnarl skill [--install <dir>]
     \\       gnarl --version | --help
     \\
@@ -78,14 +79,16 @@ const usage =
     \\                    Say why the function scores what it does, metric by
     \\                    metric, rather than report: each construct counted
     \\                    and where, the deepest nesting, the lines left out,
-    \\                    each parameter. The function is path:line as the
-    \\                    report prints it (or any line inside it), path:A-B
-    \\                    for what lines A to B of the function around them
-    \\                    cost and about what moving them into a function of
-    \\                    their own would leave, or its
+    \\                    each parameter, the regions that carry the cost,
+    \\                    and for a function over a limit, the ranges worth
+    \\                    lifting out. The function is path:line as the
+    \\                    report prints it (or any line inside it), or its
     \\                    name or the end of it (record for Validator.record),
     \\                    looked for in the paths given, or the current
-    \\                    directory if none. May be given more than once.
+    \\                    directory if none. path:A-B says what lines A to B
+    \\                    of the function around them cost, and about what
+    \\                    moving them into a function of their own would
+    \\                    leave. May be given more than once.
     \\  --diff <ref>      Rather than report, list each function the change
     \\                    from the commit <ref> to the work tree touched,
     \\                    uncommitted edits and new files included, with its
