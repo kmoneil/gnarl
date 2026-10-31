@@ -54,6 +54,14 @@ pub fn build(b: *std.Build) void {
     const fmt_paths: []const std.Build.LazyPath = &.{ b.path("src"), b.path("build.zig"), b.path("build.zig.zon"), b.path("complexity.zon") };
     b.step("fmt", "Format the source as zig fmt does").dependOn(&b.addFmt(.{ .paths = fmt_paths }).step);
     test_step.dependOn(&b.addFmt(.{ .paths = fmt_paths, .check = true }).step);
+
+    // `zig build lint`: zigvet over gnarl's own source, as CI runs it. zigvet
+    // is a binary of its own (github.com/kmoneil/zigvet), so `zig build test`
+    // does not need it.
+    const lint = b.addSystemCommand(&.{ "zigvet", "src", "build.zig" });
+    lint.setCwd(b.path("."));
+    lint.has_side_effects = true;
+    b.step("lint", "Run zigvet over gnarl's own source").dependOn(&lint.step);
 }
 
 fn gnarlModule(

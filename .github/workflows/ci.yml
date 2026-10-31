@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The workflow only reads the repository.
+permissions:
+  contents: read
+
+# A newer push to a pull request supersedes its older runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Every job name here is a required status check in the `main` ruleset;
+# renaming one means updating the ruleset in the same change.
+jobs:
+  check:
+    name: format, lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+      - name: zig fmt
+        run: zig fmt --check build.zig build.zig.zon complexity.zon src
+      # zigvet, a released binary checked against its release's checksums.
+      - name: install zigvet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZIGVET: v0.19.0
+        run: |
+          dir="$RUNNER_TEMP/zigvet"
+          gh release download "$ZIGVET" --repo kmoneil/zigvet --pattern zigvet-linux-amd64 --pattern SHA256SUMS --dir "$dir"
+          cd "$dir"
+          grep ' zigvet-linux-amd64$' SHA256SUMS | sha256sum -c -
+          mv zigvet-linux-amd64 zigvet && chmod +x zigvet
+          echo "$dir" >> "$GITHUB_PATH"
+      - name: zigvet over gnarl's source
+        run: zig build lint
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+      # The tests, the golden tables, the docs held to the binary, the
+      # formatting, and gnarl held to its own complexity baseline.
+      - name: zig build test
+        run: zig build test --summary all
+
+  # gnarl is built ReleaseFast to measure large trees; ReleaseSafe is how a
+  # package built from source may be.
+  release-modes:
+    name: release (${{ matrix.optimize }})
+    strategy:
+      fail-fast: false
+      matrix:
+        optimize: [ReleaseSafe, ReleaseFast]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+      - name: zig build test
+        run: zig build test -Doptimize=${{ matrix.optimize }} --summary all
