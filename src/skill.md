@@ -27,9 +27,9 @@ as often as it helps.
 4. `gnarl --check src` in CI exits 1 when a function is over a critical
    threshold, and names the `--explain` to run for the worst.
 
-Paths are optional for `--explain` and `--function`: a function named by
-`path:line` needs nothing else, and one named by name is looked for in
-the current directory when no path is given.
+Paths are optional: with none, gnarl reads the current directory. A
+function given to `--explain` or `--function` as `path:line` needs no
+path besides, and then only its file is read.
 
 ## What it counts
 

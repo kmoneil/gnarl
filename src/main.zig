@@ -20,18 +20,19 @@ const walk = @import("walk.zig");
 const usage =
     \\Usage: gnarl [--exclude <path>]... [--config <file>] [--check]
     \\             [--all] [--top <n>] [--function <function>]...
-    \\             [--format <format>] [--json] <path>...
+    \\             [--format <format>] [--json] [<path>...]
     \\       gnarl --explain <function>... [<path>...]
     \\       gnarl skill [--install <dir>]
     \\       gnarl --version | --help
     \\
     \\Measures every function and test block in each file named, and in
-    \\every .zig file under each directory named: cyclomatic complexity,
-    \\logical lines, nesting depth and parameters (plain, and weighted with a
-    \\type parameter and an anytype counted twice). One row per function over
-    \\a threshold, worst first, and a summary of them all; a number over its
-    \\warning threshold is marked !, over its critical one !!. Hidden files
-    \\and directories, zig-out and zig-pkg are skipped.
+    \\every .zig file under each directory named (the current directory
+    \\when none is): cyclomatic complexity, logical lines, nesting depth and
+    \\parameters (plain, and weighted with a type parameter and an anytype
+    \\counted twice). One row per function over a threshold, worst first,
+    \\and a summary of them all; a number over its warning threshold is
+    \\marked !, over its critical one !!. Hidden files and directories,
+    \\zig-out and zig-pkg are skipped.
     \\
     \\gnarl skill prints what an AI agent needs to work with gnarl: the
     \\loop, the rules with examples, the output; --install <dir> writes it
@@ -146,15 +147,16 @@ pub fn main(init: std.process.Init) !u8 {
     var search: ?explain.Search = if (run.explain.len > 0) try .init(arena, run.explain) else null;
     const picks = try arena.alloc(select.Selector, run.functions.len);
     for (run.functions, picks) |text, *p| p.* = try select.Selector.parse(arena, text);
-    // A function named by path:line needs no path besides; one named by
-    // name is looked for in the current directory if no path is given.
+    // With no path, gnarl reads the current directory; but a function
+    // named by path:line needs no path besides, so --explain and
+    // --function naming only those read only their files.
     var paths: std.ArrayList([]const u8) = .empty;
     try paths.appendSlice(arena, run.paths);
     const selectors = if (search) |s| s.selectors else picks;
     const by_name = for (selectors) |s| {
         if (s == .name) break true;
     } else false;
-    if (paths.items.len == 0 and by_name) try paths.append(arena, ".");
+    if (paths.items.len == 0 and (selectors.len == 0 or by_name)) try paths.append(arena, ".");
     for (selectors) |s| switch (s) {
         .at => |at| try paths.append(arena, at.path),
         .name => {},
@@ -397,7 +399,6 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
             return .{ .usage_error = try arena.print("unknown option '{s}'", .{arg}) };
         } else try paths.append(arena, arg);
     }
-    if (paths.items.len == 0 and to_explain.items.len == 0 and to_list.items.len == 0) return .{ .usage_error = "" };
     if (to_explain.items.len > 0 and (check or all or top != null or to_list.items.len > 0)) {
         return .{ .usage_error = "--check, --all, --top and --function are for the report, not --explain" };
     }
@@ -547,6 +548,8 @@ test "by default only what is over a threshold; --top, and --function to pick" {
         \\
     ;
     try expectRun(tmp.dir, &.{"a.zig"}, 0, f_row ++ "1 within limits is not listed; --all lists every function.\n" ++ thresholds_line, "");
+    // No path reads the current directory.
+    try expectRun(tmp.dir, &.{}, 0, f_row ++ "1 within limits is not listed; --all lists every function.\n" ++ thresholds_line, "");
     try expectRun(tmp.dir, &.{ "--all", "--top", "1", "a.zig" }, 0, f_row ++ "1 more is not listed: --top 1 keeps the worst 1.\n" ++ thresholds_line, "");
     // Picked by a line inside it, with no path besides.
     try expectRun(tmp.dir, &.{ "--function", "a.zig:3" }, 0, f_row ++ "1 not picked by --function is not listed.\n" ++ thresholds_line, "");
@@ -777,7 +780,8 @@ test "--version, --help and usage errors" {
     defer tmp.cleanup();
     try expectRun(tmp.dir, &.{"--version"}, 0, "gnarl " ++ build_options.version ++ "\n", "");
     try expectRun(tmp.dir, &.{"--help"}, 0, usage, "");
-    try expectRun(tmp.dir, &.{}, 2, "", usage);
+    // No path is the current directory: here, one with no .zig file.
+    try expectRun(tmp.dir, &.{}, 2, "0 functions in 0 files: 0 over a critical threshold (!!), 0 more over a warning one (!).\n", "gnarl: .: no .zig file to read (hidden files and directories, zig-out, zig-pkg and excluded paths are skipped)\n");
     try expectRun(tmp.dir, &.{ "src", "--frobnicate" }, 2, "", "gnarl: unknown option '--frobnicate'\n\n" ++ usage);
 }
 
@@ -930,8 +934,8 @@ test "parseArgs: help, version and usage errors" {
     try std.testing.expectEqualStrings("--exclude needs a path", (try parseArgs(arena, &.{ "src", "--exclude" })).usage_error);
     try std.testing.expectEqualStrings("--exclude needs a path", (try parseArgs(arena, &.{ "src", "--exclude=" })).usage_error);
     try std.testing.expectEqualStrings("unknown option '-x'", (try parseArgs(arena, &.{ "-x", "--help" })).usage_error);
-    try std.testing.expectEqualStrings("", (try parseArgs(arena, &.{})).usage_error);
-    try std.testing.expectEqualStrings("", (try parseArgs(arena, &.{ "--exclude", "src" })).usage_error);
+    try std.testing.expectEqual(0, (try parseArgs(arena, &.{})).run.paths.len);
+    try std.testing.expectEqual(1, (try parseArgs(arena, &.{ "--exclude", "src" })).run.excludes.len);
 }
 
 test {
