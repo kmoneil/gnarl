@@ -61,12 +61,23 @@ to it reads as a diff. From then on `gnarl --check .` holds to it: a
 function not in it over a critical limit fails, and so does one above its
 number there. Within its limits, a function may change freely.
 
+A pass prints nothing. A failure lists only what fails, then says on
+stderr what each failing function is over and the `--explain` to run:
+
 ```console
 $ gnarl --check .
+cyclomatic  cognitive  lines  nesting  params  weighted  location     function
+      12!        34!!   23        5!      4         4    tally.zig:7  tally
+
+1 function in 1 file: 1 over a critical threshold (!!), 0 more over a warning one (!).
+Thresholds for normal code (warning, critical): cyclomatic 10, 15; cognitive 15, 25; lines 50, 100; nesting 4; params 4.
 gnarl: --check: 1 function fails against complexity.baseline:
   tally.zig:7  tally: cognitive 34, above its baseline 33
 gnarl --explain tally.zig:7 says why the first scores what it does
 ```
+
+What the baseline holds is not listed: it is not news to a check.
+`--all` lists every function.
 
 When a frozen function gets better, `--check` says so, and
 `gnarl --update-baseline .` tightens the ratchet; when it is within every
@@ -75,6 +86,24 @@ limit again, the update drops it. Debt can only shrink.
 {: .note }
 A function is known by its path and its name, so a rename or a move to
 another file is a new function: update the baseline in the same change.
+
+## In zig build
+
+A step in `build.zig` runs the check with `zig build test`:
+
+```zig
+const complexity = b.addSystemCommand(&.{ "gnarl", "--check", "src", "build.zig" });
+complexity.setCwd(b.path(".")); // where complexity.zon and complexity.baseline are
+complexity.has_side_effects = true; // run every time: the build does not know what gnarl reads
+b.step("complexity", "Hold the code to complexity.baseline").dependOn(&complexity.step);
+test_step.dependOn(&complexity.step);
+```
+
+`setCwd` matters: gnarl reads `complexity.zon` and `complexity.baseline`
+from the directory it runs in. A pass prints nothing, so there is no
+output to capture. If the step does capture it, or checks the exit code
+with `expectExitCode`, `has_side_effects` is what keeps the build from
+caching the step and skipping it on the next run.
 
 ## In a pull request
 
@@ -94,7 +123,7 @@ A released binary, pinned and checked against its release's checksums:
 ```yaml
 - name: install gnarl
   env:
-    GNARL: v0.2.0
+    GNARL: v0.3.0
   run: |
     dir="$RUNNER_TEMP/gnarl" && mkdir -p "$dir" && cd "$dir"
     base="https://github.com/kmoneil/gnarl/releases/download/$GNARL"

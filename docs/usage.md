@@ -17,7 +17,7 @@ nav_order: 3
 | `gnarl --explain <function>...` | Why a function scores what it does: each construct and its cost, the regions that carry it, and for a function over a limit, the ranges worth lifting out. |
 | `gnarl --explain path:A-B` | What lines A to B cost, and about what moving them into a function of their own would leave: its numbers, its parameters, what it gives back, the jumps that leave the lines. |
 | `gnarl --diff <ref>` | Each function the change from commit `<ref>` to the work tree touched, before and after: worse, mixed, added, the same, better, removed. With no path, the whole work tree. |
-| `gnarl --check <path>...` | Exit 1 if a function is over a critical limit, or, held to a baseline, new or worse. |
+| `gnarl --check <path>...` | Exit 1 if a function is over a critical limit, or, held to a baseline, new or worse. Lists only what fails, so a pass prints nothing. |
 | `gnarl --update-baseline <path>...` | Write `complexity.baseline`: each function now over a critical limit, with its numbers. |
 | `gnarl --files <path>...` | Each file's fan-out, fan-in and the modules it imports, the most coupled first. |
 | `gnarl skill` | Print the guide an AI agent needs; `--install <dir>` writes it to `<dir>/gnarl/SKILL.md`. |

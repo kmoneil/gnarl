@@ -29,6 +29,8 @@ names, and elements for what is a list or an object in json.
   - `within_limits`: within every limit, with no `--all`.
   - `past_top`: past `--top`.
   - `not_selected`: not picked by `--function`.
+  - `not_failing`: under `--check`, over a limit but not failing it: the
+    baseline holds it, or it is over a warning limit only.
 - `check`: what `--check` found:
   - `asked`: whether `--check` was given.
   - `failed`: whether it fails the run, exit status 1.
@@ -66,7 +68,8 @@ names, and elements for what is a list or an object in json.
   - `more`: further lines, such as the functions a name fits.
 - `notes`: what is worth knowing and is not wrong, with the same fields
   as `errors`.
-- `functions`: the functions listed, worst first:
+- `functions`: the functions listed, worst first; under `--check`, those
+  that fail it, unless `--all` or `--function` says otherwise:
   - `path`: the file, as gnarl names it.
   - `line`: the line of the function's name; for a test, of `test`.
   - `end_line`: the line of its closing brace.

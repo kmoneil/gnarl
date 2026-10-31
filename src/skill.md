@@ -43,7 +43,8 @@ as often as it helps.
    `gnarl --function <function>
    src` measures one function again, whatever its numbers.
 4. `gnarl --check src` in CI exits 1 when a function is over a critical
-   threshold, and names the `--explain` to run for the worst.
+   threshold, and names the `--explain` to run for the worst. It lists
+   only what fails, so a pass prints nothing.
 
 `--explain` also tallies what of a function runs at compile time:
 `comptime` blocks, `inline` loops and prongs, reflection builtins,
@@ -72,6 +73,19 @@ with none, it prints its usage and exits 2. A function given to
 then only its file is read; one given by name is looked for in the paths
 given. `--diff` with no path reads what git says changed in the whole
 work tree.
+
+To hold a Zig project to it in `zig build test`, a step in `build.zig`:
+
+```zig
+const complexity = b.addSystemCommand(&.{ "gnarl", "--check", "src", "build.zig" });
+complexity.setCwd(b.path(".")); // where complexity.zon and complexity.baseline are
+complexity.has_side_effects = true; // run every time: the build does not know what gnarl reads
+test_step.dependOn(&complexity.step);
+```
+
+Without `setCwd`, gnarl does not find `complexity.zon` or the baseline.
+Without `has_side_effects`, a step that captures the output or checks
+the exit code is cached and skipped, and a regression passes.
 
 ## What it counts
 

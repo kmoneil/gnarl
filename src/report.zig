@@ -106,6 +106,9 @@ pub const Listing = struct {
     /// Only the rows flagged, whatever their numbers: a flag per ranked
     /// row. Null when nothing is picked.
     picked: ?[]const bool = null,
+    /// Under --check, only the rows that fail it: a flag per ranked row.
+    /// What a baseline holds is not news to a check.
+    failing: ?[]const bool = null,
 };
 
 /// How many rows a report leaves out, by why.
@@ -116,6 +119,9 @@ pub const NotListed = struct {
     past_top: usize = 0,
     /// Not picked by --function.
     not_selected: usize = 0,
+    /// Under --check, over a limit but not failing it: the baseline holds
+    /// it, or it is over a warning limit only.
+    not_failing: usize = 0,
 };
 
 pub const Listed = struct {
@@ -129,13 +135,10 @@ pub fn list(arena: Allocator, ranked: []const Row, listing: Listing) Allocator.E
     var rows: std.ArrayList(Row) = .empty;
     var not_listed: NotListed = .{};
     for (ranked, 0..) |row, i| {
-        if (listing.picked) |picked| {
-            if (!picked[i]) {
-                not_listed.not_selected += 1;
-                continue;
+        if (leftOut(listing, row, i)) |why| {
+            switch (why) {
+                inline else => |field| @field(not_listed, @tagName(field)) += 1,
             }
-        } else if (!listing.all and row.trips.len == 0) {
-            not_listed.within_limits += 1;
             continue;
         }
         if (listing.top) |n| if (rows.items.len >= n) {
@@ -145,6 +148,24 @@ pub fn list(arena: Allocator, ranked: []const Row, listing: Listing) Allocator.E
         try rows.append(arena, row);
     }
     return .{ .rows = rows.items, .not_listed = not_listed, .top = listing.top };
+}
+
+/// Why `listing` leaves out `row`, ranked `i`th, if it does; --top aside.
+fn leftOut(listing: Listing, row: Row, i: usize) ?std.meta.FieldEnum(NotListed) {
+    if (listing.picked) |picked| return if (picked[i]) null else .not_selected;
+    if (listing.all) return null;
+    if (row.trips.len == 0) return .within_limits;
+    if (listing.failing) |failing| if (!failing[i]) return .not_failing;
+    return null;
+}
+
+/// A flag per ranked row: whether one of `failures` is its.
+pub fn failingRows(arena: Allocator, rows: []const Row, failures: []const baseline.Failure) Allocator.Error![]const bool {
+    const flags = try arena.alloc(bool, rows.len);
+    for (rows, flags) |row, *flag| flag.* = for (failures) |f| {
+        if (f.line == row.line and std.mem.eql(u8, f.path, row.path) and std.mem.eql(u8, f.name, row.name)) break true;
+    } else false;
+    return flags;
 }
 
 pub const Check = struct {
@@ -182,8 +203,15 @@ pub const Context = struct {
     messages: []const Message = &.{},
 };
 
-/// Writes `listed`, of the ranked `rows`, in `format`.
+/// Writes `listed`, of the ranked `rows`, in `format`. A check that
+/// passes, with nothing listed, writes nothing as text or Markdown: the
+/// exit status is the verdict, and a build step stays quiet.
 pub fn write(w: *Writer, format: Format, rows: []const Row, listed: Listed, context: Context) Writer.Error!void {
+    const passed = context.check.asked and !context.check.failed and listed.rows.len == 0;
+    switch (format) {
+        .text, .md => if (passed) return,
+        .json, .xml, .csv, .tsv => {},
+    }
     switch (format) {
         .text => try writeText(w, rows, listed, context.files, context.classes),
         .md => try writeMarkdown(w, rows, listed, context.files, context.classes),
@@ -225,6 +253,7 @@ fn writeXml(w: *Writer, rows: []const Row, listed: Listed, c: Context) Writer.Er
     try formats.attrInt(w, "within_limits", listed.not_listed.within_limits);
     try formats.attrInt(w, "past_top", listed.not_listed.past_top);
     try formats.attrInt(w, "not_selected", listed.not_listed.not_selected);
+    try formats.attrInt(w, "not_failing", listed.not_listed.not_failing);
     try w.writeAll("/>\n  <check");
     try formats.attrBool(w, "asked", c.check.asked);
     try formats.attrBool(w, "failed", c.check.failed);
@@ -447,6 +476,7 @@ fn writeSummary(w: *Writer, rows: []const Row, listed: Listed, files: usize, cla
     if (not.within_limits > 0) try w.print("{s}{d} within limits {s} not listed; --all lists every function.", .{ gap, not.within_limits, isAre(not.within_limits) });
     if (not.past_top > 0) try w.print("{s}{d} more {s} not listed: --top {d} keeps the worst {d}.", .{ gap, not.past_top, isAre(not.past_top), listed.top.?, listed.top.? });
     if (not.not_selected > 0) try w.print("{s}{d} not picked by --function {s} not listed.", .{ gap, not.not_selected, isAre(not.not_selected) });
+    if (not.not_failing > 0) try w.print("{s}{d} over a limit but passing --check {s} not listed; --all lists every function.", .{ gap, not.not_failing, isAre(not.not_failing) });
     for (std.enums.values(Class)) |class| {
         for (rows) |row| {
             if (row.class == class) break;
