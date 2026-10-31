@@ -47,6 +47,13 @@ pub fn build(b: *std.Build) void {
     check.expectExitCode(0);
     b.step("check", "Hold gnarl's own source to complexity.baseline").dependOn(&check.step);
     test_step.dependOn(&check.step);
+
+    // `zig build fmt` writes the source as zig fmt would; `zig build test`
+    // fails on a file it would change, so nothing goes in unformatted. The
+    // golden fixtures are left as they are.
+    const fmt_paths: []const std.Build.LazyPath = &.{ b.path("src"), b.path("build.zig"), b.path("build.zig.zon"), b.path("complexity.zon") };
+    b.step("fmt", "Format the source as zig fmt does").dependOn(&b.addFmt(.{ .paths = fmt_paths }).step);
+    test_step.dependOn(&b.addFmt(.{ .paths = fmt_paths, .check = true }).step);
 }
 
 fn gnarlModule(
