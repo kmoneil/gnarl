@@ -10,16 +10,19 @@ const lines = @import("lines.zig");
 const nesting = @import("nesting.zig");
 const params = @import("params.zig");
 const Row = @import("report.zig").Row;
+const LineIndex = @import("select.zig").LineIndex;
 
 /// Appends a row for each function in `tree`, read from `path`, to `rows`,
 /// in source order. The rows and their names are allocated with `arena`
 /// and the working memory with `scratch`; `path` must outlive the rows.
 pub fn file(arena: Allocator, scratch: Allocator, path: []const u8, tree: *const Ast, rows: *std.ArrayList(Row)) Allocator.Error!void {
+    const index = try LineIndex.init(scratch, tree.source);
     for (try functions.list(scratch, tree)) |function| {
         const p = params.count(tree, function);
         try rows.append(arena, .{
             .path = path,
             .line = function.line,
+            .end_line = index.ofToken(tree, tree.lastToken(function.node)).line,
             .column = function.column,
             .name = try arena.dupe(u8, function.name),
             .kind = function.kind,

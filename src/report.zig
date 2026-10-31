@@ -16,7 +16,10 @@ pub const Format = enum { text, json, md };
 
 pub const Row = struct {
     path: []const u8,
+    /// Where its name is, as the report prints it.
     line: u32,
+    /// Where it ends: the line of its closing brace.
+    end_line: u32 = 0,
     column: u32,
     name: []const u8,
     kind: functions.Kind,
@@ -85,14 +88,71 @@ pub fn countCritical(rows: []const Row) usize {
     return n;
 }
 
-/// Writes `rows`, ranked, in `format`. `files` is how many files they
-/// came from, and `classes` the thresholds they were ranked against.
-pub fn write(w: *Writer, format: Format, rows: []const Row, files: usize, classes: Classes) Writer.Error!void {
+/// Which of the ranked rows a report lists.
+pub const Listing = struct {
+    /// Every row, not only those over a threshold.
+    all: bool = false,
+    /// At most this many, the worst.
+    top: ?usize = null,
+    /// Only the rows flagged, whatever their numbers: a flag per ranked
+    /// row. Null when nothing is picked.
+    picked: ?[]const bool = null,
+};
+
+/// How many rows a report leaves out, by why.
+pub const NotListed = struct {
+    /// Within every limit, with no --all.
+    within_limits: usize = 0,
+    /// Past --top.
+    past_top: usize = 0,
+    /// Not picked by --function.
+    not_selected: usize = 0,
+};
+
+pub const Listed = struct {
+    rows: []const Row,
+    not_listed: NotListed = .{},
+    top: ?usize = null,
+};
+
+/// The rows of `ranked` that `listing` lists, worst first.
+pub fn list(arena: Allocator, ranked: []const Row, listing: Listing) Allocator.Error!Listed {
+    var rows: std.ArrayList(Row) = .empty;
+    var not_listed: NotListed = .{};
+    for (ranked, 0..) |row, i| {
+        if (listing.picked) |picked| {
+            if (!picked[i]) {
+                not_listed.not_selected += 1;
+                continue;
+            }
+        } else if (!listing.all and row.trips.len == 0) {
+            not_listed.within_limits += 1;
+            continue;
+        }
+        if (listing.top) |n| if (rows.items.len >= n) {
+            not_listed.past_top += 1;
+            continue;
+        };
+        try rows.append(arena, row);
+    }
+    return .{ .rows = rows.items, .not_listed = not_listed, .top = listing.top };
+}
+
+/// Writes `listed`, of the ranked `rows`, in `format`. `files` is how many
+/// files the rows came from, and `classes` the thresholds they were
+/// ranked against.
+pub fn write(w: *Writer, format: Format, rows: []const Row, listed: Listed, files: usize, classes: Classes) Writer.Error!void {
     switch (format) {
-        .text => try writeText(w, rows, files, classes),
-        .md => try writeMarkdown(w, rows, files, classes),
+        .text => try writeText(w, rows, listed, files, classes),
+        .md => try writeMarkdown(w, rows, listed, files, classes),
         .json => {
-            try std.json.Stringify.value(.{ .functions = rows, .files = files, .thresholds = classes }, .{ .whitespace = .indent_2 }, w);
+            try std.json.Stringify.value(.{
+                .functions = listed.rows,
+                .measured = rows.len,
+                .not_listed = listed.not_listed,
+                .files = files,
+                .thresholds = classes,
+            }, .{ .whitespace = .indent_2 }, w);
             try w.writeByte('\n');
         },
     }
@@ -123,7 +183,12 @@ fn marker(row: Row, column: Column) []const u8 {
     };
 }
 
-fn writeText(w: *Writer, rows: []const Row, files: usize, classes: Classes) Writer.Error!void {
+fn writeText(w: *Writer, all: []const Row, listed: Listed, files: usize, classes: Classes) Writer.Error!void {
+    if (listed.rows.len > 0) try writeTable(w, listed.rows);
+    try writeSummary(w, all, listed, files, classes, "\n");
+}
+
+fn writeTable(w: *Writer, rows: []const Row) Writer.Error!void {
     // Each number column is wide enough for its header and for its widest
     // number with a two-character marker after it.
     var widths: [columns.len]usize = undefined;
@@ -156,14 +221,18 @@ fn writeText(w: *Writer, rows: []const Row, files: usize, classes: Classes) Writ
         try w.print("{s}\n", .{row.name});
     }
     try w.writeByte('\n');
-    try writeSummary(w, rows, files, classes, "\n");
 }
 
 fn locationPad(row: Row, width: usize) usize {
     return width - std.fmt.count("{s}:{d}", .{ row.path, row.line });
 }
 
-fn writeMarkdown(w: *Writer, rows: []const Row, files: usize, classes: Classes) Writer.Error!void {
+fn writeMarkdown(w: *Writer, all: []const Row, listed: Listed, files: usize, classes: Classes) Writer.Error!void {
+    if (listed.rows.len > 0) try writeMarkdownTable(w, listed.rows);
+    try writeSummary(w, all, listed, files, classes, "\n\n");
+}
+
+fn writeMarkdownTable(w: *Writer, rows: []const Row) Writer.Error!void {
     try w.writeAll("|");
     for (columns) |column| try w.print(" {s} |", .{column.header});
     try w.writeAll(" location | function |\n|");
@@ -183,7 +252,6 @@ fn writeMarkdown(w: *Writer, rows: []const Row, files: usize, classes: Classes) 
         try w.writeAll(" |\n");
     }
     try w.writeByte('\n');
-    try writeSummary(w, rows, files, classes, "\n\n");
 }
 
 /// Writes `text` and `suffix` as one Markdown code span that a table cell
@@ -208,9 +276,10 @@ fn writeCode(w: *Writer, text: []const u8, suffix: []const u8) Writer.Error!void
     try w.splatByteAll('`', longest + 1);
 }
 
-/// How many functions were measured and how many are over a limit, then
-/// the limits of each class of code they are in; `gap` ends each line.
-fn writeSummary(w: *Writer, rows: []const Row, files: usize, classes: Classes, gap: []const u8) Writer.Error!void {
+/// How many functions were measured and how many are over a limit, what
+/// the report leaves out and how to see it, then the limits of each class
+/// of code they are in; `gap` ends each line.
+fn writeSummary(w: *Writer, rows: []const Row, listed: Listed, files: usize, classes: Classes, gap: []const u8) Writer.Error!void {
     var critical: usize = 0;
     var warning: usize = 0;
     for (rows) |row| {
@@ -221,6 +290,10 @@ fn writeSummary(w: *Writer, rows: []const Row, files: usize, classes: Classes, g
     try w.print("{d} function{s} in {d} file{s}: {d} over a critical threshold (!!), {d} more over a warning one (!).", .{
         rows.len, plural(rows.len), files, plural(files), critical, warning,
     });
+    const not = listed.not_listed;
+    if (not.within_limits > 0) try w.print("{s}{d} within limits {s} not listed; --all lists every function.", .{ gap, not.within_limits, isAre(not.within_limits) });
+    if (not.past_top > 0) try w.print("{s}{d} more {s} not listed: --top {d} keeps the worst {d}.", .{ gap, not.past_top, isAre(not.past_top), listed.top.?, listed.top.? });
+    if (not.not_selected > 0) try w.print("{s}{d} not picked by --function {s} not listed.", .{ gap, not.not_selected, isAre(not.not_selected) });
     for (std.enums.values(Class)) |class| {
         for (rows) |row| {
             if (row.class == class) break;
@@ -245,6 +318,10 @@ fn plural(n: usize) []const u8 {
     return if (n == 1) "" else "s";
 }
 
+fn isAre(n: usize) []const u8 {
+    return if (n == 1) "is" else "are";
+}
+
 /// Rows for the format tests: one critical, one warning, two clean, out of
 /// order.
 fn sampleRows(arena: Allocator) ![]Row {
@@ -258,12 +335,13 @@ fn sampleRows(arena: Allocator) ![]Row {
     return rows;
 }
 
-fn expectWritten(format: Format, expected: []const u8) !void {
+fn expectWritten(format: Format, listing: Listing, expected: []const u8) !void {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var out: Writer.Allocating = .init(arena);
-    try write(&out.writer, format, try sampleRows(arena), 2, .defaults);
+    const rows = try sampleRows(arena);
+    try write(&out.writer, format, rows, try list(arena, rows, listing), 2, .defaults);
     try std.testing.expectEqualStrings(expected, out.written());
 }
 
@@ -303,7 +381,7 @@ test "rank: each row against its own class's thresholds" {
     try std.testing.expectEqual(0, rows[2].trips.len);
 
     var out: Writer.Allocating = .init(arena);
-    try writeSummary(&out.writer, &rows, 1, .defaults, "\n");
+    try writeSummary(&out.writer, &rows, .{ .rows = &rows }, 1, .defaults, "\n");
     try std.testing.expectEqualStrings(
         \\3 functions in 1 file: 1 over a critical threshold (!!), 1 more over a warning one (!).
         \\Thresholds for hot code (warning, critical): cyclomatic 8, 12; lines 40, 80; nesting 3; params 4.
@@ -313,8 +391,8 @@ test "rank: each row against its own class's thresholds" {
     , out.written());
 }
 
-test "write: text" {
-    try expectWritten(.text,
+test "write: text, every function" {
+    try expectWritten(.text, .{ .all = true },
         \\cyclomatic  lines  nesting  params  weighted  location       function
         \\      22!!  140!!      5!      2         3    src/b.zig:120  Parser.next
         \\       4     20        1       6!        8    src/a.zig:2    wide
@@ -327,8 +405,52 @@ test "write: text" {
     );
 }
 
+test "write: by default only what is over a threshold, and the footer says how to see the rest" {
+    try expectWritten(.text, .{},
+        \\cyclomatic  lines  nesting  params  weighted  location       function
+        \\      22!!  140!!      5!      2         3    src/b.zig:120  Parser.next
+        \\       4     20        1       6!        8    src/a.zig:2    wide
+        \\
+        \\4 functions in 2 files: 1 over a critical threshold (!!), 1 more over a warning one (!).
+        \\2 within limits are not listed; --all lists every function.
+        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
+        \\
+    );
+    try expectWritten(.text, .{ .top = 1 },
+        \\cyclomatic  lines  nesting  params  weighted  location       function
+        \\      22!!  140!!      5!      2         3    src/b.zig:120  Parser.next
+        \\
+        \\4 functions in 2 files: 1 over a critical threshold (!!), 1 more over a warning one (!).
+        \\2 within limits are not listed; --all lists every function.
+        \\1 more is not listed: --top 1 keeps the worst 1.
+        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
+        \\
+    );
+    // Picked, a function within limits is listed all the same.
+    try expectWritten(.text, .{ .picked = &.{ false, false, true, false } },
+        \\cyclomatic  lines  nesting  params  weighted  location      function
+        \\       3     12        1       0         0    src/a.zig:30  test "a|b"
+        \\
+        \\4 functions in 2 files: 1 over a critical threshold (!!), 1 more over a warning one (!).
+        \\3 not picked by --function are not listed.
+        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
+        \\
+    );
+}
+
+test "write: nothing to list is a summary alone" {
+    try expectWritten(.md, .{ .picked = &.{ false, false, false, false }, .top = 3 },
+        \\4 functions in 2 files: 1 over a critical threshold (!!), 1 more over a warning one (!).
+        \\
+        \\4 not picked by --function are not listed.
+        \\
+        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
+        \\
+    );
+}
+
 test "write: Markdown" {
-    try expectWritten(.md,
+    try expectWritten(.md, .{ .all = true },
         \\| cyclomatic | lines | nesting | params | weighted | location | function |
         \\| ---: | ---: | ---: | ---: | ---: | --- | --- |
         \\| 22 !! | 140 !! | 5 ! | 2 | 3 | `src/b.zig:120` | `Parser.next` |
@@ -348,12 +470,15 @@ test "write: JSON" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var out: Writer.Allocating = .init(arena);
-    try write(&out.writer, .json, try sampleRows(arena), 2, .defaults);
+    const rows = try sampleRows(arena);
+    try write(&out.writer, .json, rows, try list(arena, rows, .{ .all = true, .top = 3 }), 2, .defaults);
 
     // Read back, it says what the table says.
-    const Doc = struct { functions: []const Row, files: usize, thresholds: Classes };
+    const Doc = struct { functions: []const Row, measured: usize, not_listed: NotListed, files: usize, thresholds: Classes };
     const doc = try std.json.parseFromSliceLeaky(Doc, arena, out.written(), .{});
-    try std.testing.expectEqual(4, doc.functions.len);
+    try std.testing.expectEqual(3, doc.functions.len);
+    try std.testing.expectEqual(4, doc.measured);
+    try std.testing.expectEqual(NotListed{ .past_top = 1 }, doc.not_listed);
     try std.testing.expectEqual(2, doc.files);
     try std.testing.expectEqualStrings("Parser.next", doc.functions[0].name);
     try std.testing.expectEqualStrings("test \"a|b\"", doc.functions[2].name);

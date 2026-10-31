@@ -13,6 +13,7 @@ const lines = @import("lines.zig");
 const nesting = @import("nesting.zig");
 const params = @import("params.zig");
 const report = @import("report.zig");
+const select = @import("select.zig");
 const thresholds = @import("thresholds.zig");
 const Class = thresholds.Class;
 const Metric = thresholds.Metric;
@@ -20,25 +21,7 @@ const Thresholds = thresholds.Thresholds;
 const Trip = thresholds.Trip;
 
 /// What names a function on the command line.
-pub const Selector = union(enum) {
-    /// `path:line`: the function there, as the report prints it, or the
-    /// innermost one around that line.
-    at: struct { path: []const u8, line: u32 },
-    /// A qualified name, or its last segments (`record` for
-    /// `Validator.record`).
-    name: []const u8,
-
-    pub fn parse(arena: Allocator, text: []const u8) Allocator.Error!Selector {
-        if (std.mem.findScalarLast(u8, text, ':')) |colon| {
-            if (colon > 0) {
-                if (std.fmt.parseInt(u32, text[colon + 1 ..], 10)) |line| {
-                    if (line > 0) return .{ .at = .{ .path = try std.fs.path.resolveAlloc(arena, &.{text[0..colon]}), .line = line } };
-                } else |_| {}
-            }
-        }
-        return .{ .name = text };
-    }
-};
+pub const Selector = select.Selector;
 
 pub const Branch = struct { line: u32, column: u32, construct: []const u8, adds: u32, why: []const u8 };
 pub const Level = struct { line: u32, column: u32, construct: []const u8, level: u32 };
@@ -58,35 +41,7 @@ pub const Explanation = struct {
     params: struct { value: u32, weighted: u32, each: []const params.Param },
 };
 
-/// Line starts in a source, to turn a byte offset into a line and column.
-const LineIndex = struct {
-    starts: []const u32,
-
-    fn init(arena: Allocator, source: []const u8) Allocator.Error!LineIndex {
-        var starts: std.ArrayList(u32) = .empty;
-        try starts.append(arena, 0);
-        for (source, 0..) |c, i| if (c == '\n') try starts.append(arena, @intCast(i + 1));
-        return .{ .starts = starts.items };
-    }
-
-    /// The line and column of `offset`, both from 1; the column counts
-    /// bytes.
-    fn at(index: LineIndex, offset: u32) struct { line: u32, column: u32 } {
-        // The last line starting at or before `offset`.
-        var lo: usize = 0;
-        var hi: usize = index.starts.len;
-        while (hi - lo > 1) {
-            const mid = lo + (hi - lo) / 2;
-            if (index.starts[mid] <= offset) lo = mid else hi = mid;
-        }
-        return .{ .line = @intCast(lo + 1), .column = offset - index.starts[lo] + 1 };
-    }
-
-    fn ofToken(index: LineIndex, tree: *const Ast, token: Ast.TokenIndex) struct { line: u32, column: u32 } {
-        const loc = index.at(tree.tokenStart(token));
-        return .{ .line = loc.line, .column = loc.column };
-    }
-};
+const LineIndex = select.LineIndex;
 
 /// Every reason for `function`'s numbers. The strings are copied into
 /// `arena`, so the explanation outlives `tree`; `scratch` is working
@@ -231,13 +186,11 @@ pub const Search = struct {
                 }
             },
             .name => |name| for (listed) |function| {
-                const exact = std.mem.eql(u8, function.name, name);
-                const tail = function.name.len > name.len and std.mem.endsWith(u8, function.name, name) and
-                    function.name[function.name.len - name.len - 1] == '.';
-                if (!exact and !tail) continue;
+                const match = select.matchName(function.name, name);
+                if (match == .none) continue;
                 if (index == null) index = try LineIndex.init(scratch, tree.source);
                 const e = try build(arena, scratch, tree, index.?, path, function, class, limits);
-                try (if (exact) &found.exact else &found.partial).append(arena, e);
+                try (if (match == .exact) &found.exact else &found.partial).append(arena, e);
             },
         };
     }
@@ -466,18 +419,6 @@ fn explainSample(arena: Allocator, texts: []const []const u8) !struct { explanat
     try search.file(arena, arena, "a.zig", &tree, .normal, thresholds.Classes.defaults.normal);
     const r = try search.results(arena);
     return .{ .explanations = r.explanations, .all_found = r.all_found };
-}
-
-test "Selector: path:line, or a name" {
-    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const at = (try Selector.parse(arena, "./src/a.zig:12")).at;
-    try std.testing.expectEqualStrings(try std.fs.path.resolveAlloc(arena, &.{"src/a.zig"}), at.path);
-    try std.testing.expectEqual(12, at.line);
-    try std.testing.expectEqualStrings("Validator.record", (try Selector.parse(arena, "Validator.record")).name);
-    try std.testing.expectEqualStrings("a.zig:", (try Selector.parse(arena, "a.zig:")).name);
-    try std.testing.expectEqualStrings("a.zig:x", (try Selector.parse(arena, "a.zig:x")).name);
 }
 
 test "Search: by the line the report prints, by any line inside, by a name or its end" {
