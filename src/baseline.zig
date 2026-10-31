@@ -7,7 +7,7 @@
 //! The file is plain text, a line per function, sorted, so that a change
 //! to it reads as a diff. Lines starting `#` are comments. Each other line
 //! is tab-separated: the path (with `/`), the qualified name, then
-//! cyclomatic, lines, nesting, params and params_weighted. A tab, newline,
+//! cyclomatic, cognitive, lines, nesting, params and params_weighted. A tab, newline,
 //! carriage return or backslash in a field is written `\t`, `\n`, `\r` or
 //! `\\`.
 //!
@@ -33,7 +33,7 @@ const header =
     \\# gnarl baseline: the functions over a critical threshold when it was
     \\# written. gnarl --check fails a function that is new and over one, or
     \\# above its number here; gnarl --update-baseline rewrites this file.
-    \\# path, name, cyclomatic, lines, nesting, params, params_weighted
+    \\# path, name, cyclomatic, cognitive, lines, nesting, params, params_weighted
     \\
 ;
 
@@ -69,27 +69,40 @@ pub fn parse(arena: Allocator, text: []const u8, problem: *Problem) error{ OutOf
         number += 1;
         const line = std.mem.trimEnd(u8, raw, "\r");
         if (line.len == 0 or line[0] == '#') continue;
-        var fields: [2 + metrics.len][]const u8 = undefined;
-        var n: usize = 0;
-        var it = std.mem.splitScalar(u8, line, '\t');
-        while (it.next()) |field| : (n += 1) {
-            if (n == fields.len) return fail(problem, number, "more than 7 fields");
-            fields[n] = unescape(arena, field) catch |err| switch (err) {
-                error.OutOfMemory => |e| return e,
-                error.BadEscape => return fail(problem, number, "a backslash that is not \\t, \\n, \\r or \\\\"),
-            };
-        }
-        if (n != fields.len) return fail(problem, number, "fewer than 7 fields: path, name and the five metrics, tab-separated");
-        var entry: Entry = .{ .key = try std.mem.concat(arena, u8, &.{ fields[0], "\t", fields[1] }), .values = undefined };
-        for (&entry.values, fields[2..]) |*value, field| {
-            value.* = std.fmt.parseInt(u32, field, 10) catch return fail(problem, number, "a metric that is not a number");
-        }
+        const entry = switch (try parseLine(arena, line)) {
+            .entry => |entry| entry,
+            .bad => |message| return fail(problem, number, message),
+        };
         const seen = try by_key.getOrPut(arena, entry.key);
         if (seen.found_existing) return fail(problem, number, "a function given twice");
         seen.value_ptr.* = entries.items.len;
         try entries.append(arena, entry);
     }
     return .{ .entries = entries.items, .by_key = by_key };
+}
+
+/// A line of a baseline file read: its entry, or why it cannot be.
+const Line = union(enum) { entry: Entry, bad: []const u8 };
+
+fn parseLine(arena: Allocator, line: []const u8) Allocator.Error!Line {
+    var fields: [2 + metrics.len][]const u8 = undefined;
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, line, '\t');
+    while (it.next()) |field| : (n += 1) {
+        if (n == fields.len) return .{ .bad = "more than 8 fields" };
+        fields[n] = unescape(arena, field) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.BadEscape => return .{ .bad = "a backslash that is not \\t, \\n, \\r or \\\\" },
+        };
+    }
+    // Written before cognitive complexity was measured.
+    if (n == fields.len - 1) return .{ .bad = "7 fields, a baseline from before cognitive complexity; gnarl --update-baseline rewrites it" };
+    if (n != fields.len) return .{ .bad = "fewer than 8 fields: path, name and the six metrics, tab-separated" };
+    var entry: Entry = .{ .key = try std.mem.concat(arena, u8, &.{ fields[0], "\t", fields[1] }), .values = undefined };
+    for (&entry.values, fields[2..]) |*value, field| {
+        value.* = std.fmt.parseInt(u32, field, 10) catch return .{ .bad = "a metric that is not a number" };
+    }
+    return .{ .entry = entry };
 }
 
 fn fail(problem: *Problem, line: u32, message: []const u8) error{Invalid} {
@@ -263,7 +276,7 @@ pub fn functionsFailing(failures: []const Failure) usize {
 }
 
 fn sampleRow(path: []const u8, line: u32, name: []const u8, cyclomatic: u32, lines: u32) Row {
-    return .{ .path = path, .line = line, .column = 4, .name = name, .kind = .@"fn", .cyclomatic = cyclomatic, .lines = lines, .nesting = 0, .params = 0, .params_weighted = 0 };
+    return .{ .path = path, .line = line, .column = 4, .name = name, .kind = .@"fn", .cyclomatic = cyclomatic, .cognitive = 0, .lines = lines, .nesting = 0, .params = 0, .params_weighted = 0 };
 }
 
 test "write, then read back: the functions over a critical threshold, sorted, a second of one name #2" {
@@ -281,10 +294,10 @@ test "write, then read back: the functions over a critical threshold, sorted, a 
     var out: std.Io.Writer.Allocating = .init(arena);
     try std.testing.expectEqual(4, try write(arena, &out.writer, &rows));
     try std.testing.expectEqualStrings(header ++
-        "src/a.zig\tS.a\t20\t120\t0\t0\t0\n" ++
-        "src/a.zig\tS.a#2\t16\t10\t0\t0\t0\n" ++
-        "src/a.zig\ttest \"tab\\there\"\t40\t3\t0\t0\t0\n" ++
-        "src/b.zig\tparse\t30\t20\t0\t0\t0\n", out.written());
+        "src/a.zig\tS.a\t20\t0\t120\t0\t0\t0\n" ++
+        "src/a.zig\tS.a#2\t16\t0\t10\t0\t0\t0\n" ++
+        "src/a.zig\ttest \"tab\\there\"\t40\t0\t3\t0\t0\t0\n" ++
+        "src/b.zig\tparse\t30\t0\t20\t0\t0\t0\n", out.written());
 
     var problem: Problem = undefined;
     const b = try parse(arena, out.written(), &problem);
@@ -300,9 +313,12 @@ test "parse: a bad line says which and why" {
     var problem: Problem = undefined;
     try std.testing.expectError(error.Invalid, parse(arena, "# x\nsrc/a.zig\tf\t1\t2\n", &problem));
     try std.testing.expectEqual(2, problem.line);
-    try std.testing.expectError(error.Invalid, parse(arena, "a\tf\t1\t2\t3\t4\tfive\n", &problem));
+    try std.testing.expectError(error.Invalid, parse(arena, "a\tf\t1\t2\t3\t4\t5\tsix\n", &problem));
     try std.testing.expectEqualStrings("a metric that is not a number", problem.message);
-    try std.testing.expectError(error.Invalid, parse(arena, "a\tf\t1\t1\t1\t1\t1\na\tf\t2\t2\t2\t2\t2\n", &problem));
+    // A line of the format before cognitive complexity says how to rewrite it.
+    try std.testing.expectError(error.Invalid, parse(arena, "a\tf\t1\t1\t1\t1\t1\n", &problem));
+    try std.testing.expectEqualStrings("7 fields, a baseline from before cognitive complexity; gnarl --update-baseline rewrites it", problem.message);
+    try std.testing.expectError(error.Invalid, parse(arena, "a\tf\t1\t1\t1\t1\t1\t1\na\tf\t2\t2\t2\t2\t2\t2\n", &problem));
     try std.testing.expectEqualStrings("a function given twice", problem.message);
     try std.testing.expectEqual(0, (try parse(arena, "", &problem)).entries.len);
 }
@@ -314,11 +330,11 @@ test "ratchet: new over a limit, above its baseline, newly over another; within 
     var problem: Problem = undefined;
     // Held: worse at cyclomatic 30, lines 120; kept at 20, 60; improved
     // from 40; gone; and one in a file not read this time.
-    const base = try parse(arena, "src/a.zig\tworse\t30\t120\t0\t0\t0\n" ++
-        "src/a.zig\tkept\t20\t60\t0\t0\t0\n" ++
-        "src/a.zig\tbetter\t40\t10\t0\t0\t0\n" ++
-        "src/a.zig\tgone\t50\t10\t0\t0\t0\n" ++
-        "src/other.zig\telsewhere\t50\t10\t0\t0\t0\n", &problem);
+    const base = try parse(arena, "src/a.zig\tworse\t30\t0\t120\t0\t0\t0\n" ++
+        "src/a.zig\tkept\t20\t0\t60\t0\t0\t0\n" ++
+        "src/a.zig\tbetter\t40\t0\t10\t0\t0\t0\n" ++
+        "src/a.zig\tgone\t50\t0\t10\t0\t0\t0\n" ++
+        "src/other.zig\telsewhere\t50\t0\t10\t0\t0\t0\n", &problem);
     var rows = [_]Row{
         sampleRow("src/a.zig", 1, "worse", 31, 120),
         sampleRow("src/a.zig", 20, "kept", 20, 101),

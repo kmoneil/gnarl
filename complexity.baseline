@@ -1,18 +1,22 @@
 # gnarl baseline: the functions over a critical threshold when it was
 # written. gnarl --check fails a function that is new and over one, or
 # above its number here; gnarl --update-baseline rewrites this file.
-# path, name, cyclomatic, lines, nesting, params, params_weighted
-src/baseline.zig	ratchet	18	36	5	4	4
-src/children.zig	append	33	244	2	3	3
-src/cyclomatic.zig	note	24	43	3	5	5
-src/diff.zig	writeTable	19	50	4	4	4
-src/explain.zig	Search.file	16	27	4	4	4
-src/formats.zig	readDelimited	23	35	4	2	2
-src/glob.zig	match	21	17	3	2	2
-src/lines.zig	explain	17	46	2	2	2
-src/main.zig	main	61	131	4	1	1
-src/main.zig	parseArgs	55	88	3	1	1
-src/main.zig	runDiff	18	55	3	7	7
-src/nesting.zig	Walk.visit	24	75	3	1	1
-src/select.zig	pick	18	29	5	2	2
-src/walk.zig	collect	19	36	4	5	5
+# path, name, cyclomatic, cognitive, lines, nesting, params, params_weighted
+src/baseline.zig	ratchet	18	40	36	5	4	4
+src/children.zig	append	33	3	244	2	3	3
+src/cyclomatic.zig	note	24	31	43	3	5	5
+src/diff.zig	writeTable	19	41	50	4	4	4
+src/explain.zig	Search.file	16	41	27	4	4	4
+src/explain.zig	test "write: xml, csv and tsv say what json does"	13	26	50	4	0	0
+src/formats.zig	XmlReader.element	14	27	30	3	0	0
+src/formats.zig	readDelimited	23	29	35	4	2	2
+src/glob.zig	match	21	25	17	3	2	2
+src/lines.zig	explain	17	22	46	2	2	2
+src/main.zig	main	61	89	131	4	1	1
+src/main.zig	parseArgs	55	84	88	3	1	1
+src/main.zig	runDiff	18	31	55	3	7	7
+src/messages.zig	writeXml	11	39	25	6	2	2
+src/nesting.zig	Walk.visit	24	31	75	3	1	1
+src/params.zig	walk	14	32	26	4	3	3
+src/select.zig	pick	18	48	29	5	2	2
+src/walk.zig	collect	19	40	36	4	5	5

@@ -5,7 +5,7 @@ const std = @import("std");
 
 /// A metric with limits. Each names a field of `Thresholds` and of a
 /// report row.
-pub const Metric = enum { cyclomatic, lines, nesting, params, params_weighted };
+pub const Metric = enum { cyclomatic, cognitive, lines, nesting, params, params_weighted };
 
 pub const Level = enum { warning, critical };
 
@@ -18,6 +18,7 @@ pub const Limit = struct {
 
 pub const Thresholds = struct {
     cyclomatic: Limit = .{},
+    cognitive: Limit = .{},
     lines: Limit = .{},
     nesting: Limit = .{},
     params: Limit = .{},
@@ -51,12 +52,14 @@ pub const Classes = struct {
     pub const defaults: Classes = .{
         .hot = .{
             .cyclomatic = .{ .warning = 8, .critical = 12 },
+            .cognitive = .{ .warning = 10, .critical = 15 },
             .lines = .{ .warning = 40, .critical = 80 },
             .nesting = .{ .warning = 3 },
             .params = .{ .warning = 4 },
         },
         .normal = .{
             .cyclomatic = .{ .warning = 10, .critical = 15 },
+            .cognitive = .{ .warning = 15, .critical = 25 },
             .lines = .{ .warning = 50, .critical = 100 },
             .nesting = .{ .warning = 4 },
             .params = .{ .warning = 4 },
@@ -64,6 +67,7 @@ pub const Classes = struct {
         // Only what is far past any class's limits.
         .cold = .{
             .cyclomatic = .{ .critical = 20 },
+            .cognitive = .{ .critical = 35 },
         },
     };
 
@@ -100,11 +104,16 @@ test "over: the worst limit passed, and only past it" {
     try std.testing.expectEqual(null, (Thresholds{}).over(.lines, 1000));
 }
 
-test "the classes: hot is stricter than normal, cold only past 20" {
+test "the classes: hot is stricter than normal, cold only past 20 (cognitive 35)" {
     const c = Classes.defaults;
     try std.testing.expectEqual(.critical, c.get(.hot).over(.cyclomatic, 13).?.level);
     try std.testing.expectEqual(.warning, c.get(.normal).over(.cyclomatic, 13).?.level);
     try std.testing.expectEqual(null, c.get(.cold).over(.cyclomatic, 20));
     try std.testing.expectEqual(.critical, c.get(.cold).over(.cyclomatic, 21).?.level);
     try std.testing.expectEqual(null, c.get(.cold).over(.lines, 500));
+    try std.testing.expectEqual(.critical, c.get(.hot).over(.cognitive, 16).?.level);
+    try std.testing.expectEqual(.warning, c.get(.normal).over(.cognitive, 16).?.level);
+    try std.testing.expectEqual(.critical, c.get(.normal).over(.cognitive, 26).?.level);
+    try std.testing.expectEqual(null, c.get(.cold).over(.cognitive, 35));
+    try std.testing.expectEqual(.critical, c.get(.cold).over(.cognitive, 36).?.level);
 }

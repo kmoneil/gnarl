@@ -1,50 +1,50 @@
-37 Dialect.format cyclomatic=4 lines=12 nesting=1 params=1 weighted=1
-54 Dialect.jsonStringify cyclomatic=3 lines=16 nesting=1 params=1 weighted=1
-90 Pins.complete cyclomatic=5 lines=3 nesting=0 params=0 weighted=0
-98 writeByte cyclomatic=3 lines=5 nesting=1 params=2 weighted=2
-132 Warnings.jsonStringify cyclomatic=3 lines=5 nesting=2 params=1 weighted=1
-183 Verdict.jsonStringify cyclomatic=5 lines=31 nesting=2 params=1 weighted=1
-238 sniff cyclomatic=35 lines=77 nesting=4 params=3 weighted=3
-342 confidenceOf cyclomatic=10 lines=7 nesting=2 params=3 weighted=3
-352 pushRunner cyclomatic=5 lines=6 nesting=1 params=2 weighted=2
-366 Delimiters.append cyclomatic=1 lines=3 nesting=0 params=1 weighted=1
-371 Delimiters.slice cyclomatic=1 lines=2 nesting=0 params=0 weighted=0
-378 candidateDelimiters cyclomatic=18 lines=21 nesting=3 params=2 weighted=2
-405 hasBackslashQuote cyclomatic=4 lines=5 nesting=2 params=2 weighted=2
-420 Readings.slice cyclomatic=1 lines=2 nesting=0 params=0 weighted=0
-429 readingsOf cyclomatic=10 lines=18 nesting=4 params=4 weighted=4
-455 pick cyclomatic=16 lines=16 nesting=3 params=1 weighted=1
-501 quoteIndex cyclomatic=3 lines=2 nesting=1 params=1 weighted=1
-522 score cyclomatic=38 lines=67 nesting=3 params=6 weighted=6
-609 lines cyclomatic=12 lines=19 nesting=3 params=3 weighted=3
-634 notUtf8 cyclomatic=7 lines=7 nesting=2 params=2 weighted=2
-654 isHeader cyclomatic=61 lines=95 nesting=5 params=4 weighted=4
-786 textHeader cyclomatic=22 lines=38 nesting=3 params=5 weighted=5
-833 value cyclomatic=1 lines=3 nesting=0 params=4 weighted=4
-840 looksTyped cyclomatic=20 lines=21 nesting=3 params=1 weighted=1
-866 test "format writes each dimension" cyclomatic=1 lines=7 nesting=0 params=0 weighted=0
-876 test "format writes unprintable bytes the way --delimiter takes them" cyclomatic=1 lines=14 nesting=0 params=0 weighted=0
-894 test "jsonStringify matches the report's dialect object" cyclomatic=1 lines=10 nesting=0 params=0 weighted=0
-906 sniffed cyclomatic=1 lines=2 nesting=0 params=2 weighted=2
-910 test "sniff settles a plain CSV with a header" cyclomatic=1 lines=5 nesting=0 params=0 weighted=0
-917 test "sniff reads a BOM, and refuses UTF-16 and binary data" cyclomatic=1 lines=7 nesting=0 params=0 weighted=0
-926 test "sniff keeps a pinned dimension and settles the rest" cyclomatic=1 lines=7 nesting=0 params=0 weighted=0
-935 test "sniff scores a pinned quote it would not guess, and refuses pins that leave nothing" cyclomatic=1 lines=8 nesting=0 params=0 weighted=0
-945 test "sniff picks backslash escaping when the escaped quotes need it" cyclomatic=1 lines=4 nesting=0 params=0 weighted=0
-951 test "a clean quote beats a wider shape that reads its characters as data" cyclomatic=1 lines=6 nesting=0 params=0 weighted=0
-959 test "a header repeated below, as joined files have, is still a header" cyclomatic=1 lines=3 nesting=0 params=0 weighted=0
-964 test "a delimiter the header lacks loses to one it has" cyclomatic=1 lines=13 nesting=0 params=0 weighted=0
-983 test "a byte far more often in the header than in the rows is not the delimiter" cyclomatic=1 lines=13 nesting=0 params=0 weighted=0
-1003 test "a header and nothing else: its delimiter by the prior order, and a header" cyclomatic=1 lines=7 nesting=0 params=0 weighted=0
-1017 test "a header a name short of its rows is said; a trailing delimiter is not that" cyclomatic=1 lines=11 nesting=0 params=0 weighted=0
-1033 test "a header wider than its rows: a trailing delimiter is fine, names past them are said" cyclomatic=4 lines=19 nesting=1 params=0 weighted=0
-1057 test "fixed-length records: their padding is not a delimiter, nor hides a header" cyclomatic=2 lines=10 nesting=1 params=0 weighted=0
-1070 test "a header may leave a few columns unnamed" cyclomatic=3 lines=10 nesting=1 params=0 weighted=0
-1083 test "over columns of text, a header is told by values it does not share" cyclomatic=6 lines=12 nesting=2 params=0 weighted=0
-1100 test "a sample that is not UTF-8 is warned of, unless another encoding is given" cyclomatic=1 lines=6 nesting=0 params=0 weighted=0
-1109 test "a quote that wraps every field wins, though a few of its fields break" cyclomatic=4 lines=9 nesting=2 params=0 weighted=0
-1122 test "ragged records are low confidence, not a wrong high" cyclomatic=1 lines=3 nesting=0 params=0 weighted=0
-1127 test "a schema whose width the winner has keeps ragged rows from unsettling it" cyclomatic=1 lines=6 nesting=0 params=0 weighted=0
-1135 test "a header missing a schema column, or with an extra, is still a header" cyclomatic=1 lines=5 nesting=0 params=0 weighted=0
-1142 test "a schema's names make row 1 a header, and its count settles the delimiter" cyclomatic=1 lines=5 nesting=0 params=0 weighted=0
-1150 test "looksTyped" cyclomatic=5 lines=9 nesting=2 params=0 weighted=0
+37 Dialect.format cyclomatic=4 cognitive=3 lines=12 nesting=1 params=1 weighted=1
+54 Dialect.jsonStringify cyclomatic=3 cognitive=2 lines=16 nesting=1 params=1 weighted=1
+90 Pins.complete cyclomatic=5 cognitive=1 lines=3 nesting=0 params=0 weighted=0
+98 writeByte cyclomatic=3 cognitive=1 lines=5 nesting=1 params=2 weighted=2
+132 Warnings.jsonStringify cyclomatic=3 cognitive=3 lines=5 nesting=2 params=1 weighted=1
+183 Verdict.jsonStringify cyclomatic=5 cognitive=5 lines=31 nesting=2 params=1 weighted=1
+238 sniff cyclomatic=35 cognitive=43 lines=77 nesting=4 params=3 weighted=3
+342 confidenceOf cyclomatic=10 cognitive=10 lines=7 nesting=2 params=3 weighted=3
+352 pushRunner cyclomatic=5 cognitive=4 lines=6 nesting=1 params=2 weighted=2
+366 Delimiters.append cyclomatic=1 cognitive=0 lines=3 nesting=0 params=1 weighted=1
+371 Delimiters.slice cyclomatic=1 cognitive=0 lines=2 nesting=0 params=0 weighted=0
+378 candidateDelimiters cyclomatic=18 cognitive=26 lines=21 nesting=3 params=2 weighted=2
+405 hasBackslashQuote cyclomatic=4 cognitive=5 lines=5 nesting=2 params=2 weighted=2
+420 Readings.slice cyclomatic=1 cognitive=0 lines=2 nesting=0 params=0 weighted=0
+429 readingsOf cyclomatic=10 cognitive=21 lines=18 nesting=4 params=4 weighted=4
+455 pick cyclomatic=16 cognitive=24 lines=16 nesting=3 params=1 weighted=1
+501 quoteIndex cyclomatic=3 cognitive=2 lines=2 nesting=1 params=1 weighted=1
+522 score cyclomatic=38 cognitive=50 lines=67 nesting=3 params=6 weighted=6
+609 lines cyclomatic=12 cognitive=19 lines=19 nesting=3 params=3 weighted=3
+634 notUtf8 cyclomatic=7 cognitive=7 lines=7 nesting=2 params=2 weighted=2
+654 isHeader cyclomatic=61 cognitive=124 lines=95 nesting=5 params=4 weighted=4
+786 textHeader cyclomatic=22 cognitive=37 lines=38 nesting=3 params=5 weighted=5
+833 value cyclomatic=1 cognitive=0 lines=3 nesting=0 params=4 weighted=4
+840 looksTyped cyclomatic=20 cognitive=21 lines=21 nesting=3 params=1 weighted=1
+866 test "format writes each dimension" cyclomatic=1 cognitive=0 lines=7 nesting=0 params=0 weighted=0
+876 test "format writes unprintable bytes the way --delimiter takes them" cyclomatic=1 cognitive=0 lines=14 nesting=0 params=0 weighted=0
+894 test "jsonStringify matches the report's dialect object" cyclomatic=1 cognitive=0 lines=10 nesting=0 params=0 weighted=0
+906 sniffed cyclomatic=1 cognitive=0 lines=2 nesting=0 params=2 weighted=2
+910 test "sniff settles a plain CSV with a header" cyclomatic=1 cognitive=0 lines=5 nesting=0 params=0 weighted=0
+917 test "sniff reads a BOM, and refuses UTF-16 and binary data" cyclomatic=1 cognitive=0 lines=7 nesting=0 params=0 weighted=0
+926 test "sniff keeps a pinned dimension and settles the rest" cyclomatic=1 cognitive=0 lines=7 nesting=0 params=0 weighted=0
+935 test "sniff scores a pinned quote it would not guess, and refuses pins that leave nothing" cyclomatic=1 cognitive=0 lines=8 nesting=0 params=0 weighted=0
+945 test "sniff picks backslash escaping when the escaped quotes need it" cyclomatic=1 cognitive=0 lines=4 nesting=0 params=0 weighted=0
+951 test "a clean quote beats a wider shape that reads its characters as data" cyclomatic=1 cognitive=0 lines=6 nesting=0 params=0 weighted=0
+959 test "a header repeated below, as joined files have, is still a header" cyclomatic=1 cognitive=0 lines=3 nesting=0 params=0 weighted=0
+964 test "a delimiter the header lacks loses to one it has" cyclomatic=1 cognitive=0 lines=13 nesting=0 params=0 weighted=0
+983 test "a byte far more often in the header than in the rows is not the delimiter" cyclomatic=1 cognitive=0 lines=13 nesting=0 params=0 weighted=0
+1003 test "a header and nothing else: its delimiter by the prior order, and a header" cyclomatic=1 cognitive=0 lines=7 nesting=0 params=0 weighted=0
+1017 test "a header a name short of its rows is said; a trailing delimiter is not that" cyclomatic=1 cognitive=0 lines=11 nesting=0 params=0 weighted=0
+1033 test "a header wider than its rows: a trailing delimiter is fine, names past them are said" cyclomatic=4 cognitive=3 lines=19 nesting=1 params=0 weighted=0
+1057 test "fixed-length records: their padding is not a delimiter, nor hides a header" cyclomatic=2 cognitive=1 lines=10 nesting=1 params=0 weighted=0
+1070 test "a header may leave a few columns unnamed" cyclomatic=3 cognitive=2 lines=10 nesting=1 params=0 weighted=0
+1083 test "over columns of text, a header is told by values it does not share" cyclomatic=6 cognitive=7 lines=12 nesting=2 params=0 weighted=0
+1100 test "a sample that is not UTF-8 is warned of, unless another encoding is given" cyclomatic=1 cognitive=0 lines=6 nesting=0 params=0 weighted=0
+1109 test "a quote that wraps every field wins, though a few of its fields break" cyclomatic=4 cognitive=4 lines=9 nesting=2 params=0 weighted=0
+1122 test "ragged records are low confidence, not a wrong high" cyclomatic=1 cognitive=0 lines=3 nesting=0 params=0 weighted=0
+1127 test "a schema whose width the winner has keeps ragged rows from unsettling it" cyclomatic=1 cognitive=0 lines=6 nesting=0 params=0 weighted=0
+1135 test "a header missing a schema column, or with an extra, is still a header" cyclomatic=1 cognitive=0 lines=5 nesting=0 params=0 weighted=0
+1142 test "a schema's names make row 1 a header, and its count settles the delimiter" cyclomatic=1 cognitive=0 lines=5 nesting=0 params=0 weighted=0
+1150 test "looksTyped" cyclomatic=5 cognitive=8 lines=9 nesting=2 params=0 weighted=0

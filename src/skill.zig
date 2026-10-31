@@ -7,6 +7,7 @@ const Io = std.Io;
 const Ast = std.zig.Ast;
 const Allocator = std.mem.Allocator;
 
+const cognitive = @import("cognitive.zig");
 const config = @import("config.zig");
 const cyclomatic = @import("cyclomatic.zig");
 const functions = @import("functions.zig");
@@ -87,6 +88,13 @@ test "every example in the rules' tables measures as the skill says" {
                 std.debug.print("skill: `{s}`: says params {d} weighted {d}, gnarl gives {d} and {d}\n", .{ code, a, b, p.count, p.weighted });
                 return error.TestUnexpectedResult;
             }
+        } else if (std.mem.eql(u8, row.header, "| Code | cyclomatic | cognitive |")) {
+            const cc = try cyclomatic.count(arena, &tree, function.node);
+            const cog = try cognitive.count(arena, &tree, function.node);
+            if (cc != a or cog != b) {
+                std.debug.print("skill: `{s}`: says cyclomatic {d} cognitive {d}, gnarl gives {d} and {d}\n", .{ code, a, b, cc, cog });
+                return error.TestUnexpectedResult;
+            }
         } else if (std.mem.eql(u8, row.header, "| Code | cyclomatic | nesting |")) {
             const cc = try cyclomatic.count(arena, &tree, function.node);
             const depth = try nesting.depth(arena, &tree, function.node);
@@ -97,7 +105,7 @@ test "every example in the rules' tables measures as the skill says" {
         } else return error.UnknownTable;
         checked += 1;
     }
-    try std.testing.expectEqual(18, checked);
+    try std.testing.expectEqual(25, checked);
 }
 
 test "the worked example measures as the skill says" {
@@ -122,8 +130,8 @@ test "the worked example measures as the skill says" {
         if (std.mem.eql(u8, r.name, claim[0..colon])) break r;
     } else return error.NoSuchFunction;
     var got: std.Io.Writer.Allocating = .init(arena);
-    try got.writer.print("{s}: cyclomatic {d}, lines {d}, nesting {d}, params {d}, weighted {d}.", .{
-        row.name, row.cyclomatic, row.lines, row.nesting, row.params, row.params_weighted,
+    try got.writer.print("{s}: cyclomatic {d}, cognitive {d}, lines {d}, nesting {d}, params {d}, weighted {d}.", .{
+        row.name, row.cyclomatic, row.cognitive, row.lines, row.nesting, row.params, row.params_weighted,
     });
     try std.testing.expectEqualStrings(claim, got.written());
 }
@@ -133,7 +141,7 @@ test "the default thresholds and the complexity.zon example are as gnarl has the
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const header = "| | cyclomatic | lines | nesting | params |";
+    const header = "| | cyclomatic | cognitive | lines | nesting | params |";
     var lines = std.mem.splitScalar(u8, text[std.mem.find(u8, text, header).?..], '\n');
     _ = lines.next();
     _ = lines.next();
@@ -143,7 +151,7 @@ test "the default thresholds and the complexity.zon example are as gnarl has the
         _ = cells.next();
         try std.testing.expectEqualStrings(@tagName(class), std.mem.trim(u8, cells.next().?, " "));
         const limits = thresholds.Classes.defaults.get(class);
-        for ([_]thresholds.Metric{ .cyclomatic, .lines, .nesting, .params }) |metric| {
+        for ([_]thresholds.Metric{ .cyclomatic, .cognitive, .lines, .nesting, .params }) |metric| {
             const cell = std.mem.trim(u8, cells.next().?, " ");
             var want: thresholds.Limit = .{};
             if (std.mem.cutPrefix(u8, cell, "critical ")) |n| {

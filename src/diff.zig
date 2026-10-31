@@ -46,6 +46,7 @@ pub const Change = enum {
 
 pub const Values = struct {
     cyclomatic: u32,
+    cognitive: u32,
     lines: u32,
     nesting: u32,
     params: u32,
@@ -334,7 +335,12 @@ pub fn write(w: *Writer, format: report.Format, touched: []const Touched, c: Con
     }
 }
 
-const headers = [_][]const u8{ "change", "cyclomatic", "lines", "nesting", "params", "weighted", "location", "function" };
+const headers = [_][]const u8{ "change", "cyclomatic", "cognitive", "lines", "nesting", "params", "weighted", "location", "function" };
+/// Where `location` is in `headers`: after the change and each metric.
+const location_column = 1 + metrics.len;
+comptime {
+    std.debug.assert(std.mem.eql(u8, headers[location_column], "location"));
+}
 
 /// A metric's cell: `12 -> 16!!` when it moved, the one number when it
 /// did not or the function is added or removed, marked as the report marks
@@ -362,7 +368,7 @@ fn writeTable(w: *Writer, touched: []const Touched, c: Context, kind: enum { tex
         for (touched) |t| {
             widths[0] = @max(widths[0], @tagName(t.change).len);
             for (metrics, 1..) |m, i| widths[i] = @max(widths[i], cell(&cells, t, m).len);
-            widths[6] = @max(widths[6], std.fmt.count("{s}:{d}", .{ t.path, t.line }));
+            widths[location_column] = @max(widths[location_column], std.fmt.count("{s}:{d}", .{ t.path, t.line }));
         }
         switch (kind) {
             .text => {
@@ -380,14 +386,14 @@ fn writeTable(w: *Writer, touched: []const Touched, c: Context, kind: enum { tex
                         try w.splatByteAll(' ', widths[i] - text.len + 2);
                     }
                     try w.print("{s}:{d}", .{ t.path, t.line });
-                    try w.splatByteAll(' ', widths[6] - std.fmt.count("{s}:{d}", .{ t.path, t.line }) + 2);
+                    try w.splatByteAll(' ', widths[location_column] - std.fmt.count("{s}:{d}", .{ t.path, t.line }) + 2);
                     try w.print("{s}\n", .{t.name});
                 }
             },
             .md => {
                 try w.writeAll("|");
                 for (headers) |h| try w.print(" {s} |", .{h});
-                try w.writeAll("\n| --- | ---: | ---: | ---: | ---: | ---: | --- | --- |\n");
+                try w.writeAll("\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |\n");
                 for (touched) |t| {
                     try w.print("| {t} |", .{t.change});
                     for (metrics) |m| try w.print(" {s} |", .{cell(&cells, t, m)});
@@ -483,9 +489,10 @@ fn writeXml(w: *Writer, touched: []const Touched, c: Context) Writer.Error!void 
 }
 
 pub const delimited_columns = [_][]const u8{
-    "path",              "line",             "name",                   "kind",                  "class",          "change",
-    "cyclomatic_before", "cyclomatic_after", "lines_before",           "lines_after",           "nesting_before", "nesting_after",
-    "params_before",     "params_after",     "params_weighted_before", "params_weighted_after", "over",
+    "path",              "line",             "name",             "kind",            "class",                  "change",
+    "cyclomatic_before", "cyclomatic_after", "cognitive_before", "cognitive_after", "lines_before",           "lines_after",
+    "nesting_before",    "nesting_after",    "params_before",    "params_after",    "params_weighted_before", "params_weighted_after",
+    "over",
 };
 
 /// A header, then a row per function; a side the function does not have
@@ -589,7 +596,7 @@ test "write: the table, and the summary saying when nothing got worse" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const before: Values = .{ .cyclomatic = 12, .lines = 40, .nesting = 3, .params = 2, .params_weighted = 2 };
+    const before: Values = .{ .cyclomatic = 12, .cognitive = 9, .lines = 40, .nesting = 3, .params = 2, .params_weighted = 2 };
     var after = before;
     after.cyclomatic = 16;
     const touched = [_]Touched{
@@ -600,13 +607,13 @@ test "write: the table, and the summary saying when nothing got worse" {
     var out: Writer.Allocating = .init(arena);
     try write(&out.writer, .text, &touched, context);
     try std.testing.expectEqualStrings(
-        \\change   cyclomatic  lines  nesting  params  weighted  location  function
-        \\worse    12 -> 16!!  40     3        2       2         a.zig:3   grows
-        \\removed  12          40     3        2       2         b.zig:9   gone
+        \\change   cyclomatic  cognitive  lines  nesting  params  weighted  location  function
+        \\worse    12 -> 16!!  9          40     3        2       2         a.zig:3   grows
+        \\removed  12          9          40     3        2       2         b.zig:9   gone
         \\
         \\2 functions touched in 2 files since main: 1 worse, 0 added, 0 the same, 0 better, 1 removed.
         \\gnarl --explain a.zig:3 says why grows, the worst of those that got worse, scores what it does now.
-        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
+        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; cognitive 15, 25; lines 50, 100; nesting 4; params 4.
         \\
     , out.written());
 

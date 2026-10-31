@@ -45,8 +45,8 @@ names, and elements for what is a list or an object in json.
     there: renamed, moved or deleted.
 - `thresholds`: the limits in force, by class of code:
   - `hot`, `normal`, `cold`: each class's limits, by metric:
-    - `cyclomatic`, `lines`, `nesting`, `params`, `params_weighted`:
-      each metric's limits:
+    - `cyclomatic`, `cognitive`, `lines`, `nesting`, `params`,
+      `params_weighted`: each metric's limits:
       - `warning`: over this is a warning; null for none.
       - `critical`: over this is critical; null for none.
 - `errors`: what went wrong, each making the exit status 2, as stderr
@@ -67,6 +67,8 @@ names, and elements for what is a list or an object in json.
   - `kind`: `fn` or `test`.
   - `class`: `hot`, `normal` or `cold`.
   - `cyclomatic`: its cyclomatic complexity.
+  - `cognitive`: its cognitive complexity, by the rules in
+    docs/cognitive.md.
   - `lines`: its logical lines.
   - `nesting`: its nesting depth.
   - `params`: its parameters, a leading self and each Allocator or Io
@@ -80,7 +82,7 @@ names, and elements for what is a list or an object in json.
 
 In csv and tsv, the report is the `functions` alone, a row each, with
 the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
-`class`, the five metrics, and `over`: each limit passed as
+`class`, the six metrics, and `over`: each limit passed as
 `metric:level:limit`, separated by spaces.
 
 ## An explanation
@@ -99,6 +101,18 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
         `orelse`, `catch`, `try`, or `prong` and the prong's values.
       - `adds`: 1, or 0.
       - `why`: why it adds nothing, when it does not.
+  - `cognitive`: the count and what made it:
+    - `value`: the count: the `adds` of each cost.
+    - `costs`: each construct charged, and each that a reader may
+      expect to cost and does not, in source order:
+      - `line`, `column`: where it is.
+      - `construct`: as written: `if`, `else if`, `else`, `inline for`,
+        `switch`, `catch`, `and`, `blk:`, `return`, `continue :outer`,
+        `errdefer`.
+      - `adds`: what it costs, 0 or more.
+      - `depth`: how much of `adds` is for the levels it sits in.
+      - `why`: why it costs what it does, when its kind and depth do
+        not say.
   - `nesting`: the depth and the deepest chain:
     - `value`: the depth.
     - `chain`: the constructs that reach it, outermost first:
@@ -139,7 +153,7 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
   - `line`: where it is now; for a removed function, where it was.
   - `change`: one of `changes`' names.
   - `before`, `after`: its numbers at the commit and now, each with
-    the report's five metrics; null for an added function's `before`
+    the report's six metrics; null for an added function's `before`
     and a removed one's `after`.
 
 A function is touched when its own source changed: a function declared
@@ -153,7 +167,9 @@ In csv and tsv, an explanation is a row per item, with the columns
 `path`, `line`, `name` (the function's), `metric`, `item`, `at`
 (`line:column`, when the item is a place), `value` and `why`. Each metric
 has a `total` row; cyclomatic's other rows (`base`, 1, and the branches)
-add up to it, nesting's deepest `level` is it, lines has a row for
+add up to it, as cognitive's (the costs) do, their `why` saying how much
+of each is for its depth; nesting's deepest `level` is it, lines has a
+row for
 `span` and each kind, and params a `weighted` row and a row per
 parameter (`name: type`, with its weight).
 

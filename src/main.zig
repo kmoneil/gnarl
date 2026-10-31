@@ -31,13 +31,15 @@ const usage =
     \\
     \\Measures every function and test block in each file named, and in
     \\every .zig file under each directory named (the current directory
-    \\when none is): cyclomatic complexity, logical lines, nesting depth and
-    \\parameters (plain, and weighted with a type parameter and an anytype
-    \\counted twice). One row per function over a threshold, worst first,
-    \\and a summary of them all; a number over its warning threshold is
-    \\marked !, over its critical one !!. Hidden files and directories,
-    \\zig-out and zig-pkg are skipped, and in a git work tree what git
-    \\ignores, unless the file or directory is named outright.
+    \\when none is): cyclomatic complexity, cognitive complexity (how hard
+    \\it is to follow: each structure 1, and 1 more for each level it sits
+    \\in), logical lines, nesting depth and parameters (plain, and weighted
+    \\with a type parameter and an anytype counted twice). One row per
+    \\function over a threshold, worst first, and a summary of them all;
+    \\a number over its warning threshold is marked !, over its critical
+    \\one !!. Hidden files and directories, zig-out and zig-pkg are
+    \\skipped, and in a git work tree what git ignores, unless the file or
+    \\directory is named outright.
     \\
     \\gnarl skill prints what an AI agent needs to work with gnarl: the
     \\loop, the rules with examples, the output; --install <dir> writes it
@@ -659,7 +661,7 @@ fn expectRun(dir: Io.Dir, argv: []const []const u8, exit: u8, stdout: []const u8
     try std.testing.expectEqual(std.process.Child.Term{ .exited = exit }, result.term);
 }
 
-const thresholds_line = "Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.\n";
+const thresholds_line = "Thresholds for normal code (warning, critical): cyclomatic 10, 15; cognitive 15, 25; lines 50, 100; nesting 4; params 4.\n";
 
 test "a row per function, worst first, from every file read" {
     const io = std.testing.io;
@@ -671,10 +673,10 @@ test "a row per function, worst first, from every file read" {
     try tmp.dir.writeFile(io, .{ .sub_path = "sub/c.zig", .data = "const x = 1;\n" });
 
     try expectRun(tmp.dir, &.{ "--all", "." }, 0,
-        \\cyclomatic  lines  nesting  params  weighted  location  function
-        \\       2      2        1       1         1    b.zig:2   S.m
-        \\       1      1        0       0         0    a.zig:1   f
-        \\       1      1        0       0         0    a.zig:2   test "f"
+        \\cyclomatic  cognitive  lines  nesting  params  weighted  location  function
+        \\       2          1      2        1       1         1    b.zig:2   S.m
+        \\       1          0      1        0       0         0    a.zig:1   f
+        \\       1          0      1        0       0         0    a.zig:2   test "f"
         \\
         \\3 functions in 3 files: 0 over a critical threshold (!!), 0 more over a warning one (!).
         \\
@@ -704,8 +706,8 @@ test "in a git work tree, what git ignores is not read; --no-ignore reads it" {
     // gnarl walks its own current directory here, as a person running it
     // in a repository does.
     try expectRun(proj, &.{"--all"}, 0,
-        \\cyclomatic  lines  nesting  params  weighted  location  function
-        \\       1      1        0       0         0    a.zig:1   a
+        \\cyclomatic  cognitive  lines  nesting  params  weighted  location  function
+        \\       1          0      1        0       0         0    a.zig:1   a
         \\
         \\1 function in 1 file: 0 over a critical threshold (!!), 0 more over a warning one (!).
         \\
@@ -757,7 +759,7 @@ test "--update-baseline, then --check holds to it: new or worse fails, debt kept
         try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
         try std.testing.expectEqualStrings("gnarl: complexity.baseline: note: wrote 1 function over a critical threshold\n", result.stderr);
         const written = try tmp.dir.readFileAlloc(io, "complexity.baseline", arena, .limited(1 << 20));
-        try std.testing.expect(std.mem.endsWith(u8, written, "\na.zig\tf\t17\t17\t1\t1\t1\n"));
+        try std.testing.expect(std.mem.endsWith(u8, written, "\na.zig\tf\t17\t16\t17\t1\t1\t1\n"));
     }
 
     const held = [_]Step{
@@ -805,7 +807,7 @@ test "a baseline that cannot be used stops the run, and says where" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = "fn a() void {}\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "complexity.baseline", .data = "# fine\na.zig\ta\t1\t1\n" });
-    try expectRun(tmp.dir, &.{ "--check", "a.zig" }, 2, "", "gnarl: complexity.baseline:2: fewer than 7 fields: path, name and the five metrics, tab-separated\n");
+    try expectRun(tmp.dir, &.{ "--check", "a.zig" }, 2, "", "gnarl: complexity.baseline:2: fewer than 8 fields: path, name and the six metrics, tab-separated\n");
     try expectRun(tmp.dir, &.{ "--check", "--baseline", "nope", "a.zig" }, 2, "", "gnarl: nope: FileNotFound\n");
     // Not written over a run that could not read every file.
     try expectRun(tmp.dir, &.{ "--update-baseline", "--baseline=b.txt", "a.zig", "missing.zig" }, 2,
@@ -846,13 +848,13 @@ test "--diff: the functions a change touched, before and after, worse first" {
     try proj.writeFile(io, .{ .sub_path = "c.zig", .data = "fn made() void {}\n" });
 
     try expectRun(proj, &.{ "--diff", "HEAD" }, 0,
-        \\change   cyclomatic  lines   nesting  params  weighted  location  function
-        \\worse    2 -> 3      2 -> 3  1        1       1         a.zig:1   grows
-        \\added    1           1       0        0       0         a.zig:10  fresh
-        \\added    1           1       0        0       0         c.zig:1   made
-        \\same     1           1       0        0       0         a.zig:5   tidied
-        \\removed  1           1       0        0       0         a.zig:5   dropped
-        \\removed  1           1       0        0       0         b.zig:1   gone
+        \\change   cyclomatic  cognitive  lines   nesting  params  weighted  location  function
+        \\worse    2 -> 3      1 -> 2     2 -> 3  1        1       1         a.zig:1   grows
+        \\added    1           0          1       0        0       0         a.zig:10  fresh
+        \\added    1           0          1       0        0       0         c.zig:1   made
+        \\same     1           0          1       0        0       0         a.zig:5   tidied
+        \\removed  1           0          1       0        0       0         a.zig:5   dropped
+        \\removed  1           0          1       0        0       0         b.zig:1   gone
         \\
         \\6 functions touched in 3 files since HEAD: 1 worse, 2 added, 1 the same, 0 better, 2 removed.
         \\gnarl --explain a.zig:1 says why grows, the worst of those that got worse, scores what it does now.
@@ -929,8 +931,8 @@ test "by default only what is over a threshold; --top, and --function to pick" {
     try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = thirteen ++ "fn g() void {}\n" });
 
     const f_row =
-        \\cyclomatic  lines  nesting  params  weighted  location  function
-        \\      13!    13        1       1         1    a.zig:1   f
+        \\cyclomatic  cognitive  lines  nesting  params  weighted  location  function
+        \\      13!        12     13        1       1         1    a.zig:1   f
         \\
         \\2 functions in 1 file: 0 over a critical threshold (!!), 1 more over a warning one (!).
         \\
@@ -942,8 +944,8 @@ test "by default only what is over a threshold; --top, and --function to pick" {
     // Picked by a line inside it, with no path besides.
     try expectRun(tmp.dir, &.{ "--function", "a.zig:3" }, 0, f_row ++ "1 not picked by --function is not listed.\n" ++ thresholds_line, "");
     try expectRun(tmp.dir, &.{ "--function", "g", "a.zig" }, 0,
-        \\cyclomatic  lines  nesting  params  weighted  location  function
-        \\       1      1        0       0         0    a.zig:15  g
+        \\cyclomatic  cognitive  lines  nesting  params  weighted  location  function
+        \\       1          0      1        0       0         0    a.zig:15  g
         \\
         \\2 functions in 1 file: 0 over a critical threshold (!!), 1 more over a warning one (!).
         \\1 not picked by --function is not listed.
@@ -1006,6 +1008,8 @@ test "--explain: by path:line or by name; a name that fits none or several is an
         \\a.zig:1  f  (normal code)
         \\
         \\cyclomatic 2: 1, and 1 for each of these
+        \\  2:5  if  +1
+        \\cognitive 1: the sum of these
         \\  2:5  if  +1
         \\nesting 1: the deepest chain
         \\  2:5  if   1
@@ -1151,8 +1155,8 @@ test "a path that is missing or holds no .zig file is an error" {
     try tmp.dir.writeFile(io, .{ .sub_path = "b.zig", .data = "fn b() void {}\n" });
 
     try expectRun(tmp.dir, &.{ "nope", "empty", "gen", "--exclude", "gen/a.zig", "b.zig", "--all" }, 2,
-        \\cyclomatic  lines  nesting  params  weighted  location  function
-        \\       1      1        0       0         0    b.zig:1   b
+        \\cyclomatic  cognitive  lines  nesting  params  weighted  location  function
+        \\       1          0      1        0       0         0    b.zig:1   b
         \\
         \\1 function in 1 file: 0 over a critical threshold (!!), 0 more over a warning one (!).
         \\
@@ -1353,6 +1357,7 @@ test "parseArgs: help, version and usage errors" {
 test {
     _ = @import("baseline.zig");
     _ = @import("children.zig");
+    _ = @import("cognitive.zig");
     _ = @import("config.zig");
     _ = @import("diff.zig");
     _ = @import("docs.zig");

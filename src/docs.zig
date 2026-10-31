@@ -88,7 +88,7 @@ test "docs/output.md lists every field of the report, and no other" {
     const arena = arena_state.allocator();
     const doc = try std.Io.Dir.cwd().readFileAlloc(io, doc_path, arena, .limited(1 << 20));
 
-    var rows = [_]report.Row{.{ .path = "a.zig", .line = 1, .end_line = 3, .column = 4, .name = "f", .kind = .@"fn", .cyclomatic = 30, .lines = 3, .nesting = 0, .params = 0, .params_weighted = 0 }};
+    var rows = [_]report.Row{.{ .path = "a.zig", .line = 1, .end_line = 3, .column = 4, .name = "f", .kind = .@"fn", .cyclomatic = 30, .cognitive = 0, .lines = 3, .nesting = 0, .params = 0, .params_weighted = 0 }};
     try report.rank(arena, &rows, .defaults);
     var out: std.Io.Writer.Allocating = .init(arena);
     try report.write(&out.writer, .json, &rows, try report.list(arena, &rows, .{}), .{
@@ -117,7 +117,7 @@ test "docs/output.md lists every field of a diff, and no other" {
     const arena = arena_state.allocator();
     const doc = try std.Io.Dir.cwd().readFileAlloc(io, doc_path, arena, .limited(1 << 20));
     const diff = @import("diff.zig");
-    const values: diff.Values = .{ .cyclomatic = 16, .lines = 3, .nesting = 0, .params = 0, .params_weighted = 0 };
+    const values: diff.Values = .{ .cyclomatic = 16, .cognitive = 0, .lines = 3, .nesting = 0, .params = 0, .params_weighted = 0 };
     const touched = [_]diff.Touched{.{ .path = "a.zig", .line = 1, .name = "f", .kind = .@"fn", .class = .normal, .change = .worse, .before = values, .after = values, .trips = &.{.{ .metric = .cyclomatic, .level = .critical, .limit = 15 }} }};
     var out: std.Io.Writer.Allocating = .init(arena);
     try diff.write(&out.writer, .json, &touched, .{ .version = "0.0.0", .ref = "main", .files = 1, .classes = .defaults, .messages = &said });

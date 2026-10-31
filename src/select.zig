@@ -135,7 +135,7 @@ test "pick: by line, by a line inside, by name; a whole name hides the ends" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const row: Row = .{ .path = "a.zig", .line = 1, .end_line = 1, .column = 1, .name = "", .kind = .@"fn", .cyclomatic = 1, .lines = 1, .nesting = 0, .params = 0, .params_weighted = 0 };
+    const row: Row = .{ .path = "a.zig", .line = 1, .end_line = 1, .column = 1, .name = "", .kind = .@"fn", .cyclomatic = 1, .cognitive = 0, .lines = 1, .nesting = 0, .params = 0, .params_weighted = 0 };
     var rows = [_]Row{ row, row, row, row };
     rows[0].name = "S";
     rows[0].end_line = 20;

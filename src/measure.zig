@@ -4,6 +4,7 @@ const std = @import("std");
 const Ast = std.zig.Ast;
 const Allocator = std.mem.Allocator;
 
+const cognitive = @import("cognitive.zig");
 const cyclomatic = @import("cyclomatic.zig");
 const functions = @import("functions.zig");
 const lines = @import("lines.zig");
@@ -27,6 +28,7 @@ pub fn file(arena: Allocator, scratch: Allocator, path: []const u8, tree: *const
             .name = try arena.dupe(u8, function.name),
             .kind = function.kind,
             .cyclomatic = try cyclomatic.count(scratch, tree, function.node),
+            .cognitive = try cognitive.count(scratch, tree, function.node),
             .lines = try lines.count(scratch, tree, function.node),
             .nesting = try nesting.depth(scratch, tree, function.node),
             .params = p.count,

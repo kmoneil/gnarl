@@ -21,8 +21,8 @@ const dir_path = "test/golden";
 fn render(gpa: std.mem.Allocator, rows: []const Row) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-    for (rows) |row| try out.print(gpa, "{d} {s} cyclomatic={d} lines={d} nesting={d} params={d} weighted={d}\n", .{
-        row.line, row.name, row.cyclomatic, row.lines, row.nesting, row.params, row.params_weighted,
+    for (rows) |row| try out.print(gpa, "{d} {s} cyclomatic={d} cognitive={d} lines={d} nesting={d} params={d} weighted={d}\n", .{
+        row.line, row.name, row.cyclomatic, row.cognitive, row.lines, row.nesting, row.params, row.params_weighted,
     });
     return out.toOwnedSlice(gpa);
 }

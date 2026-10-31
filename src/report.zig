@@ -32,6 +32,7 @@ pub const Row = struct {
     name: []const u8,
     kind: functions.Kind,
     cyclomatic: u32,
+    cognitive: u32,
     lines: u32,
     nesting: u32,
     params: u32,
@@ -44,8 +45,8 @@ pub const Row = struct {
 
 /// Sets each row's trips against its class's thresholds, and sorts the rows
 /// worst first: the most critical trips, then the most warnings, then by
-/// cyclomatic complexity, lines, nesting and parameters, then by path and
-/// line.
+/// cyclomatic complexity, cognitive complexity, lines, nesting and
+/// parameters, then by path and line.
 pub fn rank(arena: Allocator, rows: []Row, classes: Classes) Allocator.Error!void {
     for (rows) |*row| {
         const limits = classes.get(row.class);
@@ -73,8 +74,8 @@ fn worse(_: void, a: Row, b: Row) bool {
     };
 }
 
-fn severity(row: Row) [6]u32 {
-    return .{ tally(row, .critical), tally(row, .warning), row.cyclomatic, row.lines, row.nesting, row.params };
+fn severity(row: Row) [7]u32 {
+    return .{ tally(row, .critical), tally(row, .warning), row.cyclomatic, row.cognitive, row.lines, row.nesting, row.params };
 }
 
 fn tally(row: Row, level: thresholds.Level) u32 {
@@ -278,8 +279,8 @@ fn writeXml(w: *Writer, rows: []const Row, listed: Listed, c: Context) Writer.Er
 }
 
 pub const delimited_columns = [_][]const u8{
-    "path",       "line",  "end_line", "column", "name",            "kind", "class",
-    "cyclomatic", "lines", "nesting",  "params", "params_weighted", "over",
+    "path",       "line",      "end_line", "column",  "name",   "kind",            "class",
+    "cyclomatic", "cognitive", "lines",    "nesting", "params", "params_weighted", "over",
 };
 
 /// A header row, then a row per function listed. `over` holds each limit
@@ -309,6 +310,7 @@ fn writeDelimited(w: *Writer, kind: formats.Delimited, rows: []const Row) Writer
 const Column = struct { header: []const u8, metric: Metric };
 const columns = [_]Column{
     .{ .header = "cyclomatic", .metric = .cyclomatic },
+    .{ .header = "cognitive", .metric = .cognitive },
     .{ .header = "lines", .metric = .lines },
     .{ .header = "nesting", .metric = .nesting },
     .{ .header = "params", .metric = .params },
@@ -502,10 +504,10 @@ fn isAre(n: usize) []const u8 {
 /// order.
 fn sampleRows(arena: Allocator) ![]Row {
     const rows = try arena.dupe(Row, &.{
-        .{ .path = "src/a.zig", .line = 9, .column = 4, .name = "small", .kind = .@"fn", .cyclomatic = 1, .lines = 3, .nesting = 0, .params = 0, .params_weighted = 0 },
-        .{ .path = "src/b.zig", .line = 120, .column = 8, .name = "Parser.next", .kind = .@"fn", .cyclomatic = 22, .lines = 140, .nesting = 5, .params = 2, .params_weighted = 3 },
-        .{ .path = "src/a.zig", .line = 30, .column = 1, .name = "test \"a|b\"", .kind = .@"test", .cyclomatic = 3, .lines = 12, .nesting = 1, .params = 0, .params_weighted = 0 },
-        .{ .path = "src/a.zig", .line = 2, .column = 4, .name = "wide", .kind = .@"fn", .cyclomatic = 4, .lines = 20, .nesting = 1, .params = 6, .params_weighted = 8 },
+        .{ .path = "src/a.zig", .line = 9, .column = 4, .name = "small", .kind = .@"fn", .cyclomatic = 1, .cognitive = 0, .lines = 3, .nesting = 0, .params = 0, .params_weighted = 0 },
+        .{ .path = "src/b.zig", .line = 120, .column = 8, .name = "Parser.next", .kind = .@"fn", .cyclomatic = 22, .cognitive = 30, .lines = 140, .nesting = 5, .params = 2, .params_weighted = 3 },
+        .{ .path = "src/a.zig", .line = 30, .column = 1, .name = "test \"a|b\"", .kind = .@"test", .cyclomatic = 3, .cognitive = 2, .lines = 12, .nesting = 1, .params = 0, .params_weighted = 0 },
+        .{ .path = "src/a.zig", .line = 2, .column = 4, .name = "wide", .kind = .@"fn", .cyclomatic = 4, .cognitive = 3, .lines = 20, .nesting = 1, .params = 6, .params_weighted = 8 },
     });
     try rank(arena, rows, .defaults);
     return rows;
@@ -527,8 +529,10 @@ test "rank: critical first, then warnings, then the numbers, then the place" {
     const rows = try sampleRows(arena_state.allocator());
     const names = [_][]const u8{ "Parser.next", "wide", "test \"a|b\"", "small" };
     for (names, rows) |name, row| try std.testing.expectEqualStrings(name, row.name);
-    // Parser.next: cyclomatic and lines critical, nesting a warning.
-    try std.testing.expectEqual(3, rows[0].trips.len);
+    // Parser.next: cyclomatic, cognitive and lines critical, nesting a
+    // warning.
+    try std.testing.expectEqual(4, rows[0].trips.len);
+    try std.testing.expectEqual(.critical, levelOf(rows[0], .cognitive).?);
     try std.testing.expectEqual(.critical, levelOf(rows[0], .lines).?);
     try std.testing.expectEqual(.warning, levelOf(rows[0], .nesting).?);
     try std.testing.expectEqual(.warning, levelOf(rows[1], .params).?);
@@ -540,7 +544,7 @@ test "rank: each row against its own class's thresholds" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const row: Row = .{ .path = "a.zig", .line = 1, .column = 4, .name = "f", .kind = .@"fn", .cyclomatic = 13, .lines = 45, .nesting = 0, .params = 0, .params_weighted = 0 };
+    const row: Row = .{ .path = "a.zig", .line = 1, .column = 4, .name = "f", .kind = .@"fn", .cyclomatic = 13, .cognitive = 0, .lines = 45, .nesting = 0, .params = 0, .params_weighted = 0 };
     var rows = [_]Row{ row, row, row };
     rows[0].class = .hot;
     rows[1].line = 2;
@@ -560,56 +564,56 @@ test "rank: each row against its own class's thresholds" {
     try writeSummary(&out.writer, &rows, .{ .rows = &rows }, 1, .defaults, "\n");
     try std.testing.expectEqualStrings(
         \\3 functions in 1 file: 1 over a critical threshold (!!), 1 more over a warning one (!).
-        \\Thresholds for hot code (warning, critical): cyclomatic 8, 12; lines 40, 80; nesting 3; params 4.
-        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
-        \\Thresholds for cold code (warning, critical): cyclomatic -, 20.
+        \\Thresholds for hot code (warning, critical): cyclomatic 8, 12; cognitive 10, 15; lines 40, 80; nesting 3; params 4.
+        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; cognitive 15, 25; lines 50, 100; nesting 4; params 4.
+        \\Thresholds for cold code (warning, critical): cyclomatic -, 20; cognitive -, 35.
         \\
     , out.written());
 }
 
 test "write: text, every function" {
     try expectWritten(.text, .{ .all = true },
-        \\cyclomatic  lines  nesting  params  weighted  location       function
-        \\      22!!  140!!      5!      2         3    src/b.zig:120  Parser.next
-        \\       4     20        1       6!        8    src/a.zig:2    wide
-        \\       3     12        1       0         0    src/a.zig:30   test "a|b"
-        \\       1      3        0       0         0    src/a.zig:9    small
+        \\cyclomatic  cognitive  lines  nesting  params  weighted  location       function
+        \\      22!!       30!!  140!!      5!      2         3    src/b.zig:120  Parser.next
+        \\       4          3     20        1       6!        8    src/a.zig:2    wide
+        \\       3          2     12        1       0         0    src/a.zig:30   test "a|b"
+        \\       1          0      3        0       0         0    src/a.zig:9    small
         \\
         \\4 functions in 2 files: 1 over a critical threshold (!!), 1 more over a warning one (!).
-        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
+        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; cognitive 15, 25; lines 50, 100; nesting 4; params 4.
         \\
     );
 }
 
 test "write: by default only what is over a threshold, and the footer says how to see the rest" {
     try expectWritten(.text, .{},
-        \\cyclomatic  lines  nesting  params  weighted  location       function
-        \\      22!!  140!!      5!      2         3    src/b.zig:120  Parser.next
-        \\       4     20        1       6!        8    src/a.zig:2    wide
+        \\cyclomatic  cognitive  lines  nesting  params  weighted  location       function
+        \\      22!!       30!!  140!!      5!      2         3    src/b.zig:120  Parser.next
+        \\       4          3     20        1       6!        8    src/a.zig:2    wide
         \\
         \\4 functions in 2 files: 1 over a critical threshold (!!), 1 more over a warning one (!).
         \\2 within limits are not listed; --all lists every function.
-        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
+        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; cognitive 15, 25; lines 50, 100; nesting 4; params 4.
         \\
     );
     try expectWritten(.text, .{ .top = 1 },
-        \\cyclomatic  lines  nesting  params  weighted  location       function
-        \\      22!!  140!!      5!      2         3    src/b.zig:120  Parser.next
+        \\cyclomatic  cognitive  lines  nesting  params  weighted  location       function
+        \\      22!!       30!!  140!!      5!      2         3    src/b.zig:120  Parser.next
         \\
         \\4 functions in 2 files: 1 over a critical threshold (!!), 1 more over a warning one (!).
         \\2 within limits are not listed; --all lists every function.
         \\1 more is not listed: --top 1 keeps the worst 1.
-        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
+        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; cognitive 15, 25; lines 50, 100; nesting 4; params 4.
         \\
     );
     // Picked, a function within limits is listed all the same.
     try expectWritten(.text, .{ .picked = &.{ false, false, true, false } },
-        \\cyclomatic  lines  nesting  params  weighted  location      function
-        \\       3     12        1       0         0    src/a.zig:30  test "a|b"
+        \\cyclomatic  cognitive  lines  nesting  params  weighted  location      function
+        \\       3          2     12        1       0         0    src/a.zig:30  test "a|b"
         \\
         \\4 functions in 2 files: 1 over a critical threshold (!!), 1 more over a warning one (!).
         \\3 not picked by --function are not listed.
-        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
+        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; cognitive 15, 25; lines 50, 100; nesting 4; params 4.
         \\
     );
 }
@@ -620,23 +624,23 @@ test "write: nothing to list is a summary alone" {
         \\
         \\4 not picked by --function are not listed.
         \\
-        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
+        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; cognitive 15, 25; lines 50, 100; nesting 4; params 4.
         \\
     );
 }
 
 test "write: Markdown" {
     try expectWritten(.md, .{ .all = true },
-        \\| cyclomatic | lines | nesting | params | weighted | location | function |
-        \\| ---: | ---: | ---: | ---: | ---: | --- | --- |
-        \\| 22 !! | 140 !! | 5 ! | 2 | 3 | `src/b.zig:120` | `Parser.next` |
-        \\| 4 | 20 | 1 | 6 ! | 8 | `src/a.zig:2` | `wide` |
-        \\| 3 | 12 | 1 | 0 | 0 | `src/a.zig:30` | `test "a\|b"` |
-        \\| 1 | 3 | 0 | 0 | 0 | `src/a.zig:9` | `small` |
+        \\| cyclomatic | cognitive | lines | nesting | params | weighted | location | function |
+        \\| ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+        \\| 22 !! | 30 !! | 140 !! | 5 ! | 2 | 3 | `src/b.zig:120` | `Parser.next` |
+        \\| 4 | 3 | 20 | 1 | 6 ! | 8 | `src/a.zig:2` | `wide` |
+        \\| 3 | 2 | 12 | 1 | 0 | 0 | `src/a.zig:30` | `test "a\|b"` |
+        \\| 1 | 0 | 3 | 0 | 0 | 0 | `src/a.zig:9` | `small` |
         \\
         \\4 functions in 2 files: 1 over a critical threshold (!!), 1 more over a warning one (!).
         \\
-        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; lines 50, 100; nesting 4; params 4.
+        \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; cognitive 15, 25; lines 50, 100; nesting 4; params 4.
         \\
     );
 }
@@ -681,7 +685,7 @@ test "write: JSON" {
     try std.testing.expectEqualStrings("Parser.next", doc.functions[0].name);
     try std.testing.expectEqualStrings("test \"a|b\"", doc.functions[2].name);
     try std.testing.expectEqual(.@"test", doc.functions[2].kind);
-    try std.testing.expectEqual(3, doc.functions[0].trips.len);
+    try std.testing.expectEqual(4, doc.functions[0].trips.len);
     try std.testing.expectEqual(Trip{ .metric = .cyclomatic, .level = .critical, .limit = 15 }, doc.functions[0].trips[0]);
     try std.testing.expectEqual(null, doc.thresholds.normal.nesting.critical);
     try std.testing.expectEqual(20, doc.thresholds.cold.cyclomatic.critical);
@@ -750,9 +754,9 @@ test "write: csv and tsv, a header and a row per function listed, read back" {
         try std.testing.expectEqual(5, table.len);
         for (delimited_columns, table[0]) |want, got| try std.testing.expectEqualStrings(want, got);
         try std.testing.expectEqualStrings("Parser.next", table[1][4]);
-        try std.testing.expectEqualStrings("cyclomatic:critical:15 lines:critical:100 nesting:warning:4", table[1][12]);
+        try std.testing.expectEqualStrings("cyclomatic:critical:15 cognitive:critical:25 lines:critical:100 nesting:warning:4", table[1][13]);
         try std.testing.expectEqualStrings("test \"a|b\"", table[3][4]);
-        try std.testing.expectEqualStrings("", table[3][12]);
+        try std.testing.expectEqualStrings("", table[3][13]);
     }
 }
 

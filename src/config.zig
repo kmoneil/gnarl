@@ -54,6 +54,7 @@ const File = struct {
 
 const Overrides = struct {
     cyclomatic: ?Limit = null,
+    cognitive: ?Limit = null,
     lines: ?Limit = null,
     nesting: ?Limit = null,
     params: ?Limit = null,

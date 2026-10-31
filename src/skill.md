@@ -1,6 +1,6 @@
 ---
 name: gnarl
-description: Complexity of each Zig function (cyclomatic, logical lines, nesting depth, parameters), worst first, with every number explainable line by line. Use when asked how complex Zig code is or which functions to refactor first, before and after refactoring a Zig function to see what moved, and to gate CI on complexity.
+description: Complexity of each Zig function (cyclomatic, cognitive, logical lines, nesting depth, parameters), worst first, with every number explainable line by line. Use when asked how complex Zig code is or which functions to refactor first, before and after refactoring a Zig function to see what moved, and to gate CI on complexity.
 ---
 
 # gnarl: how complex each Zig function is
@@ -19,7 +19,8 @@ as often as it helps.
 2. `gnarl --explain <function>` for the one to work on. `<function>` is
    `path:line` as the report prints it, any line inside the function, or
    its name (or the end of it: `record` finds `Validator.record`). It
-   lists each construct counted and where, the deepest nesting chain, how
+   lists each construct counted and where (for cognitive complexity, how
+   much of each cost is its depth), the deepest nesting chain, how
    the lines divide, and each parameter: aim the refactor at those lines.
 3. Change the code, then `gnarl --diff HEAD` lists each function the
    change touched (uncommitted edits and new files included) with its
@@ -52,6 +53,29 @@ passes an error on; a payload capture (`|v|`), which names a value on a
 branch already counted; an `else`; a labeled `break` or `continue`; or a
 `catch unreachable`, `catch {}` or `orelse unreachable`, which have no
 other path.
+
+Cognitive complexity is how hard the function is to follow. A structure
+costs once however many ways it branches, and more the deeper it sits:
+an `if`, `while`, `for`, `switch`, or a `catch` or `orelse` whose handler
+is a block or a `switch`, costs 1 and 1 more for each level it is in.
+An `else if`, an `else` and a loop's `else` cost 1, but not the `else` of
+an `if` whose branches are both expressions. Each run of `and` or of
+`or` costs 1, as do a `catch` or `orelse` with a value or a jump for its
+handler, a labeled block used as a value, a `return` inside a loop, a
+labeled `break` or `continue` that ends a loop or block on its way, and
+an `errdefer`. Nothing for a `try`, a `defer`, a capture or a guard
+clause's `return`. docs/cognitive.md in gnarl's repository has the rules,
+an example each.
+
+| Code | cyclomatic | cognitive |
+| --- | ---: | ---: |
+| `fn f(x: E) u8 { return switch (x) { .a => 1, .b => 2, .c => 3, else => 0 }; }` | 4 | 1 |
+| `fn f(xs: []const u8) void { for (xs) \|x\| { if (x > 0) { if (x < 9) use(x); } } }` | 4 | 6 |
+| `fn f(x: i8) i8 { if (x > 0) { return 1; } else if (x < 0) { return -1; } else { return 0; } }` | 3 | 3 |
+| `fn f(c: bool) u8 { return if (c) 1 else 2; }` | 2 | 1 |
+| `fn f(a: bool, b: bool, c: bool) bool { return a and b and c; }` | 3 | 1 |
+| `fn f(xs: []const u8) ?u8 { for (xs) \|x\| { if (x == 0) return x; } return null; }` | 3 | 4 |
+| `fn f() !void { errdefer undo(); try work(); }` | 1 | 1 |
 
 Nesting depth is how many levels deep the code goes. An `if`, `while`,
 `for` or `switch` opens a level for its branches, as do a labeled block,
@@ -115,7 +139,7 @@ const S = struct {
 };
 ```
 
-gnarl measures S.pick: cyclomatic 5, lines 5, nesting 3, params 1, weighted 1.
+gnarl measures S.pick: cyclomatic 5, cognitive 8, lines 5, nesting 3, params 1, weighted 1.
 
 ## Names
 
@@ -136,9 +160,10 @@ The json document (xml holds the same fields) starts with `schema`,
 out, and why), `check` (`asked`, `failed`, `critical`), `thresholds`,
 `errors` and `notes` (everything said on stderr, with `path`, `line`,
 `column`, `text` and `more`), then `functions`, one to a line, each with
-`path`, `line`, `end_line`, `column`, `name`, `kind`, `class`, the five
-metrics (`cyclomatic`, `lines`, `nesting`, `params`, `params_weighted`)
-and `trips` (`metric`, `level`, `limit`). An `--explain` document has
+`path`, `line`, `end_line`, `column`, `name`, `kind`, `class`, the six
+metrics (`cyclomatic`, `cognitive`, `lines`, `nesting`, `params`,
+`params_weighted`) and `trips` (`metric`, `level`, `limit`).
+
 A `--diff` document has `ref`, `changes` (how many `worse`, `added`,
 `same`, `better`, `removed`) and `functions`, each with `change`,
 `before` and `after` (null for the side it does not have). For a pull
@@ -146,7 +171,8 @@ request comment, `gnarl --diff origin/main --format md`.
 
 An `--explain` document has
 `explanations` instead, each with `cyclomatic.branches`,
-`nesting.chain`, the `lines` breakdown and `params.each`. csv and tsv
+`cognitive.costs` (each with its `depth`), `nesting.chain`, the `lines`
+breakdown and `params.each`. csv and tsv
 carry the rows alone, errors on stderr only; their `over` column lists
 each limit passed as `metric:level:limit`, separated by spaces.
 
@@ -160,11 +186,11 @@ Code is hot, normal or cold, by globs in `complexity.zon` in the
 directory gnarl runs in (or the file `--config` names); with no file,
 every file is normal. Default limits, warning then critical:
 
-| | cyclomatic | lines | nesting | params |
-| --- | --- | --- | --- | --- |
-| hot | 8, 12 | 40, 80 | 3 | 4 |
-| normal | 10, 15 | 50, 100 | 4 | 4 |
-| cold | critical 20 | | | |
+| | cyclomatic | cognitive | lines | nesting | params |
+| --- | --- | --- | --- | --- | --- |
+| hot | 8, 12 | 10, 15 | 40, 80 | 3 | 4 |
+| normal | 10, 15 | 15, 25 | 50, 100 | 4 | 4 |
+| cold | critical 20 | critical 35 | | | |
 
 ```zig
 .{
@@ -196,6 +222,10 @@ one). gnarl still reports what it could read.
   the code needed becomes the helper's arguments. Measure the helper too
   (`--function` takes several), and prefer passing a struct over six
   values.
+- A flat `switch` of many prongs scores high cyclomatic and 1 cognitive:
+  it has many paths but reads as one decision. Cognitive complexity is
+  the better guide to what is hard to read; what raises it is depth, so
+  guard clauses and extracting an inner loop bring it down most.
 - `try` adds nothing, so a function of many `try`s can score 1; the
   explanation lists them, adding 0, to show they were seen.
 - Paths are as gnarl prints them, relative to the current directory:

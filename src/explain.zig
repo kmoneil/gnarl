@@ -7,6 +7,7 @@ const Ast = std.zig.Ast;
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 
+const cognitive = @import("cognitive.zig");
 const cyclomatic = @import("cyclomatic.zig");
 const formats = @import("formats.zig");
 const functions = @import("functions.zig");
@@ -28,6 +29,8 @@ const Trip = thresholds.Trip;
 pub const Selector = select.Selector;
 
 pub const Branch = struct { line: u32, column: u32, construct: []const u8, adds: u32, why: []const u8 };
+/// `depth` is how much of `adds` is for the levels the construct sits in.
+pub const Cost = struct { line: u32, column: u32, construct: []const u8, adds: u32, depth: u32, why: []const u8 };
 pub const Level = struct { line: u32, column: u32, construct: []const u8, level: u32 };
 
 pub const Explanation = struct {
@@ -40,6 +43,7 @@ pub const Explanation = struct {
     /// The limits it is over, each metric once at its worst.
     trips: []const Trip,
     cyclomatic: struct { value: u32, branches: []const Branch },
+    cognitive: struct { value: u32, costs: []const Cost },
     nesting: struct { value: u32, chain: []const Level },
     lines: struct { value: u32, span: u32, blank: u32, comment: u32, closer: u32, nested: u32 },
     params: struct { value: u32, weighted: u32, each: []const params.Param },
@@ -68,6 +72,14 @@ fn build(
         out.* = .{ .line = loc.line, .column = loc.column, .construct = try arena.dupe(u8, b.construct), .adds = b.adds, .why = b.why };
     }
 
+    var raw_costs: std.ArrayList(cognitive.Cost) = .empty;
+    const cog = try cognitive.explain(scratch, tree, function.node, &raw_costs);
+    const costs = try arena.alloc(Cost, raw_costs.items.len);
+    for (raw_costs.items, costs) |c, *out| {
+        const loc = index.ofToken(tree, c.token);
+        out.* = .{ .line = loc.line, .column = loc.column, .construct = try arena.dupe(u8, c.construct), .adds = c.adds, .depth = c.depth, .why = c.why };
+    }
+
     var raw_chain: std.ArrayList(nesting.Level) = .empty;
     const depth = try nesting.explain(scratch, tree, function.node, &raw_chain);
     const chain = try arena.alloc(Level, raw_chain.items.len);
@@ -94,6 +106,7 @@ fn build(
         .class = class,
         .trips = &.{},
         .cyclomatic = .{ .value = cc, .branches = branches },
+        .cognitive = .{ .value = cog, .costs = costs },
         .nesting = .{ .value = depth, .chain = chain },
         .lines = .{
             .value = breakdown.counted,
@@ -116,6 +129,7 @@ fn build(
 fn valueOf(e: Explanation, metric: Metric) u32 {
     return switch (metric) {
         .cyclomatic => e.cyclomatic.value,
+        .cognitive => e.cognitive.value,
         .lines => e.lines.value,
         .nesting => e.nesting.value,
         .params => e.params.value,
@@ -321,7 +335,9 @@ fn writeXml(w: *Writer, explanations: []const Explanation, c: Context) Writer.Er
             try formats.attr(w, "why", b.why);
             try w.writeAll("/>\n");
         }
-        try w.print("      </cyclomatic>\n      <nesting value=\"{d}\">\n", .{e.nesting.value});
+        try w.writeAll("      </cyclomatic>\n");
+        try writeCognitiveXml(w, e);
+        try w.print("      <nesting value=\"{d}\">\n", .{e.nesting.value});
         for (e.nesting.chain) |l| {
             try w.writeAll("        <level");
             try formats.attrInt(w, "line", l.line);
@@ -346,11 +362,27 @@ fn writeXml(w: *Writer, explanations: []const Explanation, c: Context) Writer.Er
     try w.writeAll("  </explanations>\n</gnarl>\n");
 }
 
+fn writeCognitiveXml(w: *Writer, e: Explanation) Writer.Error!void {
+    try w.print("      <cognitive value=\"{d}\">\n", .{e.cognitive.value});
+    for (e.cognitive.costs) |cost| {
+        try w.writeAll("        <cost");
+        try formats.attrInt(w, "line", cost.line);
+        try formats.attrInt(w, "column", cost.column);
+        try formats.attr(w, "construct", cost.construct);
+        try formats.attrInt(w, "adds", cost.adds);
+        try formats.attrInt(w, "depth", cost.depth);
+        try formats.attr(w, "why", cost.why);
+        try w.writeAll("/>\n");
+    }
+    try w.writeAll("      </cognitive>\n");
+}
+
 pub const delimited_columns = [_][]const u8{ "path", "line", "name", "metric", "item", "at", "value", "why" };
 
 /// A header row, then a row per item: for each metric its total, then
 /// what makes it, so a metric's rows other than `total` add up to it
-/// (`base` 1 for cyclomatic; the line kinds for lines, `span` aside).
+/// (`base` 1 for cyclomatic; the line kinds for lines, `span` aside). A
+/// cognitive cost's `why` says how much of it is for its depth.
 fn writeDelimited(w: *Writer, kind: formats.Delimited, explanations: []const Explanation) Writer.Error!void {
     try formats.header(w, kind, &delimited_columns);
     for (explanations) |e| {
@@ -358,6 +390,13 @@ fn writeDelimited(w: *Writer, kind: formats.Delimited, explanations: []const Exp
         try row.put("cyclomatic", "total", "", e.cyclomatic.value, "");
         try row.put("cyclomatic", "base", "", 1, "");
         for (e.cyclomatic.branches) |b| try row.putAt("cyclomatic", b.construct, b.line, b.column, b.adds, b.why);
+        try row.put("cognitive", "total", "", e.cognitive.value, "");
+        for (e.cognitive.costs) |c| {
+            var buffer: [256]u8 = undefined;
+            var why: Writer = .fixed(&buffer);
+            writeReason(&why, c) catch {};
+            try row.putAt("cognitive", c.construct, c.line, c.column, c.adds, why.buffered());
+        }
         try row.put("nesting", "total", "", e.nesting.value, "");
         for (e.nesting.chain) |l| try row.putAt("nesting", l.construct, l.line, l.column, l.level, "");
         try row.put("lines", "total", "", e.lines.value, "");
@@ -402,39 +441,53 @@ fn writeOver(w: *Writer, e: Explanation, metric: Metric) Writer.Error!void {
     };
 }
 
+/// How wide the place and construct columns of the text are: as wide as
+/// the widest row any section lists.
+const Widths = struct {
+    at: usize = 0,
+    construct: usize = 0,
+
+    fn of(e: Explanation) Widths {
+        var ws: Widths = .{};
+        for (e.cyclomatic.branches) |b| if (b.adds > 0) ws.fit(b.line, b.column, b.construct);
+        for (e.cognitive.costs) |c| if (c.adds > 0) ws.fit(c.line, c.column, c.construct);
+        for (e.nesting.chain) |l| ws.fit(l.line, l.column, l.construct);
+        return ws;
+    }
+
+    fn fit(ws: *Widths, line: u32, column: u32, construct: []const u8) void {
+        ws.at = @max(ws.at, std.fmt.count("{d}:{d}", .{ line, column }));
+        ws.construct = @max(ws.construct, construct.len);
+    }
+
+    /// A row's place and construct, padded to the columns.
+    fn writeRow(ws: Widths, w: *Writer, line: u32, column: u32, construct: []const u8) Writer.Error!void {
+        try writeAt(w, line, column, ws.at);
+        try w.print("{s}", .{construct});
+        try w.splatByteAll(' ', ws.construct - construct.len + 2);
+    }
+};
+
 fn writeText(w: *Writer, e: Explanation) Writer.Error!void {
     try w.print("{s}:{d}  {s}  ({t} code)\n\n", .{ e.path, e.line, e.name, e.class });
+    const ws: Widths = .of(e);
 
     try w.print("cyclomatic {d}", .{e.cyclomatic.value});
     try writeOver(w, e, .cyclomatic);
-    try w.writeAll(if (adding(e) > 0) ": 1, and 1 for each of these\n" else ": 1, nothing branches\n");
-    var at_width: usize = 0;
-    var construct_width: usize = 0;
-    for (e.cyclomatic.branches) |b| {
-        if (b.adds == 0) continue;
-        at_width = @max(at_width, std.fmt.count("{d}:{d}", .{ b.line, b.column }));
-        construct_width = @max(construct_width, b.construct.len);
-    }
-    for (e.nesting.chain) |l| {
-        at_width = @max(at_width, std.fmt.count("{d}:{d}", .{ l.line, l.column }));
-        construct_width = @max(construct_width, l.construct.len);
-    }
-    for (e.cyclomatic.branches) |b| {
-        if (b.adds == 0) continue;
-        try writeAt(w, b.line, b.column, at_width);
-        try w.print("{s}", .{b.construct});
-        try w.splatByteAll(' ', construct_width - b.construct.len + 2);
+    try w.writeAll(if (adding(e.cyclomatic.branches) > 0) ": 1, and 1 for each of these\n" else ": 1, nothing branches\n");
+    for (e.cyclomatic.branches) |b| if (b.adds > 0) {
+        try ws.writeRow(w, b.line, b.column, b.construct);
         try w.print("+{d}\n", .{b.adds});
-    }
+    };
     try writeNotCounted(w, e.cyclomatic.branches, .text);
+
+    try writeCognitiveText(w, e, ws);
 
     try w.print("nesting {d}", .{e.nesting.value});
     try writeOver(w, e, .nesting);
     try w.writeAll(if (e.nesting.chain.len > 0) ": the deepest chain\n" else ": no construct opens a level\n");
     for (e.nesting.chain) |l| {
-        try writeAt(w, l.line, l.column, at_width);
-        try w.print("{s}", .{l.construct});
-        try w.splatByteAll(' ', construct_width - l.construct.len + 2);
+        try ws.writeRow(w, l.line, l.column, l.construct);
         try w.print(" {d}\n", .{l.level});
     }
 
@@ -466,16 +519,38 @@ fn writeText(w: *Writer, e: Explanation) Writer.Error!void {
     }
 }
 
-/// How many of the constructs listed add one.
-fn adding(e: Explanation) usize {
+fn writeCognitiveText(w: *Writer, e: Explanation, ws: Widths) Writer.Error!void {
+    try w.print("cognitive {d}", .{e.cognitive.value});
+    try writeOver(w, e, .cognitive);
+    try w.writeAll(if (adding(e.cognitive.costs) > 0) ": the sum of these\n" else ": nothing costs\n");
+    for (e.cognitive.costs) |c| if (c.adds > 0) {
+        try ws.writeRow(w, c.line, c.column, c.construct);
+        try w.print("+{d}", .{c.adds});
+        if (c.depth > 0 or c.why.len > 0) try w.writeAll("  ");
+        try writeReason(w, c);
+        try w.writeByte('\n');
+    };
+    try writeNotCounted(w, e.cognitive.costs, .text);
+}
+
+/// How much of a cognitive cost is for its depth, and why it costs what it
+/// does, when its kind does not say.
+fn writeReason(w: *Writer, c: Cost) Writer.Error!void {
+    if (c.depth > 0) try w.print("{d} for its depth", .{c.depth});
+    if (c.depth > 0 and c.why.len > 0) try w.writeAll("; ");
+    try w.writeAll(c.why);
+}
+
+/// How many of the constructs listed (branches or costs) add something.
+fn adding(items: anytype) usize {
     var n: usize = 0;
-    for (e.cyclomatic.branches) |b| n += @intFromBool(b.adds > 0);
+    for (items) |item| n += @intFromBool(item.adds > 0);
     return n;
 }
 
 /// For each kind of construct that adds nothing, one line: where each one
-/// is, and why.
-fn writeNotCounted(w: *Writer, branches: []const Branch, format: enum { text, md }) Writer.Error!void {
+/// is, and why. `branches` are a metric's branches or costs.
+fn writeNotCounted(w: *Writer, branches: anytype, format: enum { text, md }) Writer.Error!void {
     for (branches, 0..) |b, i| {
         if (b.adds > 0) continue;
         const earlier = for (branches[0..i]) |p| {
@@ -495,7 +570,7 @@ fn writeNotCounted(w: *Writer, branches: []const Branch, format: enum { text, md
     }
 }
 
-fn sameKind(a: Branch, b: Branch) bool {
+fn sameKind(a: anytype, b: @TypeOf(a)) bool {
     return a.adds == 0 and b.adds == 0 and std.mem.eql(u8, a.construct, b.construct) and std.mem.eql(u8, a.why, b.why);
 }
 
@@ -509,13 +584,14 @@ fn writeMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
 
     try w.print("**cyclomatic {d}**", .{e.cyclomatic.value});
     try writeOver(w, e, .cyclomatic);
-    if (adding(e) == 0) {
+    if (adding(e.cyclomatic.branches) == 0) {
         try w.writeAll(": 1, nothing branches.\n");
     } else {
         try w.writeAll(": 1, and 1 for each of these.\n\n| at | construct |\n| --- | --- |\n");
         for (e.cyclomatic.branches) |b| if (b.adds > 0) try w.print("| {d}:{d} | `{s}` |\n", .{ b.line, b.column, b.construct });
     }
     try writeNotCounted(w, e.cyclomatic.branches, .md);
+    try writeCognitiveMarkdown(w, e);
 
     try w.print("\n**nesting {d}**", .{e.nesting.value});
     try writeOver(w, e, .nesting);
@@ -542,6 +618,22 @@ fn writeMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
         try w.writeAll(".\n\n| name | type | weight | why |\n| --- | --- | ---: | --- |\n");
         for (e.params.each) |p| try w.print("| `{s}` | `{s}` | {d} | {s} |\n", .{ p.name, p.type, p.weight, p.why });
     }
+}
+
+fn writeCognitiveMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
+    try w.print("\n**cognitive {d}**", .{e.cognitive.value});
+    try writeOver(w, e, .cognitive);
+    if (adding(e.cognitive.costs) == 0) {
+        try w.writeAll(": nothing costs.\n");
+    } else {
+        try w.writeAll(": the sum of these.\n\n| at | construct | adds | why |\n| --- | --- | ---: | --- |\n");
+        for (e.cognitive.costs) |c| if (c.adds > 0) {
+            try w.print("| {d}:{d} | `{s}` | {d} | ", .{ c.line, c.column, c.construct, c.adds });
+            try writeReason(w, c);
+            try w.writeAll(" |\n");
+        };
+    }
+    try writeNotCounted(w, e.cognitive.costs, .md);
 }
 
 const sample =
@@ -590,6 +682,11 @@ test "the reasons add up to the numbers" {
     var sum: u32 = 1;
     for (e.cyclomatic.branches) |b| sum += b.adds;
     try std.testing.expectEqual(e.cyclomatic.value, sum);
+    // if 1, and 1, for 2, if 3, the return in the loop 1.
+    try std.testing.expectEqual(8, e.cognitive.value);
+    var cost: u32 = 0;
+    for (e.cognitive.costs) |c| cost += c.adds;
+    try std.testing.expectEqual(e.cognitive.value, cost);
     try std.testing.expectEqual(3, e.nesting.value);
     try std.testing.expectEqual(3, e.nesting.chain.len);
     try std.testing.expectEqual(e.lines.span, e.lines.value + e.lines.blank + e.lines.comment + e.lines.closer + e.lines.nested);
@@ -606,15 +703,21 @@ test "write: text" {
         \\a.zig:2  S.pick  (normal code)
         \\
         \\cyclomatic 5: 1, and 1 for each of these
-        \\  3:9   if   +1
-        \\  3:19  and  +1
-        \\  4:13  for  +1
-        \\  6:17  if   +1
+        \\  3:9   if      +1
+        \\  3:19  and     +1
+        \\  4:13  for     +1
+        \\  6:17  if      +1
         \\  try at 9:16 adds nothing: a try passes an error on; it is not a branch
+        \\cognitive 8: the sum of these
+        \\  3:9   if      +1
+        \\  3:19  and     +1
+        \\  4:13  for     +2  1 for its depth
+        \\  6:17  if      +3  2 for its depth
+        \\  6:31  return  +1  inside a loop: it ends the loop too
         \\nesting 3: the deepest chain
-        \\  3:9   if    1
-        \\  4:13  for   2
-        \\  6:17  if    3
+        \\  3:9   if       1
+        \\  4:13  for      2
+        \\  6:17  if       3
         \\lines 5 of the 9 from signature to closing brace; not counted: 0 blank, 1 comment, 3 closing, 0 in nested functions
         \\params 1, weighted 1
         \\  s    *S         0  a leading self
@@ -635,6 +738,8 @@ test "write: Markdown and JSON" {
         \\### `other` at `a.zig:12` (normal code)
         \\
         \\**cyclomatic 1**: 1, nothing branches.
+        \\
+        \\**cognitive 0**: nothing costs.
         \\
         \\**nesting 0**: no construct opens a level.
         \\
@@ -671,6 +776,8 @@ test "write: xml, csv and tsv say what json does" {
     try std.testing.expectEqualStrings("S.pick", e.get("name").?);
     try std.testing.expectEqualStrings("5", e.child("cyclomatic").?.get("value").?);
     try std.testing.expectEqual(5, e.child("cyclomatic").?.children.len);
+    try std.testing.expectEqualStrings("8", e.child("cognitive").?.get("value").?);
+    try std.testing.expectEqualStrings("2", e.child("cognitive").?.children[3].get("depth").?);
     try std.testing.expectEqualStrings("3", e.child("nesting").?.children[2].get("level").?);
     try std.testing.expectEqualStrings("9", e.child("lines").?.get("span").?);
     try std.testing.expectEqualStrings("Allocator", e.child("params").?.children[1].get("type").?);
@@ -683,9 +790,10 @@ test "write: xml, csv and tsv say what json does" {
         // The rows say what the totals are made of: cyclomatic's items add
         // up to it, nesting's deepest level is it, and params counts the
         // parameters that weigh anything.
-        const metrics = [_][]const u8{ "cyclomatic", "nesting", "lines", "params" };
+        const metrics = [_][]const u8{ "cyclomatic", "nesting", "lines", "params", "cognitive" };
         var totals: [metrics.len]u32 = @splat(0);
         var cyclomatic_sum: u32 = 0;
+        var cognitive_sum: u32 = 0;
         var deepest: u32 = 0;
         var counted: u32 = 0;
         for (table[1..]) |row| {
@@ -699,6 +807,7 @@ test "write: xml, csv and tsv say what json does" {
             }
             switch (m) {
                 0 => cyclomatic_sum += value,
+                4 => cognitive_sum += value,
                 1 => deepest = @max(deepest, value),
                 3 => if (!std.mem.eql(u8, row[4], "weighted")) {
                     counted += @intFromBool(value > 0);
@@ -707,6 +816,7 @@ test "write: xml, csv and tsv say what json does" {
             }
         }
         try std.testing.expectEqual(totals[0], cyclomatic_sum);
+        try std.testing.expectEqual(totals[4], cognitive_sum);
         try std.testing.expectEqual(totals[1], deepest);
         try std.testing.expectEqual(totals[3], counted);
         try std.testing.expectEqualStrings("cyclomatic", table[3][3]);
@@ -738,6 +848,10 @@ test "every golden fixture function: the explanation agrees with its golden row"
         for (try functions.list(arena, &tree), rows.items) |function, row| {
             const e = try build(arena, arena, &tree, index, entry.name, function, .normal, .{});
             try std.testing.expectEqual(row.cyclomatic, e.cyclomatic.value);
+            try std.testing.expectEqual(row.cognitive, e.cognitive.value);
+            var cost: u32 = 0;
+            for (e.cognitive.costs) |c| cost += c.adds;
+            try std.testing.expectEqual(e.cognitive.value, cost);
             try std.testing.expectEqual(row.lines, e.lines.value);
             try std.testing.expectEqual(row.nesting, e.nesting.value);
             try std.testing.expectEqual(row.params, e.params.value);
