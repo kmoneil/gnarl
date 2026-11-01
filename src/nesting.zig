@@ -6,9 +6,9 @@
 //! branches, not its condition), a `while` and a `for` (their bodies and
 //! `else`), a `switch` (its prongs), a labeled block, a container declared
 //! in the function's body (one in its signature, as a return or a
-//! parameter's type, is not), and a `catch` or `orelse` whose handler is a
-//! block with something in it. An `else if` is on its `if`'s level, not
-//! inside it.
+//! parameter's type, is not, nor one it returns), and a `catch` or
+//! `orelse` whose handler is a block with something in it. An `else if` is
+//! on its `if`'s level, not inside it.
 //!
 //! These open none: a plain block, whether a branch's body or one written
 //! on its own to scope a `defer`; a labeled block that is a branch's body,
@@ -16,7 +16,9 @@
 //! `catch` or `orelse` whose handler is a value or a jump.
 //!
 //! A function declared in a container inside this one is measured on its
-//! own, from 0. The container is a level of this one.
+//! own, from 0. The container is a level of this one. A container the
+//! function returns, as `return struct {...};`, is the type it makes, not
+//! code it runs: no level, and nothing in it is one.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -246,7 +248,7 @@ const Walk = struct {
     /// them a body.
     fn pushChildren(w: *Walk, node: Node.Index, d: u32, frame: u32) Allocator.Error!void {
         w.kids.clearRetainingCapacity();
-        try children.append(w.arena, w.tree, node, &w.kids);
+        try children.appendCode(w.arena, w.tree, node, &w.kids);
         for (w.kids.items) |kid| try w.push(.{ .node = kid, .depth = d, .frame = frame });
     }
 };
@@ -532,6 +534,40 @@ test "a container declared inside is a level; its functions are measured on thei
         // for > struct; inner: if > if, from 0.
         \\outer 2
         \\outer.S.inner 2
+        \\
+    );
+}
+
+test "a container the function returns is no level, nor is anything in it" {
+    try expectDepths(
+        \\fn Box(comptime T: type) type {
+        \\    if (@sizeOf(T) == 0) @compileError("empty");
+        \\    return struct {
+        \\        const Inner = struct {
+        \\            const deep = blk: {
+        \\                break :blk switch (@sizeOf(T)) {
+        \\                    1 => 1,
+        \\                    else => 2,
+        \\                };
+        \\            };
+        \\        };
+        \\        x: T,
+        \\        fn get(b: @This()) T {
+        \\            return b.x;
+        \\        }
+        \\    };
+        \\}
+        \\fn local() void {
+        \\    const S = struct { x: u8 };
+        \\    _ = S;
+        \\}
+    ,
+        // Box: the if, 1; the struct it returns, Inner, blk: and the
+        // switch are the type's. get: 0. local: a struct it declares and
+        // does not return is a level, 1.
+        \\Box 1
+        \\Box.get 0
+        \\local 1
         \\
     );
 }

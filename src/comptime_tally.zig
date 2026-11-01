@@ -13,7 +13,10 @@
 //! instantiated and with what, and what each anytype parameter must
 //! provide.
 //!
-//! A function declared inside this one has its own tally.
+//! A function declared inside this one has its own tally. A container it
+//! returns, as `return struct {...};`, is the type it makes, not code it
+//! runs, and what is in it is in no function's tally: its methods have
+//! their own.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -82,14 +85,14 @@ fn signature(arena: Allocator, tree: *const Ast, proto: Ast.full.FnProto, items:
 /// Appends each comptime construct in the function's own code.
 fn body(arena: Allocator, tree: *const Ast, function: Node.Index, items: *std.ArrayList(Item)) Allocator.Error!void {
     var stack: std.ArrayList(Node.Index) = .empty;
-    try children.append(arena, tree, function, &stack);
+    try children.appendCode(arena, tree, function, &stack);
     while (stack.pop()) |node| {
         switch (tree.nodeTag(node)) {
             .fn_decl, .test_decl => continue,
             else => {},
         }
         if (constructOf(tree, node)) |item| try items.append(arena, item);
-        try children.append(arena, tree, node, &stack);
+        try children.appendCode(arena, tree, node, &stack);
     }
 }
 
@@ -139,6 +142,7 @@ test "the tally: each construct where it is, and what the source cannot show" {
         \\    }
         \\    inline for (@typeInfo(T).@"struct".fields) |f| _ = f;
         \\    return struct {
+        \\        const info = @typeInfo(T);
         \\        fn get() T {
         \\            inline while (false) {}
         \\            return undefined;
@@ -168,7 +172,8 @@ test "the tally: each construct where it is, and what the source cannot show" {
         for (t.unknown) |u| try got.print(arena, "  unknown: {s}\n", .{u});
     }
     // get, inside the struct Wrap returns, has its own tally: Wrap's does
-    // not hold its inline while. plain's error set is written out.
+    // not hold its inline while. The struct's @typeInfo is the type's, in
+    // neither. plain's error set is written out.
     try std.testing.expectEqualStrings(
         \\Wrap, returns a type
         \\  1:9 comptime T
@@ -180,10 +185,10 @@ test "the tally: each construct where it is, and what the source cannot show" {
         \\  unknown: how many times it is instantiated, and with what
         \\  unknown: what `w` must provide
         \\Wrap.get
-        \\  8:13 inline while
+        \\  9:13 inline while
         \\read
-        \\  13:12 anytype r
-        \\  15:9 inline prong
+        \\  14:12 anytype r
+        \\  16:9 inline prong
         \\  unknown: the members of its inferred error set
         \\  unknown: how many times it is instantiated, and with what
         \\  unknown: what `r` must provide

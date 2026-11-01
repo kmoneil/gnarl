@@ -117,7 +117,7 @@ fn expectRulesMeasure(doc: []const u8) !void {
         } else return error.UnknownTable;
         checked += 1;
     }
-    try std.testing.expectEqual(25, checked);
+    try std.testing.expectEqual(26, checked);
 }
 
 test "the worked example measures as the skill says" {

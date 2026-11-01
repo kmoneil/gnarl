@@ -92,7 +92,7 @@ pub fn list(arena: Allocator, tree: *const Ast) Allocator.Error![]Function {
         var next = item;
         next.scope = scope;
         next.given_name = null;
-        if (isContainer(tree.nodeTag(item.node))) {
+        if (children.isContainer(tree.nodeTag(item.node))) {
             next.container = item.node;
             next.container_name = item.given_name;
         }
@@ -129,25 +129,6 @@ fn locate(tree: *const Ast, functions: []Function) void {
         function.line = line;
         function.column = @intCast(offset - line_start + 1);
     }
-}
-
-fn isContainer(tag: Node.Tag) bool {
-    return switch (tag) {
-        .container_decl,
-        .container_decl_trailing,
-        .container_decl_two,
-        .container_decl_two_trailing,
-        .container_decl_arg,
-        .container_decl_arg_trailing,
-        .tagged_union,
-        .tagged_union_trailing,
-        .tagged_union_two,
-        .tagged_union_two_trailing,
-        .tagged_union_enum_tag,
-        .tagged_union_enum_tag_trailing,
-        => true,
-        else => false,
-    };
 }
 
 fn kindOf(tree: *const Ast, node: Node.Index) ?Kind {

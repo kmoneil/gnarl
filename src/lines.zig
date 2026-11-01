@@ -8,7 +8,10 @@
 //! string.
 //!
 //! The lines of a function declared in a container inside this one are
-//! its own, and not counted here.
+//! its own, and not counted here. Nor are those of a container the
+//! function returns, as `return struct {...};`: it is the type the
+//! function makes, its fields and declarations the type's, not code the
+//! function runs. The line the `return` is on counts.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -30,7 +33,9 @@ pub fn firsts(arena: Allocator, tree: *const Ast, function: Node.Index, out: *st
 }
 
 fn walk(arena: Allocator, tree: *const Ast, function: Node.Index, sink: ?*std.ArrayList(Ast.TokenIndex)) Allocator.Error!u32 {
-    const nested = try nestedRanges(arena, tree, function);
+    const h = try holes(arena, tree, function);
+    var in_function: Cursor = .{ .ranges = h.functions };
+    var in_type: Cursor = .{ .ranges = h.types };
     const first = tree.firstToken(function);
     const last = tree.lastToken(function);
     var lines: u32 = 0;
@@ -38,15 +43,10 @@ fn walk(arena: Allocator, tree: *const Ast, function: Node.Index, sink: ?*std.Ar
     var line: u32 = 0;
     var pos = tree.tokenStart(first);
     var counted_line: u32 = std.math.maxInt(u32);
-    var next_nested: usize = 0;
     var token = first;
     while (token <= last) : (token += 1) {
-        if (next_nested < nested.len and token == nested[next_nested][0]) {
-            token = nested[next_nested][1];
-            next_nested += 1;
-            continue;
-        }
         if (!isCode(tree.tokenTag(token))) continue;
+        if (in_function.holds(token) or in_type.holds(token)) continue;
         const start = tree.tokenStart(token);
         line += @intCast(std.mem.countScalar(u8, tree.source[pos..start], '\n'));
         pos = start;
@@ -59,23 +59,50 @@ fn walk(arena: Allocator, tree: *const Ast, function: Node.Index, sink: ?*std.Ar
     return lines;
 }
 
-/// The first and last tokens of the functions declared inside `function`,
-/// in source order. They do not overlap: none is looked inside.
-pub fn nestedRanges(arena: Allocator, tree: *const Ast, function: Node.Index) Allocator.Error![]const [2]Ast.TokenIndex {
-    var nested: std.ArrayList([2]Ast.TokenIndex) = .empty;
+/// What of a function, from its first token to its last, is not its own
+/// code: each a list of first and last tokens, in source order.
+pub const Holes = struct {
+    /// The functions declared inside it. They do not overlap: none is
+    /// looked inside.
+    functions: []const [2]Ast.TokenIndex,
+    /// The containers it returns, as `return struct {...};`: the types it
+    /// makes. The methods in one are among `functions`.
+    types: []const [2]Ast.TokenIndex,
+};
+
+/// The holes in `function`. Allocated with `arena`.
+pub fn holes(arena: Allocator, tree: *const Ast, function: Node.Index) Allocator.Error!Holes {
+    var functions: std.ArrayList([2]Ast.TokenIndex) = .empty;
+    var types: std.ArrayList([2]Ast.TokenIndex) = .empty;
     var stack: std.ArrayList(Node.Index) = .empty;
     try children.append(arena, tree, function, &stack);
     while (stack.pop()) |node| switch (tree.nodeTag(node)) {
-        .fn_decl, .test_decl => try nested.append(arena, .{ tree.firstToken(node), tree.lastToken(node) }),
-        else => try children.append(arena, tree, node, &stack),
+        .fn_decl, .test_decl => try functions.append(arena, .{ tree.firstToken(node), tree.lastToken(node) }),
+        else => {
+            if (children.returnedType(tree, node)) |made| try types.append(arena, .{ tree.firstToken(made), tree.lastToken(made) });
+            try children.append(arena, tree, node, &stack);
+        },
     };
-    std.mem.sort([2]Ast.TokenIndex, nested.items, {}, startsBefore);
-    return nested.items;
+    std.mem.sort([2]Ast.TokenIndex, functions.items, {}, startsBefore);
+    std.mem.sort([2]Ast.TokenIndex, types.items, {}, startsBefore);
+    return .{ .functions = functions.items, .types = types.items };
 }
 
 fn startsBefore(_: void, a: [2]Ast.TokenIndex, b: [2]Ast.TokenIndex) bool {
     return a[0] < b[0];
 }
+
+/// Whether each token, asked of in source order, is in one of `ranges`,
+/// which are in source order too.
+const Cursor = struct {
+    ranges: []const [2]Ast.TokenIndex,
+    next: usize = 0,
+
+    fn holds(c: *Cursor, token: Ast.TokenIndex) bool {
+        while (c.next < c.ranges.len and c.ranges[c.next][1] < token) c.next += 1;
+        return c.next < c.ranges.len and c.ranges[c.next][0] <= token;
+    }
+};
 
 /// How a function's lines, from its signature to its closing brace,
 /// divide. Each is in exactly one: `counted` is what `count` gives.
@@ -89,6 +116,9 @@ pub const Breakdown = struct {
     closer: u32 = 0,
     /// Only a function declared inside this one, which has its own count.
     nested: u32 = 0,
+    /// Only the type the function returns: its fields and declarations,
+    /// which are the type's, not code the function runs.
+    returned: u32 = 0,
 
     /// Counts a line, `text`, that holds what `s` says, in its one kind.
     fn add(b: *Breakdown, s: Seen, text: []const u8) void {
@@ -96,6 +126,8 @@ pub const Breakdown = struct {
             b.counted += 1;
         } else if (s.nested) {
             b.nested += 1;
+        } else if (s.returned) {
+            b.returned += 1;
         } else if (s.closer) {
             b.closer += 1;
         } else if (s.doc or std.mem.trim(u8, text, " \t\r").len > 0) {
@@ -104,18 +136,26 @@ pub const Breakdown = struct {
     }
 };
 
+/// Where a token is: in the function's own code, in a function declared
+/// inside it, or in the type it returns.
+const Where = enum { own, function, type };
+
 /// What a line holds, as the tokens on it say.
 const Seen = packed struct {
     code: bool = false,
     nested: bool = false,
+    returned: bool = false,
     closer: bool = false,
     doc: bool = false,
 
-    /// Marks a token tagged `tag` on the line: one of a nested function's,
-    /// code, a doc comment, or else a closer.
-    fn mark(s: *Seen, tag: std.zig.Token.Tag, inside_nested: bool) void {
-        if (inside_nested) {
+    /// Marks a token tagged `tag` on the line, `in` where it is: one of a
+    /// nested function's, one of the returned type's, code, a doc
+    /// comment, or else a closer.
+    fn mark(s: *Seen, tag: std.zig.Token.Tag, in: Where) void {
+        if (in == .function) {
             s.nested = true;
+        } else if (in == .type) {
+            s.returned = true;
         } else if (isCode(tag)) {
             s.code = true;
         } else if (tag == .doc_comment or tag == .container_doc_comment) {
@@ -126,7 +166,9 @@ const Seen = packed struct {
 
 /// How the lines of `function` divide. Allocated with `arena`.
 pub fn explain(arena: Allocator, tree: *const Ast, function: Node.Index) Allocator.Error!Breakdown {
-    const nested = try nestedRanges(arena, tree, function);
+    const h = try holes(arena, tree, function);
+    var in_function: Cursor = .{ .ranges = h.functions };
+    var in_type: Cursor = .{ .ranges = h.types };
     const first = tree.firstToken(function);
     const last = tree.lastToken(function);
     const source = tree.source;
@@ -138,19 +180,13 @@ pub fn explain(arena: Allocator, tree: *const Ast, function: Node.Index) Allocat
     @memset(seen, .{});
     var line: u32 = 0;
     var pos = start;
-    var next_nested: usize = 0;
-    var inside_nested = false;
     var token = first;
     while (token <= last) : (token += 1) {
         const at = tree.tokenStart(token);
         line += @intCast(std.mem.countScalar(u8, source[pos..at], '\n'));
         pos = at;
-        if (next_nested < nested.len and token == nested[next_nested][0]) inside_nested = true;
-        seen[line].mark(tree.tokenTag(token), inside_nested);
-        if (inside_nested and token == nested[next_nested][1]) {
-            inside_nested = false;
-            next_nested += 1;
-        }
+        const in: Where = if (in_function.holds(token)) .function else if (in_type.holds(token)) .type else .own;
+        seen[line].mark(tree.tokenTag(token), in);
     }
 
     var b: Breakdown = .{ .span = span };
@@ -187,7 +223,7 @@ fn expectCounts(source: [:0]const u8, expected: []const u8) !void {
         // The breakdown counts the same lines, and every line once.
         const b = try explain(arena, &tree, function.node);
         try std.testing.expectEqual(n, b.counted);
-        try std.testing.expectEqual(b.span, b.counted + b.blank + b.comment + b.closer + b.nested);
+        try std.testing.expectEqual(b.span, b.counted + b.blank + b.comment + b.closer + b.nested + b.returned);
     }
     try std.testing.expectEqualStrings(expected, got.items);
 }
@@ -302,6 +338,65 @@ test "each line of a multiline string counts; a lone ; does not" {
         \\text 5
         \\
     );
+}
+
+test "the type a function returns is no function's lines; the return's line is the function's" {
+    try expectCounts(
+        \\fn List(comptime T: type) type {
+        \\    if (@sizeOf(T) == 0) @compileError("no");
+        \\    return struct {
+        \\        /// The items.
+        \\        items: []T = &.{},
+        \\        const Self = @This();
+        \\
+        \\        fn len(l: Self) usize {
+        \\            return l.items.len;
+        \\        }
+        \\    };
+        \\}
+        \\fn Pick(comptime wide: bool) type {
+        \\    if (wide) return struct {
+        \\        x: u64,
+        \\    };
+        \\    return struct { x: u8 };
+        \\}
+    ,
+        // List: fn List, if, return struct; len: fn len, return. Pick: fn
+        // Pick, the if's line, the second return's line.
+        \\List 3
+        \\List.len 2
+        \\Pick 3
+        \\
+    );
+}
+
+test "explain: the lines of the type a function returns are a kind of their own" {
+    const functions = @import("functions.zig");
+    const gpa = std.testing.allocator;
+    const source =
+        \\fn List(comptime T: type) type {
+        \\    if (@sizeOf(T) == 0) @compileError("no");
+        \\    return struct {
+        \\        /// The items.
+        \\        items: []T = &.{},
+        \\        const Self = @This();
+        \\
+        \\        fn len(l: Self) usize {
+        \\            return l.items.len;
+        \\        }
+        \\    };
+        \\}
+    ;
+    var tree = try Ast.parse(gpa, source, .{});
+    defer tree.deinit(gpa);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const b = try explain(arena, &tree, (try functions.list(arena, &tree))[0].node);
+    // Counted: fn List, if, return struct. Returned: /// The items.,
+    // items, const Self, and the }; that closes the struct. Nested: fn
+    // len, its return, its }. Closer: the last }.
+    try std.testing.expectEqual(Breakdown{ .span = 12, .counted = 3, .blank = 1, .comment = 0, .closer = 1, .nested = 3, .returned = 4 }, b);
 }
 
 test "a function declared inside has its own lines; its container's lines are the outer one's" {

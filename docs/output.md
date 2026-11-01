@@ -137,6 +137,9 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
     - `blank`, `comment`, `closer`: blank, comment-only, and those
       holding only closing brackets and the `;` or `,` after them.
     - `nested`: those of a function declared inside this one.
+    - `returned`: those of the type it returns (`return struct {...};`),
+      its methods aside: its fields and declarations, which are the
+      type's, not code the function runs.
   - `params`: the counts and each parameter:
     - `value`, `weighted`: as the report's `params` and
       `params_weighted`.

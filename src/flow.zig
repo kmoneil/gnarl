@@ -80,7 +80,7 @@ const Scan = struct {
     /// The parameters, the locals (`const`, `var`) and the captures.
     fn declarations(s: *Scan, function: functions.Function) Allocator.Error!void {
         const tree = s.tree;
-        s.nested = try lines.nestedRanges(s.arena, tree, function.node);
+        s.nested = (try lines.holes(s.arena, tree, function.node)).functions;
         if (function.kind == .@"fn") {
             var buffer: [1]Node.Index = undefined;
             const proto = tree.fullFnProto(&buffer, tree.nodeData(function.node).node_and_node[0]).?;
