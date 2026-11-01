@@ -24,6 +24,17 @@ params have a warning limit only, so they mark a row `!` but never fail
 | cold | critical 20 | critical 35 | | | |
 | tests | critical 20 | critical 35 | | | |
 
+A flat dispatch is held to no cyclomatic limit: a function over a
+cyclomatic limit whose cognitive is over none of its own (within its
+warning, or its critical where it has no warning). A `switch` whose
+every prong is a call has as many paths as prongs but reads as one
+decision, and cognitive complexity is what tells the two apart. The
+table marks its cyclomatic `dispatch` rather than `!` or `!!`, the
+summary counts the dispatches, and `--check` does not fail one on
+cyclomatic, so a new prong never fails it. Its lines, nesting and
+cognitive are held as any function's are. So cyclomatic's limits bite
+only where cognitive is high too.
+
 ```zig
 .{
     .hot = .{ "src/parse/**" },
@@ -123,7 +134,7 @@ A released binary, pinned and checked against its release's checksums:
 ```yaml
 - name: install gnarl
   env:
-    GNARL: v0.4.0
+    GNARL: v0.5.0
   run: |
     dir="$RUNNER_TEMP/gnarl" && mkdir -p "$dir" && cd "$dir"
     base="https://github.com/kmoneil/gnarl/releases/download/$GNARL"

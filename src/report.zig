@@ -41,6 +41,9 @@ pub const Row = struct {
     class: Class = .normal,
     /// The limits it is over, each metric once at its worst. Set by `rank`.
     trips: []const Trip = &.{},
+    /// A flat dispatch: over a cyclomatic limit, its cognitive over none
+    /// of its own, so cyclomatic is not among its trips. Set by `rank`.
+    dispatch: bool = false,
 };
 
 /// Sets each row's trips against its class's thresholds, and sorts the rows
@@ -49,16 +52,11 @@ pub const Row = struct {
 /// parameters, then by path and line.
 pub fn rank(arena: Allocator, rows: []Row, classes: Classes) Allocator.Error!void {
     for (rows) |*row| {
-        const limits = classes.get(row.class);
-        var buffer: [std.enums.values(Metric).len]Trip = undefined;
-        var n: usize = 0;
-        inline for (comptime std.enums.values(Metric)) |metric| {
-            if (limits.over(metric, @field(row, @tagName(metric)))) |trip| {
-                buffer[n] = trip;
-                n += 1;
-            }
-        }
-        row.trips = try arena.dupe(Trip, buffer[0..n]);
+        var values: std.EnumArray(Metric, u32) = .initUndefined();
+        inline for (comptime std.enums.values(Metric)) |metric| values.set(metric, @field(row, @tagName(metric)));
+        const judged = classes.get(row.class).judge(values);
+        row.trips = try arena.dupe(Trip, judged.trips());
+        row.dispatch = judged.dispatch;
     }
     std.mem.sort(Row, rows, {}, worse);
 }
@@ -154,7 +152,7 @@ pub fn list(arena: Allocator, ranked: []const Row, listing: Listing) Allocator.E
 fn leftOut(listing: Listing, row: Row, i: usize) ?std.meta.FieldEnum(NotListed) {
     if (listing.picked) |picked| return if (picked[i]) null else .not_selected;
     if (listing.all) return null;
-    if (row.trips.len == 0) return .within_limits;
+    if (row.trips.len == 0 and !row.dispatch) return .within_limits;
     if (listing.failing) |failing| if (!failing[i]) return .not_failing;
     return null;
 }
@@ -294,6 +292,7 @@ fn writeXml(w: *Writer, rows: []const Row, listed: Listed, c: Context) Writer.Er
         inline for (comptime std.enums.values(Metric)) |metric| {
             try formats.attrInt(w, @tagName(metric), @field(row, @tagName(metric)));
         }
+        try formats.attrBool(w, "dispatch", row.dispatch);
         if (row.trips.len == 0) {
             try w.writeAll("/>\n");
             continue;
@@ -314,6 +313,7 @@ fn writeXml(w: *Writer, rows: []const Row, listed: Listed, c: Context) Writer.Er
 pub const delimited_columns = [_][]const u8{
     "path",       "line",      "end_line", "column",  "name",   "kind",            "class",
     "cyclomatic", "cognitive", "lines",    "nesting", "params", "params_weighted", "over",
+    "dispatch",
 };
 
 /// A header row, then a row per function listed. `over` holds each limit
@@ -335,6 +335,7 @@ fn writeDelimited(w: *Writer, kind: formats.Delimited, rows: []const Row) Writer
         var over: Writer = .fixed(&buffer);
         for (row.trips, 0..) |trip, i| over.print("{s}{t}:{t}:{d}", .{ if (i == 0) "" else " ", trip.metric, trip.level, trip.limit }) catch unreachable;
         try formats.field(w, kind, false, over.buffered());
+        try formats.field(w, kind, false, if (row.dispatch) "true" else "false");
         try w.writeByte('\n');
     }
 }
@@ -356,8 +357,10 @@ fn value(row: Row, column: Column) u32 {
     };
 }
 
-/// What follows a number over a limit: `!` a warning, `!!` critical.
+/// What follows a number over a limit: `!` a warning, `!!` critical; and
+/// ` dispatch` a flat dispatch's cyclomatic, held to no limit.
 fn marker(row: Row, column: Column) []const u8 {
+    if (column.metric == .cyclomatic and row.dispatch) return " dispatch";
     const level = levelOf(row, column.metric) orelse return "";
     return switch (level) {
         .warning => "!",
@@ -372,12 +375,15 @@ fn writeText(w: *Writer, all: []const Row, listed: Listed, files: usize, classes
 
 fn writeTable(w: *Writer, rows: []const Row) Writer.Error!void {
     // Each number column is wide enough for its header and for its widest
-    // number with a two-character marker after it.
+    // number with its widest marker after it, two characters at least.
     var widths: [columns.len]usize = undefined;
-    for (columns, &widths) |column, *width| {
+    var marks: [columns.len]usize = undefined;
+    for (columns, &widths, &marks) |column, *width, *mark_width| {
+        mark_width.* = 2;
+        for (rows) |row| mark_width.* = @max(mark_width.*, marker(row, column).len);
         width.* = column.header.len;
         for (rows) |row| {
-            width.* = @max(width.*, std.fmt.count("{d}", .{value(row, column)}) + 2);
+            width.* = @max(width.*, std.fmt.count("{d}", .{value(row, column)}) + mark_width.*);
         }
     }
     var location_width: usize = "location".len;
@@ -391,12 +397,12 @@ fn writeTable(w: *Writer, rows: []const Row) Writer.Error!void {
     try w.splatByteAll(' ', location_width - "location".len + 2);
     try w.writeAll("function\n");
     for (rows) |row| {
-        for (columns, widths) |column, width| {
+        for (columns, widths, marks) |column, width, mark_width| {
             const mark = marker(row, column);
             const number = std.fmt.count("{d}", .{value(row, column)});
-            try w.splatByteAll(' ', width - 2 - number);
+            try w.splatByteAll(' ', width - mark_width - number);
             try w.print("{d}{s}", .{ value(row, column), mark });
-            try w.splatByteAll(' ', 2 - mark.len + 2);
+            try w.splatByteAll(' ', mark_width - mark.len + 2);
         }
         try w.print("{s}:{d}", .{ row.path, row.line });
         try w.splatByteAll(' ', locationPad(row, location_width) + 2);
@@ -423,7 +429,7 @@ fn writeMarkdownTable(w: *Writer, rows: []const Row) Writer.Error!void {
     for (rows) |row| {
         try w.writeAll("|");
         for (columns) |column| {
-            const mark = marker(row, column);
+            const mark = std.mem.trimStart(u8, marker(row, column), " ");
             try w.print(" {d}{s}{s} |", .{ value(row, column), if (mark.len > 0) " " else "", mark });
         }
         var buffer: [16]u8 = undefined;
@@ -464,13 +470,18 @@ fn writeCode(w: *Writer, text: []const u8, suffix: []const u8) Writer.Error!void
 fn writeSummary(w: *Writer, rows: []const Row, listed: Listed, files: usize, classes: Classes, gap: []const u8) Writer.Error!void {
     var critical: usize = 0;
     var warning: usize = 0;
+    var dispatches: usize = 0;
     for (rows) |row| {
+        dispatches += @intFromBool(row.dispatch);
         if (tally(row, .critical) > 0) {
             critical += 1;
         } else if (row.trips.len > 0) warning += 1;
     }
     try w.print("{d} function{s} in {d} file{s}: {d} over a critical threshold (!!), {d} more over a warning one (!).", .{
         rows.len, plural(rows.len), files, plural(files), critical, warning,
+    });
+    if (dispatches > 0) try w.print("{s}{d} flat dispatch{s} (cyclomatic over its limit, cognitive within its warning) {s} held to no cyclomatic limit.", .{
+        gap, dispatches, if (dispatches == 1) "" else "es", isAre(dispatches),
     });
     const not = listed.not_listed;
     if (not.within_limits > 0) try w.print("{s}{d} within limits {s} not listed; --all lists every function.", .{ gap, not.within_limits, isAre(not.within_limits) });
@@ -578,17 +589,17 @@ test "rank: each row against its own class's thresholds" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const row: Row = .{ .path = "a.zig", .line = 1, .column = 4, .name = "f", .kind = .@"fn", .cyclomatic = 13, .cognitive = 0, .lines = 45, .nesting = 0, .params = 0, .params_weighted = 0 };
+    const row: Row = .{ .path = "a.zig", .line = 1, .column = 4, .name = "f", .kind = .@"fn", .cyclomatic = 13, .cognitive = 16, .lines = 45, .nesting = 0, .params = 0, .params_weighted = 0 };
     var rows = [_]Row{ row, row, row };
     rows[0].class = .hot;
     rows[1].line = 2;
     rows[2].class = .cold;
     rows[2].line = 3;
     try rank(arena, &rows, .defaults);
-    // Hot: cyclomatic 13 is past 12, lines 45 past 40. Normal: a warning
-    // for cyclomatic only. Cold: nothing.
+    // Hot: cyclomatic 13 is past 12, cognitive 16 past 15, lines 45 past
+    // 40. Normal: warnings for cyclomatic and cognitive. Cold: nothing.
     try std.testing.expectEqual(Class.hot, rows[0].class);
-    try std.testing.expectEqual(2, rows[0].trips.len);
+    try std.testing.expectEqual(3, rows[0].trips.len);
     try std.testing.expectEqual(.critical, levelOf(rows[0], .cyclomatic).?);
     try std.testing.expectEqual(.warning, levelOf(rows[1], .cyclomatic).?);
     try std.testing.expectEqual(null, levelOf(rows[1], .lines));

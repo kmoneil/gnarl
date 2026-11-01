@@ -91,11 +91,15 @@ names, and elements for what is a list or an object in json.
     - `metric`: the metric.
     - `level`: `warning` or `critical`.
     - `limit`: the limit it is over.
+  - `dispatch`: whether it is a flat dispatch: over a cyclomatic limit,
+    its cognitive over none of its own. Its cyclomatic is held to no
+    limit then, and is not among its `trips`.
 
 In csv and tsv, the report is the `functions` alone, a row each, with
 the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
-`class`, the six metrics, and `over`: each limit passed as
-`metric:level:limit`, separated by spaces.
+`class`, the six metrics, `over`: each limit passed as
+`metric:level:limit`, separated by spaces, and `dispatch`: `true` or
+`false`.
 
 ## An explanation
 
@@ -103,7 +107,7 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
 - `explanations`: one for each function `--explain` names, in the order
   named:
   - `path`, `line`, `end_line`, `column`, `name`, `kind`, `class`,
-    `trips`: as in the report's `functions`.
+    `trips`, `dispatch`: as in the report's `functions`.
   - `cyclomatic`: the count and what made it:
     - `value`: the count: 1, and the `adds` of each branch.
     - `branches`: each construct counted, and each that a reader may
@@ -249,8 +253,8 @@ lists `imports`, `imported_by` and `modules`, each separated by spaces.
   - `moved`: moved to another file, its own text as it was.
 - `functions`: each function the change touched, worse first, then
   mixed, added, the same, better, removed and moved:
-  - `path`, `name`, `kind`, `class`, `trips`: as in the report's
-    `functions`; `trips` are those of its numbers after the change.
+  - `path`, `name`, `kind`, `class`, `trips`, `dispatch`: as in the
+    report's `functions`, of its numbers after the change.
   - `line`: where it is now; for a removed function, where it was.
   - `change`: one of `changes`' names.
   - `before`, `after`: its numbers at the commit and now, each with
@@ -270,7 +274,7 @@ or added function has are one function moved and changed: it is worse,
 mixed, the same or better, as its numbers say, with `from`. In csv and
 tsv, the columns are `path`, `line`, `name`, `kind`, `class`, `change`,
 each metric `_before` and `_after` (empty for the side a function does
-not have), `over`, and `from` (`path:line`, or empty).
+not have), `over`, `from` (`path:line`, or empty) and `dispatch`.
 
 ## The csv and tsv explanation rows
 

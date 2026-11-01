@@ -209,7 +209,8 @@ Tests are measured like functions, with `kind` `test`.
 
 `--format` takes `text` (the default, a table), `md`, `json`, `xml`,
 `csv` or `tsv`; `--json` is `--format json`. In the table, a number over
-its warning threshold is marked `!` and over its critical one `!!`.
+its warning threshold is marked `!` and over its critical one `!!`; a
+flat dispatch's cyclomatic is marked `dispatch` instead.
 
 The json document (xml holds the same fields) starts with `schema`,
 `gnarl` (the version), `files`, `measured`, `not_listed` (how many left
@@ -218,7 +219,8 @@ out, and why), `check` (`asked`, `failed`, `critical`), `thresholds`,
 `column`, `text` and `more`), then `functions`, one to a line, each with
 `path`, `line`, `end_line`, `column`, `name`, `kind`, `class`, the six
 metrics (`cyclomatic`, `cognitive`, `lines`, `nesting`, `params`,
-`params_weighted`) and `trips` (`metric`, `level`, `limit`).
+`params_weighted`), `trips` (`metric`, `level`, `limit`) and `dispatch`
+(whether it is a flat dispatch, held to no cyclomatic limit).
 
 A `--diff` document has `ref`, `changes` (how many `worse`, `mixed`,
 `added`, `same`, `better`, `removed`) and `functions`, each with `change`,
@@ -284,6 +286,17 @@ params have a warning limit only, so they mark a row `!` but never fail
 | cold | critical 20 | critical 35 | | | |
 | tests | critical 20 | critical 35 | | | |
 
+A flat dispatch is held to no cyclomatic limit: a function over a
+cyclomatic limit whose cognitive is over none of its own (within its
+warning, or its critical where it has no warning). A `switch` whose
+every prong is a call has as many paths as prongs but reads as one
+decision, and cognitive complexity is what tells the two apart. The
+table marks its cyclomatic `dispatch` rather than `!` or `!!`, the
+summary counts the dispatches, and `--check` does not fail one on
+cyclomatic, so a new prong never fails it. Its lines, nesting and
+cognitive are held as any function's are. So cyclomatic's limits bite
+only where cognitive is high too.
+
 ```zig
 .{
     .hot = .{ "src/scan.zig", "src/parse/**" },
@@ -324,9 +337,11 @@ one). gnarl still reports what it could read.
   values. `--diff` shows such a function as mixed: read which numbers
   fell before calling the change a loss.
 - A flat `switch` of many prongs scores high cyclomatic and 1 cognitive:
-  it has many paths but reads as one decision. Cognitive complexity is
-  the better guide to what is hard to read; what raises it is depth, so
-  guard clauses and extracting an inner loop bring it down most.
+  it has many paths but reads as one decision, so gnarl calls it a flat
+  dispatch and holds it to no cyclomatic limit. Do not split one to
+  bring cyclomatic down. Cognitive complexity is the better guide to
+  what is hard to read; what raises it is depth, so guard clauses and
+  extracting an inner loop bring it down most.
 - `try` adds nothing, so a function of many `try`s can score 1; the
   explanation lists them, adding 0, to show they were seen.
 - Paths are as gnarl prints them, relative to the current directory:

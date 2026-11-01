@@ -49,6 +49,8 @@ pub const Explanation = struct {
     class: Class,
     /// The limits it is over, each metric once at its worst.
     trips: []const Trip,
+    /// A flat dispatch, held to no cyclomatic limit.
+    dispatch: bool = false,
     cyclomatic: struct { value: u32, branches: []const Branch },
     cognitive: struct { value: u32, costs: []const Cost },
     nesting: struct { value: u32, chain: []const Level },
@@ -234,11 +236,11 @@ fn build(
         .comptime_tally = try tallyOf(arena, scratch, tree, index, function),
         .regions = try regionsOf(arena, scratch, tree, index, function.node),
     };
-    var trips: std.ArrayList(Trip) = .empty;
-    for (std.enums.values(Metric)) |metric| {
-        if (limits.over(metric, valueOf(e, metric))) |trip| try trips.append(arena, trip);
-    }
-    e.trips = trips.items;
+    var values: std.EnumArray(Metric, u32) = .initUndefined();
+    for (std.enums.values(Metric)) |metric| values.set(metric, valueOf(e, metric));
+    const judged = limits.judge(values);
+    e.trips = try arena.dupe(Trip, judged.trips());
+    e.dispatch = judged.dispatch;
     return e;
 }
 
@@ -558,6 +560,7 @@ fn writeXml(w: *Writer, explanations: []const Explanation, c: Context) Writer.Er
         try formats.attr(w, "name", e.name);
         try formats.attr(w, "kind", @tagName(e.kind));
         try formats.attr(w, "class", @tagName(e.class));
+        try formats.attrBool(w, "dispatch", e.dispatch);
         try w.writeAll(">\n");
         for (e.trips) |trip| {
             try w.writeAll("      <trip");
@@ -632,6 +635,7 @@ fn writeDelimited(w: *Writer, kind: formats.Delimited, explanations: []const Exp
     for (explanations) |e| {
         const row: Item = .{ .w = w, .kind = kind, .e = e };
         try row.put("cyclomatic", "total", "", e.cyclomatic.value, "");
+        if (e.dispatch) try row.put("cyclomatic", "dispatch", "", 0, "a flat dispatch: its cognitive is within its warning, so no limit holds its cyclomatic");
         try row.put("cyclomatic", "base", "", 1, "");
         for (e.cyclomatic.branches) |b| try row.putAt("cyclomatic", b.construct, b.line, b.column, b.adds, b.why);
         try row.put("cognitive", "total", "", e.cognitive.value, "");
@@ -985,6 +989,7 @@ const Item = struct {
 
 /// `, over the warning limit (10)` for a metric over one, else nothing.
 fn writeOver(w: *Writer, e: Explanation, metric: Metric) Writer.Error!void {
+    if (metric == .cyclomatic and e.dispatch) return w.writeAll(", a flat dispatch held to no limit, its cognitive within its warning");
     for (e.trips) |trip| if (trip.metric == metric) {
         try w.print(", over the {t} limit ({d})", .{ trip.level, trip.limit });
     };
@@ -1443,6 +1448,45 @@ test "write: Markdown and JSON" {
     try std.testing.expectEqualStrings("S.pick", doc.explanations[0].name);
     try std.testing.expectEqual(5, doc.explanations[0].cyclomatic.branches.len);
     try std.testing.expectEqualStrings("a leading self", doc.explanations[0].params.each[0].why);
+}
+
+test "write: a flat dispatch says its cyclomatic is held to no limit, in every format" {
+    const gpa = std.testing.allocator;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Twelve prongs, each a value: cyclomatic 13, cognitive 1.
+    const source =
+        \\fn kind(c: u8) u8 {
+        \\    return switch (c) {
+        \\        'a' => 1, 'b' => 2, 'c' => 3, 'd' => 4, 'e' => 5, 'f' => 6,
+        \\        'g' => 7, 'h' => 8, 'i' => 9, 'j' => 10, 'k' => 11, 'l' => 12,
+        \\        else => 0,
+        \\    };
+        \\}
+    ;
+    var tree = try Ast.parse(gpa, source, .{});
+    defer tree.deinit(gpa);
+    var search: Search = try .init(arena, &.{"kind"});
+    try search.file(arena, arena, "a.zig", &tree, .normal, .defaults);
+    var said: Messages = .{ .arena = arena, .echo = false };
+    const explanations = (try search.results(arena, &said)).explanations;
+    try std.testing.expect(explanations[0].dispatch);
+    try std.testing.expectEqual(0, explanations[0].trips.len);
+    inline for (.{
+        .{ report.Format.text, "\ncyclomatic 13, a flat dispatch held to no limit, its cognitive within its warning: 1, and 1 for each of these\n" },
+        .{ report.Format.md, "**cyclomatic 13**, a flat dispatch held to no limit, its cognitive within its warning: " },
+        .{ report.Format.json, "\"dispatch\":true" },
+        .{ report.Format.xml, " dispatch=\"true\"" },
+        .{ report.Format.csv, ",cyclomatic,dispatch,,0," },
+    }) |case| {
+        var out: Writer.Allocating = .init(arena);
+        try write(&out.writer, case[0], explanations, .{ .version = "0.0.0" });
+        if (std.mem.indexOf(u8, out.written(), case[1]) == null) {
+            std.debug.print("{t}: no {s} in:\n{s}\n", .{ case[0], case[1], out.written() });
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 test "write: xml, csv and tsv say what json does" {

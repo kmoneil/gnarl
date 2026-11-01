@@ -89,7 +89,7 @@ test "docs/output.md lists every field of the report, and no other" {
     const arena = arena_state.allocator();
     const doc = try std.Io.Dir.cwd().readFileAlloc(io, doc_path, arena, .limited(1 << 20));
 
-    var rows = [_]report.Row{.{ .path = "a.zig", .line = 1, .end_line = 3, .column = 4, .name = "f", .kind = .@"fn", .cyclomatic = 30, .cognitive = 0, .lines = 3, .nesting = 0, .params = 0, .params_weighted = 0 }};
+    var rows = [_]report.Row{.{ .path = "a.zig", .line = 1, .end_line = 3, .column = 4, .name = "f", .kind = .@"fn", .cyclomatic = 30, .cognitive = 30, .lines = 3, .nesting = 0, .params = 0, .params_weighted = 0 }};
     try report.rank(arena, &rows, .defaults);
     var out: std.Io.Writer.Allocating = .init(arena);
     try report.write(&out.writer, .json, &rows, try report.list(arena, &rows, .{}), .{
