@@ -146,15 +146,22 @@ level.
 | `fn f(x: E) void { switch (x) { .a => {}, inline else => {} } }` | 3 | 1 |
 | `fn f(c: bool) u8 { return blk: { if (c) break :blk 1; break :blk 2; }; }` | 2 | 2 |
 | `fn f() void { const S = struct { fn g(d: bool) void { if (d) {} } }; _ = S; }` | 1 | 1 |
+| `fn F(comptime T: type) type { return struct { const n = if (@sizeOf(T) > 8) 2 else 1; x: T }; }` | 1 | 0 |
 
-The last row: a function declared inside another is measured on its own
-(here as `f.S.g`, cyclomatic 2), and adds nothing to the one around it
-but the container's level.
+The last two rows: a function declared inside another is measured on its
+own (here as `f.S.g`, cyclomatic 2), and adds nothing to the one around
+it but the container's level. A container a function returns, as a
+generic type such as `F` does, is the type it makes, not code it runs:
+like a container at the top of a file, it is in no function's numbers.
+It opens no level, nothing in it counts, and its methods are measured on
+their own. What the function does before it returns, such as checking
+its parameters, counts as any code.
 
 Logical lines are the lines from the signature to the closing brace that
 hold code: not a blank line, a comment-only line, or a line of nothing
 but closing brackets and the `;` or `,` after them. A nested function's
-lines are its own.
+lines are its own, and the fields and declarations of a type a function
+returns are no function's.
 
 Parameters leave out what is context rather than input: a leading self
 (a first parameter typed as the container, `@This()`, or a name the
@@ -304,7 +311,9 @@ one). gnarl still reports what it could read.
 - A function missing from the report is within its limits: the default
   lists only what is over one. Use `--function` or `--all`.
 - A long generic type function (`fn List(T: type) type { return struct
-  {...}; }`) is short to gnarl: its methods are their own rows.
+  {...}; }`) is short to gnarl: the struct it returns is the type, not
+  the function's code. Its methods are their own rows, and its fields and
+  declarations count toward no function, so adding a field moves nothing.
 - Extracting a helper can move the cost into its parameters: the context
   the code needed becomes the helper's arguments. Measure the helper too
   (`--function` takes several), and prefer passing a struct over six

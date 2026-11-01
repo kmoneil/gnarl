@@ -52,7 +52,7 @@ pub const Explanation = struct {
     cyclomatic: struct { value: u32, branches: []const Branch },
     cognitive: struct { value: u32, costs: []const Cost },
     nesting: struct { value: u32, chain: []const Level },
-    lines: struct { value: u32, span: u32, blank: u32, comment: u32, closer: u32, nested: u32 },
+    lines: struct { value: u32, span: u32, blank: u32, comment: u32, closer: u32, nested: u32, returned: u32 },
     params: struct { value: u32, weighted: u32, each: []const params.Param },
     /// What runs at compile time, as far as the source shows, and what it
     /// cannot show.
@@ -228,6 +228,7 @@ fn build(
             .comment = breakdown.comment,
             .closer = breakdown.closer,
             .nested = breakdown.nested,
+            .returned = breakdown.returned,
         },
         .params = .{ .value = p.count, .weighted = p.weighted, .each = each },
         .comptime_tally = try tallyOf(arena, scratch, tree, index, function),
@@ -587,7 +588,7 @@ fn writeXml(w: *Writer, explanations: []const Explanation, c: Context) Writer.Er
             try w.writeAll("/>\n");
         }
         try w.writeAll("      </nesting>\n      <lines");
-        inline for (.{ "value", "span", "blank", "comment", "closer", "nested" }) |field| try formats.attrInt(w, field, @field(e.lines, field));
+        inline for (.{ "value", "span", "blank", "comment", "closer", "nested", "returned" }) |field| try formats.attrInt(w, field, @field(e.lines, field));
         try w.print("/>\n      <params value=\"{d}\" weighted=\"{d}\">\n", .{ e.params.value, e.params.weighted });
         for (e.params.each) |p| {
             try w.writeAll("        <param");
@@ -643,7 +644,7 @@ fn writeDelimited(w: *Writer, kind: formats.Delimited, explanations: []const Exp
         try row.put("nesting", "total", "", e.nesting.value, "");
         for (e.nesting.chain) |l| try row.putAt("nesting", l.construct, l.line, l.column, l.level, "");
         try row.put("lines", "total", "", e.lines.value, "");
-        inline for (.{ "span", "blank", "comment", "closer", "nested" }) |field| try row.put("lines", field, "", @field(e.lines, field), "");
+        inline for (.{ "span", "blank", "comment", "closer", "nested", "returned" }) |field| try row.put("lines", field, "", @field(e.lines, field), "");
         try row.put("params", "total", "", e.params.value, "");
         try row.put("params", "weighted", "", e.params.weighted, "");
         for (e.params.each) |p| {
@@ -1042,9 +1043,8 @@ fn writeText(w: *Writer, e: Explanation) Writer.Error!void {
 
     try w.print("lines {d}", .{e.lines.value});
     try writeOver(w, e, .lines);
-    try w.print(" of the {d} from signature to closing brace; not counted: {d} blank, {d} comment, {d} closing, {d} in nested functions\n", .{
-        e.lines.span, e.lines.blank, e.lines.comment, e.lines.closer, e.lines.nested,
-    });
+    try writeLinesLeftOut(w, e);
+    try w.writeAll("\n");
 
     try w.print("params {d}", .{e.params.value});
     try writeOver(w, e, .params);
@@ -1098,6 +1098,16 @@ fn adding(items: anytype) usize {
     var n: usize = 0;
     for (items) |item| n += @intFromBool(item.adds > 0);
     return n;
+}
+
+/// What the lines count leaves out, as the text and markdown say it after
+/// the count. The type a function returns is named only when it has one.
+fn writeLinesLeftOut(w: *Writer, e: Explanation) Writer.Error!void {
+    const l = e.lines;
+    try w.print(" of the {d} from signature to closing brace; not counted: {d} blank, {d} comment, {d} closing, {d} in nested functions", .{
+        l.span, l.blank, l.comment, l.closer, l.nested,
+    });
+    if (l.returned > 0) try w.print(", {d} in the type it returns", .{l.returned});
 }
 
 /// For each kind of construct that adds nothing, one line: where each one
@@ -1157,9 +1167,8 @@ fn writeMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
 
     try w.print("\n**lines {d}**", .{e.lines.value});
     try writeOver(w, e, .lines);
-    try w.print(" of the {d} from signature to closing brace; not counted: {d} blank, {d} comment, {d} closing, {d} in nested functions.\n", .{
-        e.lines.span, e.lines.blank, e.lines.comment, e.lines.closer, e.lines.nested,
-    });
+    try writeLinesLeftOut(w, e);
+    try w.writeAll(".\n");
 
     try w.print("\n**params {d}**", .{e.params.value});
     try writeOver(w, e, .params);
@@ -1251,7 +1260,7 @@ test "the reasons add up to the numbers" {
     try std.testing.expectEqual(e.cognitive.value, cost);
     try std.testing.expectEqual(3, e.nesting.value);
     try std.testing.expectEqual(3, e.nesting.chain.len);
-    try std.testing.expectEqual(e.lines.span, e.lines.value + e.lines.blank + e.lines.comment + e.lines.closer + e.lines.nested);
+    try std.testing.expectEqual(e.lines.span, e.lines.value + e.lines.blank + e.lines.comment + e.lines.closer + e.lines.nested + e.lines.returned);
     try std.testing.expectEqual(1, e.params.value);
 }
 
@@ -1545,7 +1554,7 @@ test "every golden fixture function: the explanation agrees with its golden row"
             for (e.cyclomatic.branches) |b| sum += b.adds;
             try std.testing.expectEqual(e.cyclomatic.value, sum);
             try std.testing.expectEqual(e.nesting.value, e.nesting.chain.len);
-            try std.testing.expectEqual(e.lines.span, e.lines.value + e.lines.blank + e.lines.comment + e.lines.closer + e.lines.nested);
+            try std.testing.expectEqual(e.lines.span, e.lines.value + e.lines.blank + e.lines.comment + e.lines.closer + e.lines.nested + e.lines.returned);
             checked += 1;
         }
     }

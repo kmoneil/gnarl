@@ -312,6 +312,76 @@ fn appendOptionals(gpa: Allocator, out: *std.ArrayList(Node.Index), nodes: []con
     for (nodes) |optional| if (optional.unwrap()) |child| try out.append(gpa, child);
 }
 
+/// Appends `node`'s children that are code a function runs: all of them,
+/// but the container a `return` gives. That container is the type a
+/// function that returns a type makes: like a container at the top of a
+/// file, it is in no function's figures, and its methods are measured on
+/// their own.
+pub fn appendCode(gpa: Allocator, tree: *const Ast, node: Node.Index, out: *std.ArrayList(Node.Index)) Allocator.Error!void {
+    if (returnedType(tree, node) == null) try append(gpa, tree, node, out);
+}
+
+/// The container `node` gives, when it is a `return` of one, as `return
+/// struct {...};` is.
+pub fn returnedType(tree: *const Ast, node: Node.Index) ?Node.Index {
+    if (tree.nodeTag(node) != .@"return") return null;
+    const operand = tree.nodeData(node).opt_node.unwrap() orelse return null;
+    return if (isContainer(tree.nodeTag(operand))) operand else null;
+}
+
+/// Whether a node so tagged declares a container: a `struct`, `enum`,
+/// `union` or `opaque`.
+pub fn isContainer(tag: Node.Tag) bool {
+    return switch (tag) {
+        .container_decl,
+        .container_decl_trailing,
+        .container_decl_two,
+        .container_decl_two_trailing,
+        .container_decl_arg,
+        .container_decl_arg_trailing,
+        .tagged_union,
+        .tagged_union_trailing,
+        .tagged_union_two,
+        .tagged_union_two_trailing,
+        .tagged_union_enum_tag,
+        .tagged_union_enum_tag_trailing,
+        => true,
+        else => false,
+    };
+}
+
+test "returnedType: the container a return gives, whatever its kind; nothing else" {
+    const gpa = std.testing.allocator;
+    const source =
+        \\fn A() type { return struct { x: u8 }; }
+        \\fn B() type { return packed struct(u8) { x: u8 }; }
+        \\fn C() type { return union(enum) { a, b }; }
+        \\fn D() type { return enum(u2) { a }; }
+        \\fn E() type { return opaque {}; }
+        \\fn F() type { return u8; }
+        \\fn G() type { const S = struct {}; return S; }
+        \\fn H() void { return; }
+    ;
+    var tree = try Ast.parse(gpa, source, .{});
+    defer tree.deinit(gpa);
+    try std.testing.expectEqual(0, tree.errors.len);
+    var kinds: std.ArrayList(u8) = .empty;
+    defer kinds.deinit(gpa);
+    for (0..tree.nodes.len) |i| {
+        const node: Node.Index = @fromBackingInt(@intCast(i));
+        if (tree.nodeTag(node) != .@"return") continue;
+        const container = returnedType(&tree, node) orelse {
+            try kinds.appendSlice(gpa, "- ");
+            continue;
+        };
+        try kinds.appendSlice(gpa, tree.tokenSlice(tree.nodeMainToken(container)));
+        try kinds.append(gpa, ' ');
+    }
+    // A name the function gave a container is left as it is: a type
+    // function written so is rare, and the name could be anything's.
+    try std.testing.expectEqualStrings("struct struct union enum opaque - - - ", kinds.items);
+}
+
 test "every node is reached from the root exactly once" {
     // Syntax chosen to use as many tags as possible, with the less common
     // forms (asm, destructuring, sentinels, bit ranges, labeled switch) on

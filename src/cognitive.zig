@@ -20,7 +20,9 @@
 //! that is a block or a `switch`, and a labeled block used as a value.
 //!
 //! A function declared in a container inside this one is measured on its
-//! own, and adds nothing here; the container costs nothing either.
+//! own, and adds nothing here; the container costs nothing either. A
+//! container the function returns, as `return struct {...};`, is the type
+//! it makes, not code it runs: nothing in it costs anything here.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -351,7 +353,7 @@ const Walk = struct {
     /// Pushes every child of `node`, each at `place`.
     fn pushChildren(w: *Walk, node: Node.Index, depth: u32, frame: u32, place: Place) Allocator.Error!void {
         w.kids.clearRetainingCapacity();
-        try children.append(w.arena, w.tree, node, &w.kids);
+        try children.appendCode(w.arena, w.tree, node, &w.kids);
         for (w.kids.items) |kid| try w.push(.{ .node = kid, .depth = depth, .frame = frame, .place = place });
     }
 };
@@ -502,7 +504,7 @@ test "every example in docs/cognitive.md: its count, and each line's costs as it
             try std.testing.expectEqual(want, got);
         }
     }
-    try std.testing.expectEqual(21, examples);
+    try std.testing.expectEqual(22, examples);
 }
 
 /// Checks each function in `source` has its expected count, given a line

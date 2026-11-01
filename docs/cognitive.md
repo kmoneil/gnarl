@@ -40,6 +40,8 @@ block, and a labeled block used as a value. Nothing else does.
 
 A function declared inside another, in a container in its body, is
 measured on its own, starting at 0; it adds nothing to the one around it.
+A container a function returns is the type it makes: nothing in it costs
+the function anything.
 
 ## Straight-line code
 
@@ -407,6 +409,34 @@ fn sortRows(rows: []Row) void {
 ```
 
 Cognitive 0 for `sortRows`; `sortRows.lessThan` has its own 1.
+
+## A function that returns a type
+
+A function that returns a type is how Zig writes a generic type. The
+container it returns is the type it makes, not code it runs: like a
+container at the top of a file, nothing in it costs any function
+anything, and its methods are measured on their own. What the function
+does before it returns, such as checking its parameters, costs as any
+code does.
+
+```zig
+fn Stack(comptime T: type, comptime capacity: usize) type {
+    if (capacity == 0) @compileError("a stack holds at least one item"); // 1
+    return struct {
+        const Len = if (capacity < 256) u8 else usize; // nothing: the type's
+        items: [capacity]T = undefined,
+        len: Len = 0,
+
+        fn push(s: *@This(), item: T) error{Full}!void {
+            if (s.len == capacity) return error.Full; // 1, to push
+            s.items[s.len] = item;
+            s.len += 1;
+        }
+    };
+}
+```
+
+Cognitive 1 for `Stack`; `Stack.push` has its own 1.
 
 ## Not counted
 

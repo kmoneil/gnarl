@@ -14,7 +14,9 @@
 //! {}`, and `orelse unreachable`, which is `.?`.
 //!
 //! A function declared in a container inside this one is counted on its
-//! own, and adds nothing here.
+//! own, and adds nothing here. Nor does a container the function returns,
+//! as `return struct {...};`: it is the type the function makes, not code
+//! it runs, and its methods are counted on their own.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -62,7 +64,7 @@ fn walk(arena: Allocator, tree: *const Ast, function: Node.Index, sink: ?*std.Ar
     // The ifs that are another if's else, which an explanation calls
     // `else if`. An if is visited before its else.
     var else_ifs: std.AutoHashMapUnmanaged(Node.Index, void) = .empty;
-    try children.append(arena, tree, function, &stack);
+    try children.appendCode(arena, tree, function, &stack);
     while (stack.pop()) |node| {
         switch (tree.nodeTag(node)) {
             .fn_decl, .test_decl => continue,
@@ -71,7 +73,7 @@ fn walk(arena: Allocator, tree: *const Ast, function: Node.Index, sink: ?*std.Ar
         const adds = ways(tree, node);
         total += adds;
         if (sink) |branches| try note(arena, tree, node, adds, &else_ifs, branches);
-        try children.append(arena, tree, node, &stack);
+        try children.appendCode(arena, tree, node, &stack);
     }
     return total;
 }
@@ -539,6 +541,31 @@ test "a function declared inside counts on its own, not in the one around it" {
         // 1 + if; 1 + if + if.
         \\outer 2
         \\outer.S.inner 3
+        \\
+    );
+}
+
+test "a container the function returns adds nothing; what comes before it counts" {
+    try expectCounts(
+        \\fn Ring(comptime T: type, comptime n: usize) type {
+        \\    if (n == 0 or n > 64) @compileError("1 to 64 items");
+        \\    return struct {
+        \\        const Index = if (n <= 256) u8 else usize;
+        \\        const wraps = n & (n - 1) != 0 and n > 1;
+        \\        items: [n]T,
+        \\        comptime {
+        \\            for (0..n) |i| if (i > n) unreachable;
+        \\        }
+        \\        fn next(i: Index) Index {
+        \\            return if (i + 1 == n) 0 else i + 1;
+        \\        }
+        \\    };
+        \\}
+    ,
+        // Ring: 1 + if + or; the struct's if, and, for and if are the
+        // type's. next: 1 + if.
+        \\Ring 3
+        \\Ring.next 2
         \\
     );
 }
