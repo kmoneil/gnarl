@@ -913,9 +913,12 @@ test "in a git work tree, what git ignores is not read; --no-ignore reads it" {
 }
 
 /// A function of `ifs` ifs, cyclomatic ifs + 1, named `name`.
+/// A function of `ifs` ifs in a row, and an errdefer, which costs
+/// cognitive 1 and cyclomatic nothing: so its cognitive keeps up with its
+/// cyclomatic, and it is no flat dispatch.
 fn branchy(arena: std.mem.Allocator, name: []const u8, ifs: usize) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
-    try out.print(arena, "fn {s}(c: bool) void {{\n", .{name});
+    try out.print(arena, "fn {s}(c: bool) !void {{\n    errdefer {{}}\n", .{name});
     for (0..ifs) |_| try out.appendSlice(arena, "    if (c) {}\n");
     try out.appendSlice(arena, "}\n");
     return out.items;
@@ -954,7 +957,7 @@ test "--update-baseline, then --check holds to it: new or worse fails, debt kept
         try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
         try std.testing.expectEqualStrings("gnarl: complexity.baseline: note: wrote 1 function over a critical threshold\n", result.stderr);
         const written = try tmp.dir.readFileAlloc(io, "complexity.baseline", arena, .limited(1 << 20));
-        try std.testing.expect(std.mem.endsWith(u8, written, "\na.zig\tf\t17\t16\t17\t1\t1\t1\n"));
+        try std.testing.expect(std.mem.endsWith(u8, written, "\na.zig\tf\t17\t17\t18\t1\t1\t1\n"));
     }
 
     const held = [_]Step{
@@ -972,8 +975,8 @@ test "--update-baseline, then --check holds to it: new or worse fails, debt kept
         // still.
         .{ .source = try std.mem.concat(arena, u8, &.{ held_at, try branchy(arena, "g", 15) }), .exit = 1, .listed = " g\n", .unlisted = " f\n", .stderr =
         \\gnarl: --check: 1 function fails against complexity.baseline:
-        \\  a.zig:19  g: cyclomatic 16, over the critical limit 15; not in the baseline
-        \\gnarl --explain a.zig:19 says why the first scores what it does
+        \\  a.zig:20  g: cyclomatic 16, over the critical limit 15; not in the baseline
+        \\gnarl --explain a.zig:20 says why the first scores what it does
         \\
         },
         // Better than its baseline, still over: passes, and says to tighten.
@@ -1134,13 +1137,17 @@ test "by default only what is over a threshold; --top, and --function to pick" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = thirteen ++ "fn g() void {}\n" });
 
+    // f's thirteen ifs in a row read as one decision each, cognitive 12,
+    // within its warning: a flat dispatch, listed and held to no
+    // cyclomatic limit.
+    const dispatch_line = "1 flat dispatch (cyclomatic over its limit, cognitive within its warning) is held to no cyclomatic limit.\n";
     const f_row =
-        \\cyclomatic  cognitive  lines  nesting  params  weighted  location  function
-        \\      13!        12     13        1       1         1    a.zig:1   f
+        \\ cyclomatic  cognitive  lines  nesting  params  weighted  location  function
+        \\13 dispatch       12     13        1       1         1    a.zig:1   f
         \\
-        \\2 functions in 1 file: 0 over a critical threshold (!!), 1 more over a warning one (!).
+        \\2 functions in 1 file: 0 over a critical threshold (!!), 0 more over a warning one (!).
         \\
-    ;
+    ++ dispatch_line;
     try expectRun(tmp.dir, &.{"a.zig"}, 0, f_row ++ "1 within limits is not listed; --all lists every function.\n" ++ thresholds_line, "");
     // . is the current directory.
     try expectRun(tmp.dir, &.{"."}, 0, f_row ++ "1 within limits is not listed; --all lists every function.\n" ++ thresholds_line, "");
@@ -1151,7 +1158,9 @@ test "by default only what is over a threshold; --top, and --function to pick" {
         \\cyclomatic  cognitive  lines  nesting  params  weighted  location  function
         \\       1          0      1        0       0         0    a.zig:15  g
         \\
-        \\2 functions in 1 file: 0 over a critical threshold (!!), 1 more over a warning one (!).
+        \\2 functions in 1 file: 0 over a critical threshold (!!), 0 more over a warning one (!).
+        \\
+    ++ dispatch_line ++
         \\1 not picked by --function is not listed.
         \\
     ++ thresholds_line, "");

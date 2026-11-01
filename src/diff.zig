@@ -93,6 +93,9 @@ pub const Touched = struct {
     after: ?Values,
     /// The limits its numbers after the change are over.
     trips: []const Trip,
+    /// Whether, after the change, it is a flat dispatch, held to no
+    /// cyclomatic limit.
+    dispatch: bool = false,
     /// Where it was, when it came from another file: for a function
     /// `moved`, or one moved and changed. Null otherwise.
     from: ?Place = null,
@@ -322,9 +325,10 @@ pub fn compareFile(
             change = compare(was.?, now);
         }
         const class: Class = .forFunction(file_class, row.kind == .@"test");
-        var trips: std.ArrayList(Trip) = .empty;
-        for (metrics) |m| if (classes.get(class).over(m, now.get(m))) |trip| try trips.append(arena, trip);
-        try out.add(arena, .{ .path = path, .line = row.line, .name = row.name, .kind = row.kind, .class = class, .change = change, .before = was, .after = now, .trips = trips.items }, text);
+        var values: std.EnumArray(Metric, u32) = .initUndefined();
+        for (metrics) |m| values.set(m, now.get(m));
+        const judged = classes.get(class).judge(values);
+        try out.add(arena, .{ .path = path, .line = row.line, .name = row.name, .kind = row.kind, .class = class, .change = change, .before = was, .after = now, .trips = try arena.dupe(Trip, judged.trips()), .dispatch = judged.dispatch }, text);
     }
     for (old.rows, old.texts, matched) |row, text, m| if (!m) {
         try out.add(arena, .{ .path = path, .line = row.line, .name = row.name, .kind = row.kind, .class = .forFunction(file_class, row.kind == .@"test"), .change = .removed, .before = Values.of(row), .after = null, .trips = &.{} }, text);
@@ -538,7 +542,7 @@ comptime {
 /// it.
 fn cell(buffer: []u8, t: Touched, metric: Metric) []const u8 {
     var w: Writer = .fixed(buffer);
-    const mark = for (t.trips) |trip| {
+    const mark = if (metric == .cyclomatic and t.dispatch) " dispatch" else for (t.trips) |trip| {
         if (trip.metric == metric) break if (trip.level == .critical) "!!" else "!";
     } else "";
     if (t.before) |b| {
@@ -676,6 +680,7 @@ fn writeXml(w: *Writer, touched: []const Touched, c: Context) Writer.Error!void 
         try formats.attr(w, "kind", @tagName(t.kind));
         try formats.attr(w, "class", @tagName(t.class));
         try formats.attr(w, "change", @tagName(t.change));
+        try formats.attrBool(w, "dispatch", t.dispatch);
         try w.writeAll(">\n");
         inline for (.{ "before", "after" }) |which| {
             if (@field(t, which)) |v| {
@@ -706,7 +711,7 @@ pub const delimited_columns = [_][]const u8{
     "path",              "line",             "name",             "kind",            "class",                  "change",
     "cyclomatic_before", "cyclomatic_after", "cognitive_before", "cognitive_after", "lines_before",           "lines_after",
     "nesting_before",    "nesting_after",    "params_before",    "params_after",    "params_weighted_before", "params_weighted_after",
-    "over",              "from",
+    "over",              "from",             "dispatch",
 };
 
 /// A header, then a row per function; a side the function does not have
@@ -737,9 +742,11 @@ fn writeOverFrom(w: *Writer, kind: formats.Delimited, t: Touched) Writer.Error!v
     var over: Writer = .fixed(&buffer);
     for (t.trips, 0..) |trip, i| over.print("{s}{t}:{t}:{d}", .{ if (i == 0) "" else " ", trip.metric, trip.level, trip.limit }) catch unreachable;
     try formats.field(w, kind, false, over.buffered());
-    const f = t.from orelse return formats.field(w, kind, false, "");
-    var place: [1024]u8 = undefined;
-    try formats.field(w, kind, false, std.fmt.bufPrint(&place, "{s}:{d}", .{ f.path, f.line }) catch f.path);
+    if (t.from) |f| {
+        var place: [1024]u8 = undefined;
+        try formats.field(w, kind, false, std.fmt.bufPrint(&place, "{s}:{d}", .{ f.path, f.line }) catch f.path);
+    } else try formats.field(w, kind, false, "");
+    try formats.field(w, kind, false, if (t.dispatch) "true" else "false");
 }
 
 fn parse(gpa: Allocator, source: [:0]const u8) !Ast {
@@ -886,6 +893,24 @@ test "pairMoves: moved as it was, moved and changed, and what has no one partner
     var moved = touched[touched.len - 1];
     moved.trips = &.{.{ .metric = .cyclomatic, .level = .critical, .limit = 15 }};
     try std.testing.expectEqual(0, countCritical(&.{moved}));
+}
+
+test "write: a flat dispatch's cyclomatic is marked dispatch, not ! or !!" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const before: Values = .{ .cyclomatic = 13, .cognitive = 1, .lines = 14, .nesting = 1, .params = 1, .params_weighted = 1 };
+    var after = before;
+    after.cyclomatic = 14;
+    const touched = [_]Touched{.{ .path = "a.zig", .line = 1, .name = "kind", .kind = .@"fn", .class = .normal, .change = .worse, .before = before, .after = after, .trips = &.{}, .dispatch = true }};
+    const context: Context = .{ .version = "0.0.0", .ref = "main", .files = 1, .classes = .defaults };
+    var text: Writer.Allocating = .init(arena);
+    try write(&text.writer, .text, &touched, context);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "\nworse   13 -> 14 dispatch  1 ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "\nNone of them is over a critical limit now.\n") != null);
+    var csv: Writer.Allocating = .init(arena);
+    try write(&csv.writer, .csv, &touched, context);
+    try std.testing.expect(std.mem.endsWith(u8, csv.written(), ",,,true\n"));
 }
 
 test "write: the table, and the summary saying when nothing got worse" {

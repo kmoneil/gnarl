@@ -59,6 +59,10 @@ lists only what needs attention; `--all` lists everything.
 - **It holds the line in CI.** A baseline freezes the debt you have:
   `--check` fails only what is new or worse, so a legacy codebase can
   adopt it today.
+- **It tells a flat dispatch from debt.** A `switch` whose every prong
+  is a call has many paths but reads as one decision. gnarl marks it a
+  dispatch and holds it to no cyclomatic limit, so a new prong never
+  fails CI; cognitive complexity says what is hard to read.
 - **It knows hot code from cold.** Classes of code by path glob, each
   with its own limits; test blocks are held as tests wherever they live.
 - **It speaks every format.** text, Markdown, JSON, XML, csv and tsv;

@@ -37,6 +37,43 @@ pub const Thresholds = struct {
             inline else => |m| @field(t, @tagName(m)),
         };
     }
+
+    /// Whether a function with these numbers is a flat dispatch: over a
+    /// cyclomatic limit, its cognitive over none of its own. Many paths
+    /// that read as one decision, as a switch whose every prong is a call:
+    /// cyclomatic's limits do not hold it. Where cognitive has no limit,
+    /// nothing tells one, and there is none.
+    pub fn isDispatch(t: Thresholds, cyclomatic: u32, cognitive: u32) bool {
+        if (t.cognitive.warning == null and t.cognitive.critical == null) return false;
+        return t.over(.cyclomatic, cyclomatic) != null and t.over(.cognitive, cognitive) == null;
+    }
+
+    /// The limits a function with `values` is over, and whether it is a
+    /// flat dispatch, whose cyclomatic is then not held.
+    pub fn judge(t: Thresholds, values: std.EnumArray(Metric, u32)) Judged {
+        var j: Judged = .{ .dispatch = t.isDispatch(values.get(.cyclomatic), values.get(.cognitive)) };
+        for (std.enums.values(Metric)) |metric| {
+            if (j.dispatch and metric == .cyclomatic) continue;
+            const trip = t.over(metric, values.get(metric)) orelse continue;
+            j.buffer[j.len] = trip;
+            j.len += 1;
+        }
+        return j;
+    }
+};
+
+/// What `Thresholds.judge` finds of a function.
+pub const Judged = struct {
+    buffer: [std.enums.values(Metric).len]Trip = undefined,
+    len: usize = 0,
+    /// A flat dispatch: then cyclomatic is not among the trips.
+    dispatch: bool,
+
+    /// The limits it is over, each metric once at its worst, in the order
+    /// of `Metric`.
+    pub fn trips(j: *const Judged) []const Trip {
+        return j.buffer[0..j.len];
+    }
 };
 
 /// How strictly code is held: hot code is on a path that runs often or
@@ -145,6 +182,31 @@ test "the classes: hot is stricter than normal, cold only past 20 (cognitive 35)
     try std.testing.expectEqual(.critical, c.get(.normal).over(.cognitive, 26).?.level);
     try std.testing.expectEqual(null, c.get(.cold).over(.cognitive, 35));
     try std.testing.expectEqual(.critical, c.get(.cold).over(.cognitive, 36).?.level);
+}
+
+test "a flat dispatch: over a cyclomatic limit, cognitive over none; its cyclomatic is not held" {
+    const normal = Classes.defaults.normal;
+    var values: std.EnumArray(Metric, u32) = .initFill(1);
+    // 37 paths and cognitive 12, within its warning 15: a flat switch.
+    values.set(.cyclomatic, 37);
+    values.set(.cognitive, 12);
+    values.set(.lines, 120);
+    const flat = normal.judge(values);
+    try std.testing.expect(flat.dispatch);
+    // Lines are held as ever.
+    try std.testing.expectEqualSlices(Trip, &.{.{ .metric = .lines, .level = .critical, .limit = 100 }}, flat.trips());
+    // Cognitive past its warning: real debt, cyclomatic held.
+    values.set(.cognitive, 16);
+    const tangled = normal.judge(values);
+    try std.testing.expect(!tangled.dispatch);
+    try std.testing.expectEqual(Trip{ .metric = .cyclomatic, .level = .critical, .limit = 15 }, tangled.trips()[0]);
+    // Within every cyclomatic limit, nothing to call a dispatch.
+    try std.testing.expect(!normal.isDispatch(10, 1));
+    // Cold code has no cognitive warning: within its critical, 35.
+    try std.testing.expect(Classes.defaults.cold.isDispatch(30, 35));
+    try std.testing.expect(!Classes.defaults.cold.isDispatch(30, 36));
+    // No cognitive limit at all: nothing tells a dispatch, so none is.
+    try std.testing.expect(!(Thresholds{ .cyclomatic = .{ .critical = 5 } }).isDispatch(30, 0));
 }
 
 test "a test block is held as tests whatever its file's class; tests only past cold's limits" {

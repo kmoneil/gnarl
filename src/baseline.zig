@@ -261,31 +261,32 @@ const Standing = struct {
     over: bool = false,
     /// Under its baseline's number on a metric that is over its limit.
     better: bool = false,
+
+    /// Holds `row`'s `metric`, `value`, to its critical `limit`, or to its
+    /// baseline's number, `baselined`, when that is higher; a failure
+    /// appended to `failures`.
+    fn hold(s: *Standing, arena: Allocator, row: Row, metric: Metric, value: u32, limit: u32, baselined: ?u32, failures: *std.ArrayList(Failure)) Allocator.Error!void {
+        s.over = s.over or value > limit;
+        const allowed = if (baselined) |b| @max(limit, b) else limit;
+        if (value > allowed) {
+            s.failed = true;
+            try failures.append(arena, .{ .path = row.path, .line = row.line, .name = row.name, .metric = metric, .value = value, .limit = limit, .baselined = baselined });
+        } else if (baselined) |b| {
+            if (b > limit and value < b) s.better = true;
+        }
+    }
 };
 
 /// How `row` stands, held to `limits` and the entry `held`; each metric it
-/// fails on appended to `failures`.
+/// fails on appended to `failures`. A flat dispatch's cyclomatic is held
+/// to nothing.
 fn judge(arena: Allocator, row: Row, held: ?Entry, limits: thresholds.Thresholds, failures: *std.ArrayList(Failure)) Allocator.Error!Standing {
     var s: Standing = .{};
+    const dispatch = limits.isDispatch(row.cyclomatic, row.cognitive);
     inline for (metrics, 0..) |metric, m| {
-        const value = @field(row, @tagName(metric));
-        if (limits.of(metric).critical) |limit| {
-            s.over = s.over or value > limit;
-            const allowed = if (held) |h| @max(limit, h.values[m]) else limit;
-            if (value > allowed) {
-                s.failed = true;
-                try failures.append(arena, .{
-                    .path = row.path,
-                    .line = row.line,
-                    .name = row.name,
-                    .metric = metric,
-                    .value = value,
-                    .limit = limit,
-                    .baselined = if (held) |h| h.values[m] else null,
-                });
-            } else if (held) |h| {
-                if (h.values[m] > limit and value < h.values[m]) s.better = true;
-            }
+        const limit = limits.of(metric).critical;
+        if (limit != null and !(dispatch and metric == .cyclomatic)) {
+            try s.hold(arena, row, metric, @field(row, @tagName(metric)), limit.?, if (held) |h| h.values[m] else null, failures);
         }
     }
     return s;
@@ -300,8 +301,10 @@ pub fn functionsFailing(failures: []const Failure) usize {
     return n;
 }
 
+/// A row whose cognitive, 20, is past its warning: so no flat dispatch,
+/// and its cyclomatic is held.
 fn sampleRow(path: []const u8, line: u32, name: []const u8, cyclomatic: u32, lines: u32) Row {
-    return .{ .path = path, .line = line, .column = 4, .name = name, .kind = .@"fn", .cyclomatic = cyclomatic, .cognitive = 0, .lines = lines, .nesting = 0, .params = 0, .params_weighted = 0 };
+    return .{ .path = path, .line = line, .column = 4, .name = name, .kind = .@"fn", .cyclomatic = cyclomatic, .cognitive = 20, .lines = lines, .nesting = 0, .params = 0, .params_weighted = 0 };
 }
 
 test "write, then read back: the functions over a critical threshold, sorted, a second of one name #2" {
@@ -319,10 +322,10 @@ test "write, then read back: the functions over a critical threshold, sorted, a 
     var out: std.Io.Writer.Allocating = .init(arena);
     try std.testing.expectEqual(4, try write(arena, &out.writer, &rows));
     try std.testing.expectEqualStrings(header ++
-        "src/a.zig\tS.a\t20\t0\t120\t0\t0\t0\n" ++
-        "src/a.zig\tS.a#2\t16\t0\t10\t0\t0\t0\n" ++
-        "src/a.zig\ttest \"tab\\there\"\t40\t0\t3\t0\t0\t0\n" ++
-        "src/b.zig\tparse\t30\t0\t20\t0\t0\t0\n", out.written());
+        "src/a.zig\tS.a\t20\t20\t120\t0\t0\t0\n" ++
+        "src/a.zig\tS.a#2\t16\t20\t10\t0\t0\t0\n" ++
+        "src/a.zig\ttest \"tab\\there\"\t40\t20\t3\t0\t0\t0\n" ++
+        "src/b.zig\tparse\t30\t20\t20\t0\t0\t0\n", out.written());
 
     var problem: Problem = undefined;
     const b = try parse(arena, out.written(), &problem);
@@ -390,4 +393,30 @@ test "ratchet: new over a limit, above its baseline, newly over another; within 
     // worse and kept on two metrics each, better and new on one.
     try std.testing.expectEqual(6, plain.failures.len);
     try std.testing.expectEqual(4, functionsFailing(plain.failures));
+}
+
+test "ratchet: a flat dispatch is held to its other limits, not cyclomatic's" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var flat = sampleRow("src/a.zig", 1, "visit", 37, 32);
+    flat.cognitive = 12;
+    var long = sampleRow("src/a.zig", 40, "table", 33, 244);
+    long.cognitive = 3;
+    var rows = [_]Row{ flat, long };
+    try @import("report.zig").rank(arena, &rows, .defaults);
+    // visit: cyclomatic 37 with cognitive 12, within its warning: nothing
+    // fails. table: a dispatch too, but its 244 lines are over 100.
+    const r = try ratchet(arena, &rows, .defaults, null, &.{"src/a.zig"});
+    try std.testing.expectEqual(1, r.failures.len);
+    try std.testing.expectEqualStrings("table", r.failures[0].name);
+    try std.testing.expectEqual(.lines, r.failures[0].metric);
+    // Baselined at its cyclomatic of old, a dispatch's entry holds back
+    // nothing: it is within every limit that holds it.
+    var problem: Problem = undefined;
+    const base = try parse(arena, "src/a.zig\tvisit\t40\t20\t32\t0\t0\t0\n", &problem);
+    const visit = for (&rows, 0..) |row, i| {
+        if (std.mem.eql(u8, row.name, "visit")) break i;
+    } else unreachable;
+    try std.testing.expectEqual(1, (try ratchet(arena, rows[visit .. visit + 1], .defaults, base, &.{"src/a.zig"})).unneeded);
 }
