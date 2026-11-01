@@ -142,7 +142,7 @@ added   3           2          3        1        3       3         tally.zig:20 
 added   2           1          3        1        3       3         tally.zig:25  add
 better  11 -> 5     33 -> 8    23 -> 9  5 -> 3   4       4         tally.zig:7   tally
 
-3 functions touched in 1 file since HEAD: 0 worse, 0 mixed, 2 added, 0 the same, 1 better, 0 removed.
+3 functions touched in 1 file since HEAD: 0 worse, 0 mixed, 2 added, 0 the same, 1 better, 0 removed, 0 moved.
 Nothing got worse.
 None of them is over a critical limit now.
 ```

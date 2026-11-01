@@ -38,8 +38,12 @@ as often as it helps.
    change touched (uncommitted edits and new files included) with its
    numbers before and after: worse first, then mixed (some numbers up and
    some down, as a function made simpler at the price of a parameter),
-   added, the same, better and removed, says plainly when nothing got
-   worse, and how many of them are over a critical limit now. A function split in two shows as one changed and one added.
+   added, the same, better, removed, and moved (to another file as it
+   was, kept apart and not counted over a critical limit; one moved and
+   changed is listed by its change, saying where it came from), says
+   plainly when nothing got worse, and how many of them are over a
+   critical limit now. A function split in two shows as one changed and
+   one added.
    `gnarl --function <function>
    src` measures one function again, whatever its numbers.
 4. `gnarl --check src` in CI exits 1 when a function is over a critical

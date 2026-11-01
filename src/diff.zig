@@ -6,8 +6,16 @@
 //! function is known by its path and qualified name, as the baseline
 //! knows it, and it is touched when its own source differs: the text of
 //! any function declared inside it is not its own. So a function that
-//! only moved is not touched, and an edit to a nested function does not
-//! touch the one around it.
+//! only moved within its file is not touched, and an edit to a nested
+//! function does not touch the one around it.
+//!
+//! A function that moved to another file would be removed from one and
+//! added to the other, and a file split or renamed would bury the day's
+//! real changes under them. So a removed and an added function are paired
+//! (`pairMoves`): by name and own text as `moved`, kept apart from the
+//! changes and out of the count of those over a critical limit; or, moved
+//! and changed, by a name only they have, as the change it was, saying
+//! where it came from.
 
 const std = @import("std");
 const Io = std.Io;
@@ -46,6 +54,8 @@ pub const Change = enum {
     /// A number went down and none up.
     better,
     removed,
+    /// Moved to another file, its text as it was.
+    moved,
 };
 
 pub const Values = struct {
@@ -83,6 +93,24 @@ pub const Touched = struct {
     after: ?Values,
     /// The limits its numbers after the change are over.
     trips: []const Trip,
+    /// Where it was, when it came from another file: for a function
+    /// `moved`, or one moved and changed. Null otherwise.
+    from: ?Place = null,
+};
+
+pub const Place = struct { path: []const u8, line: u32 };
+
+/// What `compareFile` gathers over a diff's files, for `pairMoves`.
+pub const Collected = struct {
+    touched: std.ArrayList(Touched) = .empty,
+    /// A hash of each touched function's own text, in step with
+    /// `touched`: what tells a function that moved from one that changed.
+    owns: std.ArrayList(u64) = .empty,
+
+    fn add(c: *Collected, arena: Allocator, t: Touched, own_text: []const u8) Allocator.Error!void {
+        try c.touched.append(arena, t);
+        try c.owns.append(arena, std.hash.Wyhash.hash(0, own_text));
+    }
 };
 
 pub const File = struct {
@@ -274,7 +302,7 @@ pub fn compareFile(
     /// `Class.forFunction` gives it.
     file_class: Class,
     classes: thresholds.Classes,
-    out: *std.ArrayList(Touched),
+    out: *Collected,
 ) Allocator.Error!void {
     const old: Side = if (before) |t| try side(arena, scratch, path, t) else .{};
     const new: Side = if (after) |t| try side(arena, scratch, path, t) else .{};
@@ -296,11 +324,95 @@ pub fn compareFile(
         const class: Class = .forFunction(file_class, row.kind == .@"test");
         var trips: std.ArrayList(Trip) = .empty;
         for (metrics) |m| if (classes.get(class).over(m, now.get(m))) |trip| try trips.append(arena, trip);
-        try out.append(arena, .{ .path = path, .line = row.line, .name = row.name, .kind = row.kind, .class = class, .change = change, .before = was, .after = now, .trips = trips.items });
+        try out.add(arena, .{ .path = path, .line = row.line, .name = row.name, .kind = row.kind, .class = class, .change = change, .before = was, .after = now, .trips = trips.items }, text);
     }
-    for (old.rows, matched) |row, m| if (!m) {
-        try out.append(arena, .{ .path = path, .line = row.line, .name = row.name, .kind = row.kind, .class = .forFunction(file_class, row.kind == .@"test"), .change = .removed, .before = Values.of(row), .after = null, .trips = &.{} });
+    for (old.rows, old.texts, matched) |row, text, m| if (!m) {
+        try out.add(arena, .{ .path = path, .line = row.line, .name = row.name, .kind = row.kind, .class = .forFunction(file_class, row.kind == .@"test"), .change = .removed, .before = Values.of(row), .after = null, .trips = &.{} }, text);
     };
+}
+
+/// Pairs each removed function with an added one that is the same
+/// function in another file, and returns what is left, in `collected`'s
+/// own list. First by name and own text: `moved`. Then, of those left, by
+/// a name only one removed and one added function have: moved and
+/// changed, compared as any change is. The two of a pair are always in
+/// different files: in one file a name is never both removed and added,
+/// since a function there is known by its name and its place among those
+/// of that name.
+pub fn pairMoves(arena: Allocator, collected: *Collected) Allocator.Error![]Touched {
+    const all = collected.touched.items;
+    const gone = try arena.alloc(bool, all.len);
+    @memset(gone, false);
+    try pairByText(arena, all, collected.owns.items, gone);
+    try pairByName(arena, all, gone);
+    var kept: usize = 0;
+    for (all, gone) |t, g| if (!g) {
+        all[kept] = t;
+        kept += 1;
+    };
+    return all[0..kept];
+}
+
+/// Pairs a removed and an added function of the same name and own text:
+/// the added one becomes `moved`, and the removed one goes.
+fn pairByText(arena: Allocator, all: []Touched, owns: []const u64, gone: []bool) Allocator.Error!void {
+    // The added functions by name and text, each key's in order.
+    var added: std.StringHashMapUnmanaged(std.ArrayList(usize)) = .empty;
+    for (all, owns, 0..) |t, own, i| if (t.change == .added) {
+        const entry = try added.getOrPut(arena, try textKey(arena, t.name, own));
+        if (!entry.found_existing) entry.value_ptr.* = .empty;
+        try entry.value_ptr.append(arena, i);
+    };
+    for (all, owns, 0..) |r, own, i| if (r.change == .removed) {
+        const candidates = added.getPtr(try textKey(arena, r.name, own)) orelse continue;
+        if (candidates.items.len == 0) continue;
+        const a = candidates.orderedRemove(0);
+        gone[i] = true;
+        all[a].change = .moved;
+        all[a].before = r.before;
+        all[a].from = .{ .path = r.path, .line = r.line };
+    };
+}
+
+fn textKey(arena: Allocator, name: []const u8, own: u64) Allocator.Error![]const u8 {
+    return std.fmt.allocPrint(arena, "{s}\x00{x}", .{ name, own });
+}
+
+/// Which function of those a name is looked up among has it: one, or
+/// more than one.
+const Holder = union(enum) { one: usize, many };
+
+/// Pairs a removed and an added function by a name none of the others
+/// left has: the added one is compared with the removed, and says where
+/// it came from.
+fn pairByName(arena: Allocator, all: []Touched, gone: []bool) Allocator.Error!void {
+    var removed: std.StringHashMapUnmanaged(Holder) = .empty;
+    var added: std.StringHashMapUnmanaged(Holder) = .empty;
+    for (all, gone, 0..) |t, g, i| {
+        if (g) continue;
+        const names = switch (t.change) {
+            .removed => &removed,
+            .added => &added,
+            else => continue,
+        };
+        const entry = try names.getOrPut(arena, t.name);
+        entry.value_ptr.* = if (entry.found_existing) .many else .{ .one = i };
+    }
+    var it = removed.iterator();
+    while (it.next()) |entry| {
+        const r = switch (entry.value_ptr.*) {
+            .one => |i| i,
+            .many => continue,
+        };
+        const a = switch (added.get(entry.key_ptr.*) orelse continue) {
+            .one => |i| i,
+            .many => continue,
+        };
+        gone[r] = true;
+        all[a].change = compare(all[r].before.?, all[a].after.?);
+        all[a].before = all[r].before;
+        all[a].from = .{ .path = all[r].path, .line = all[r].line };
+    }
 }
 
 /// What makes one touched function worse than another: its critical and
@@ -352,10 +464,13 @@ fn listedBefore(_: void, a: Touched, b: Touched) bool {
 /// What to do next, after a diff's counts: the --explain for the worst of
 /// those that got worse, or with none, of the mixed; or that nothing got
 /// worse. `touched` is sorted, so the first is that worst.
-/// How many of `touched`, as they are now, are over a critical limit.
+/// How many of `touched`, as they are now, are over a critical limit. A
+/// function that only moved is not counted: its numbers are what they
+/// were.
 pub fn countCritical(touched: []const Touched) usize {
     var n: usize = 0;
     for (touched) |t| {
+        if (t.change == .moved) continue;
         for (t.trips) |trip| if (trip.level == .critical) {
             n += 1;
             break;
@@ -380,7 +495,7 @@ fn writeNext(w: *Writer, touched: []const Touched, n: Counts) Writer.Error!void 
     } else try w.writeAll("Nothing got worse.");
 }
 
-pub const Counts = struct { worse: usize = 0, mixed: usize = 0, added: usize = 0, same: usize = 0, better: usize = 0, removed: usize = 0 };
+pub const Counts = struct { worse: usize = 0, mixed: usize = 0, added: usize = 0, same: usize = 0, better: usize = 0, removed: usize = 0, moved: usize = 0 };
 
 fn count(touched: []const Touched) Counts {
     var c: Counts = .{};
@@ -467,7 +582,9 @@ fn writeRowsText(w: *Writer, touched: []const Touched) Writer.Error!void {
         }
         try w.print("{s}:{d}", .{ t.path, t.line });
         try w.splatByteAll(' ', widths[location_column] - std.fmt.count("{s}:{d}", .{ t.path, t.line }) + 2);
-        try w.print("{s}\n", .{t.name});
+        try w.writeAll(t.name);
+        if (t.from) |f| try w.print(" (moved from {s}:{d})", .{ f.path, f.line });
+        try w.writeByte('\n');
     }
 }
 
@@ -479,7 +596,9 @@ fn writeRowsMarkdown(w: *Writer, touched: []const Touched) Writer.Error!void {
     for (touched) |t| {
         try w.print("| {t} |", .{t.change});
         for (metrics) |m| try w.print(" {s} |", .{cell(&cells, t, m)});
-        try w.print(" `{s}:{d}` | `{s}` |\n", .{ t.path, t.line, t.name });
+        try w.print(" `{s}:{d}` | `{s}`", .{ t.path, t.line, t.name });
+        if (t.from) |f| try w.print(" (moved from `{s}:{d}`)", .{ f.path, f.line });
+        try w.writeAll(" |\n");
     }
 }
 
@@ -495,8 +614,8 @@ fn writeTable(w: *Writer, touched: []const Touched, c: Context, kind: enum { tex
     const gap = if (kind == .md) "\n\n" else "\n";
     if (touched.len == 0) return w.print("No function touched since {s}.\n", .{c.ref});
     const n = count(touched);
-    try w.print("{d} function{s} touched in {d} file{s} since {s}: {d} worse, {d} mixed, {d} added, {d} the same, {d} better, {d} removed.", .{
-        touched.len, plural(touched.len), c.files, plural(c.files), c.ref, n.worse, n.mixed, n.added, n.same, n.better, n.removed,
+    try w.print("{d} function{s} touched in {d} file{s} since {s}: {d} worse, {d} mixed, {d} added, {d} the same, {d} better, {d} removed, {d} moved.", .{
+        touched.len, plural(touched.len), c.files, plural(c.files), c.ref, n.worse, n.mixed, n.added, n.same, n.better, n.removed, n.moved,
     });
     try w.writeAll(gap);
     try writeNext(w, touched, n);
@@ -572,6 +691,12 @@ fn writeXml(w: *Writer, touched: []const Touched, c: Context) Writer.Error!void 
             try formats.attrInt(w, "limit", trip.limit);
             try w.writeAll("/>\n");
         }
+        if (t.from) |f| {
+            try w.writeAll("      <from");
+            try formats.attr(w, "path", f.path);
+            try formats.attrInt(w, "line", f.line);
+            try w.writeAll("/>\n");
+        }
         try w.writeAll("    </function>\n");
     }
     try w.writeAll("  </functions>\n</gnarl>\n");
@@ -581,7 +706,7 @@ pub const delimited_columns = [_][]const u8{
     "path",              "line",             "name",             "kind",            "class",                  "change",
     "cyclomatic_before", "cyclomatic_after", "cognitive_before", "cognitive_after", "lines_before",           "lines_after",
     "nesting_before",    "nesting_after",    "params_before",    "params_after",    "params_weighted_before", "params_weighted_after",
-    "over",
+    "over",              "from",
 };
 
 /// A header, then a row per function; a side the function does not have
@@ -600,12 +725,21 @@ fn writeDelimited(w: *Writer, kind: formats.Delimited, touched: []const Touched)
                 if (@field(t, which)) |v| try formats.fieldInt(w, kind, false, v.get(m)) else try formats.field(w, kind, false, "");
             }
         }
-        var buffer: [256]u8 = undefined;
-        var over: Writer = .fixed(&buffer);
-        for (t.trips, 0..) |trip, i| over.print("{s}{t}:{t}:{d}", .{ if (i == 0) "" else " ", trip.metric, trip.level, trip.limit }) catch unreachable;
-        try formats.field(w, kind, false, over.buffered());
+        try writeOverFrom(w, kind, t);
         try w.writeByte('\n');
     }
+}
+
+/// A row's last two fields: the limits it is over, as `metric:level:limit`
+/// each, and where it came from, as `path:line`.
+fn writeOverFrom(w: *Writer, kind: formats.Delimited, t: Touched) Writer.Error!void {
+    var buffer: [256]u8 = undefined;
+    var over: Writer = .fixed(&buffer);
+    for (t.trips, 0..) |trip, i| over.print("{s}{t}:{t}:{d}", .{ if (i == 0) "" else " ", trip.metric, trip.level, trip.limit }) catch unreachable;
+    try formats.field(w, kind, false, over.buffered());
+    const f = t.from orelse return formats.field(w, kind, false, "");
+    var place: [1024]u8 = undefined;
+    try formats.field(w, kind, false, std.fmt.bufPrint(&place, "{s}:{d}", .{ f.path, f.line }) catch f.path);
 }
 
 fn parse(gpa: Allocator, source: [:0]const u8) !Ast {
@@ -670,11 +804,12 @@ test "compareFile: worse, added, the same, better, removed; moved or nested-only
         \\}
     );
     defer new.deinit(gpa);
-    var touched: std.ArrayList(Touched) = .empty;
-    try compareFile(arena, arena, "a.zig", &old, &new, .normal, Classes.defaults, &touched);
-    sort(touched.items);
+    var collected: Collected = .{};
+    try compareFile(arena, arena, "a.zig", &old, &new, .normal, Classes.defaults, &collected);
+    const touched = try pairMoves(arena, &collected);
+    sort(touched);
     var got: std.ArrayList(u8) = .empty;
-    for (touched.items) |t| try got.print(arena, "{t} {s} {d}\n", .{ t.change, t.name, t.line });
+    for (touched) |t| try got.print(arena, "{t} {s} {d}\n", .{ t.change, t.name, t.line });
     // moves only moved; outer only had a nested function change. Of the
     // two worse, inner rose in nesting too, so it is the worse. trades
     // took a parameter for a line: mixed.
@@ -688,6 +823,69 @@ test "compareFile: worse, added, the same, better, removed; moved or nested-only
         \\removed dropped 16
         \\
     , got.items);
+}
+
+test "pairMoves: moved as it was, moved and changed, and what has no one partner" {
+    const gpa = std.testing.allocator;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // a.zig and b.zig are gone; c.zig is new.
+    var a = try parse(gpa,
+        \\fn travels() void {}
+        \\fn grows(c: bool) void {
+        \\    if (c) {}
+        \\}
+        \\fn init() void {}
+        \\fn dropped() void {}
+    );
+    defer a.deinit(gpa);
+    var b = try parse(gpa,
+        \\fn init() void {}
+    );
+    defer b.deinit(gpa);
+    var c = try parse(gpa,
+        \\fn travels() void {}
+        \\fn grows(c: bool) void {
+        \\    if (c) {}
+        \\    if (c) {}
+        \\}
+        \\fn init() void {
+        \\    start();
+        \\}
+        \\fn fresh() void {}
+    );
+    defer c.deinit(gpa);
+    var collected: Collected = .{};
+    try compareFile(arena, arena, "a.zig", &a, null, .normal, Classes.defaults, &collected);
+    try compareFile(arena, arena, "b.zig", &b, null, .normal, Classes.defaults, &collected);
+    try compareFile(arena, arena, "c.zig", null, &c, .normal, Classes.defaults, &collected);
+    const touched = try pairMoves(arena, &collected);
+    sort(touched);
+    var got: std.ArrayList(u8) = .empty;
+    for (touched) |t| {
+        try got.print(arena, "{t} {s}:{d} {s}", .{ t.change, t.path, t.line, t.name });
+        if (t.from) |f| try got.print(arena, " from {s}:{d}", .{ f.path, f.line });
+        try got.append(arena, '\n');
+    }
+    // travels has the same text: moved. grows changed, and no other
+    // function of its name came or went: worse, from where it was. Two
+    // init went and one came, so which it was is a guess: none is paired.
+    try std.testing.expectEqualStrings(
+        \\worse c.zig:2 grows from a.zig:2
+        \\added c.zig:6 init
+        \\added c.zig:9 fresh
+        \\removed a.zig:5 init
+        \\removed a.zig:6 dropped
+        \\removed b.zig:1 init
+        \\moved c.zig:1 travels from a.zig:1
+        \\
+    , got.items);
+    // Moved as it was, it is not counted over a critical limit: its
+    // numbers did not change.
+    var moved = touched[touched.len - 1];
+    moved.trips = &.{.{ .metric = .cyclomatic, .level = .critical, .limit = 15 }};
+    try std.testing.expectEqual(0, countCritical(&.{moved}));
 }
 
 test "write: the table, and the summary saying when nothing got worse" {
@@ -709,7 +907,7 @@ test "write: the table, and the summary saying when nothing got worse" {
         \\worse    12 -> 16!!  9          40     3        2       2         a.zig:3   grows
         \\removed  12          9          40     3        2       2         b.zig:9   gone
         \\
-        \\2 functions touched in 2 files since main: 1 worse, 0 mixed, 0 added, 0 the same, 0 better, 1 removed.
+        \\2 functions touched in 2 files since main: 1 worse, 0 mixed, 0 added, 0 the same, 0 better, 1 removed, 0 moved.
         \\gnarl --explain a.zig:3 says why grows, the worst of those that got worse, scores what it does now.
         \\1 of them is over a critical limit now.
         \\Thresholds for normal code (warning, critical): cyclomatic 10, 15; cognitive 15, 25; lines 50, 100; nesting 4; params 4.
