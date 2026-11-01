@@ -442,14 +442,15 @@ fn runDiff(c: Context, ref: []const u8) !u8 {
     const changed = try diff.changedFiles(c.arena, c.io, ref, paths, .{ .paths = c.run.excludes, .globs = c.settings.exclude }, c.said) orelse &.{};
     var file_arena: std.heap.ArenaAllocator = .init(c.gpa);
     defer file_arena.deinit();
-    var touched: std.ArrayList(diff.Touched) = .empty;
+    var collected: diff.Collected = .{};
     for (changed) |file| {
         _ = file_arena.reset(.retain_capacity);
-        try diffFile(c, file_arena.allocator(), ref, file, &touched);
+        try diffFile(c, file_arena.allocator(), ref, file, &collected);
     }
-    diff.sort(touched.items);
+    const touched = try diff.pairMoves(c.arena, &collected);
+    diff.sort(touched);
     const status = c.exitStatus(0);
-    diff.write(c.out(), c.run.format, touched.items, .{
+    diff.write(c.out(), c.run.format, touched, .{
         .version = build_options.version,
         .ref = ref,
         .files = changed.len,
@@ -461,7 +462,7 @@ fn runDiff(c: Context, ref: []const u8) !u8 {
 
 /// The functions `file` had at `ref` and has now, compared, appended to
 /// `touched`; nothing when a side cannot be read or parsed, which is said.
-fn diffFile(c: Context, scratch: std.mem.Allocator, ref: []const u8, file: diff.File, touched: *std.ArrayList(diff.Touched)) !void {
+fn diffFile(c: Context, scratch: std.mem.Allocator, ref: []const u8, file: diff.File, touched: *diff.Collected) !void {
     var before: ?Ast = null;
     defer if (before) |*t| t.deinit(c.gpa);
     if (file.status != .added) {
@@ -1032,7 +1033,7 @@ test "--diff: the functions a change touched, before and after, worse first" {
     var proj = try tmp.dir.openDir(io, "proj", .{});
     defer proj.close(io);
     try proj.writeFile(io, .{ .sub_path = "a.zig", .data = "fn grows(c: bool) void {\n    if (c) {}\n}\nfn tidied() void {}\nfn dropped() void {}\nfn kept() void {}\n" });
-    try proj.writeFile(io, .{ .sub_path = "b.zig", .data = "fn gone() void {}\n" });
+    try proj.writeFile(io, .{ .sub_path = "b.zig", .data = "fn gone() void {}\nfn travels() void {}\n" });
     for ([_][]const []const u8{
         &.{ "git", "init", "-q" },
         &.{ "git", "add", "." },
@@ -1042,10 +1043,11 @@ test "--diff: the functions a change touched, before and after, worse first" {
         try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
     }
     // grows gets worse, tidied gets a comment, dropped goes, fresh comes;
-    // kept only moves down; b.zig is deleted; c.zig is new and untracked.
+    // kept only moves down; b.zig is deleted; c.zig is new and untracked,
+    // and travels moved there from b.zig as it was.
     try proj.writeFile(io, .{ .sub_path = "a.zig", .data = "fn grows(c: bool) void {\n    if (c) {}\n    if (c) {}\n}\nfn tidied() void {\n    // why\n}\n\nfn kept() void {}\nfn fresh() void {}\n" });
     try proj.deleteFile(io, "b.zig");
-    try proj.writeFile(io, .{ .sub_path = "c.zig", .data = "fn made() void {}\n" });
+    try proj.writeFile(io, .{ .sub_path = "c.zig", .data = "fn made() void {}\nfn travels() void {}\n" });
 
     try expectRun(proj, &.{ "--diff", "HEAD" }, 0,
         \\change   cyclomatic  cognitive  lines   nesting  params  weighted  location  function
@@ -1055,8 +1057,9 @@ test "--diff: the functions a change touched, before and after, worse first" {
         \\same     1           0          1       0        0       0         a.zig:5   tidied
         \\removed  1           0          1       0        0       0         a.zig:5   dropped
         \\removed  1           0          1       0        0       0         b.zig:1   gone
+        \\moved    1           0          1       0        0       0         c.zig:2   travels (moved from b.zig:2)
         \\
-        \\6 functions touched in 3 files since HEAD: 1 worse, 0 mixed, 2 added, 1 the same, 0 better, 2 removed.
+        \\7 functions touched in 3 files since HEAD: 1 worse, 0 mixed, 2 added, 1 the same, 0 better, 2 removed, 1 moved.
         \\gnarl --explain a.zig:1 says why grows, the worst of those that got worse, scores what it does now.
         \\None of them is over a critical limit now.
         \\

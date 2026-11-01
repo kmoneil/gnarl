@@ -55,7 +55,7 @@ lists only what needs attention; `--all` lists everything.
   would need reworking. All before you touch the code.
 - **It shows the before and after.** `--diff HEAD` lists each function
   your change touched, with its numbers then and now: worse, mixed,
-  added, the same, better or removed.
+  added, the same, better, removed, or moved to another file.
 - **It holds the line in CI.** A baseline freezes the debt you have:
   `--check` fails only what is new or worse, so a legacy codebase can
   adopt it today.
@@ -207,7 +207,7 @@ added   3           2          3        1        3       3         tally.zig:20 
 added   2           1          3        1        3       3         tally.zig:25  add
 better  11 -> 5     33 -> 8    23 -> 9  5 -> 3   4       4         tally.zig:7   tally
 
-3 functions touched in 1 file since HEAD: 0 worse, 0 mixed, 2 added, 0 the same, 1 better, 0 removed.
+3 functions touched in 1 file since HEAD: 0 worse, 0 mixed, 2 added, 0 the same, 1 better, 0 removed, 0 moved.
 Nothing got worse.
 None of them is over a critical limit now.
 ```

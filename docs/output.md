@@ -246,8 +246,9 @@ lists `imports`, `imported_by` and `modules`, each separated by spaces.
   - `same`: the text changed, the numbers did not.
   - `better`: a number went down, none up.
   - `removed`: gone since the commit.
+  - `moved`: moved to another file, its own text as it was.
 - `functions`: each function the change touched, worse first, then
-  mixed, added, the same, better and removed:
+  mixed, added, the same, better, removed and moved:
   - `path`, `name`, `kind`, `class`, `trips`: as in the report's
     `functions`; `trips` are those of its numbers after the change.
   - `line`: where it is now; for a removed function, where it was.
@@ -255,11 +256,21 @@ lists `imports`, `imported_by` and `modules`, each separated by spaces.
   - `before`, `after`: its numbers at the commit and now, each with
     the report's six metrics; null for an added function's `before`
     and a removed one's `after`.
+  - `from`: where it was, for one that came from another file, with
+    `path` and `line`; null otherwise.
 
 A function is touched when its own source changed: a function declared
-inside it is not its own. In csv and tsv, the columns are `path`,
-`line`, `name`, `kind`, `class`, `change`, each metric `_before` and
-`_after` (empty for the side a function does not have), and `over`.
+inside it is not its own. One that moved to another file would be
+removed from one and added to the other; instead the two are paired. A
+removed and an added function of the same name and the same own text
+are one function `moved`: it is listed last, and not counted among
+those over a critical limit, since its numbers are what they were. Of
+those left, a removed and an added function whose name no other removed
+or added function has are one function moved and changed: it is worse,
+mixed, the same or better, as its numbers say, with `from`. In csv and
+tsv, the columns are `path`, `line`, `name`, `kind`, `class`, `change`,
+each metric `_before` and `_after` (empty for the side a function does
+not have), `over`, and `from` (`path:line`, or empty).
 
 ## The csv and tsv explanation rows
 
