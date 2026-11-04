@@ -1,7 +1,7 @@
 # Contributing
 
-gnarl builds with Zig 0.17.0 and has no dependencies. `zig build` leaves
-the binary in `zig-out/bin/`.
+gnarl builds with Zig 0.17 (CI and releases use 0.17.1) and has no
+dependencies. `zig build` leaves the binary in `zig-out/bin/`.
 
 ```sh
 zig build test              # everything below, in one command
