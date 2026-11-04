@@ -421,6 +421,7 @@ test "collect: what a complexity.zon glob matches is left out under a directory 
 
     var files: std.ArrayList([]const u8) = .empty;
     try collect(arena, io, tmp.dir, "proj", excludes, &files, .{ .git = false });
+    sortUnique(&files);
     try expectPaths(arena, &.{ "proj/a.zig", "proj/src/b.zig" }, files.items);
 
     // Named outright, the directory and the file are read.
