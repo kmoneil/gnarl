@@ -78,16 +78,18 @@ pub const Judged = struct {
 
 /// How strictly code is held: hot code is on a path that runs often or
 /// matters most, cold code is build scripts, tools and the like. Which
-/// paths are which is configuration, never guessed. A test block is held
-/// as `tests` whatever its file's class: Zig keeps tests in the files
-/// they test, so no path tells them apart.
+/// paths are which is configuration, never guessed. Test code (a test
+/// block, and what only test code uses, as test_code.zig says) is held as
+/// `tests` whatever its file's class: Zig keeps tests in the files they
+/// test, so no path tells them apart.
 pub const Class = enum {
     hot,
     normal,
     cold,
     tests,
 
-    /// The class a function is held to, in a file of class `file`.
+    /// The class a function is held to, in a file of class `file`;
+    /// `is_test` when it is test code.
     pub fn forFunction(file: Class, is_test: bool) Class {
         return if (is_test) .tests else file;
     }

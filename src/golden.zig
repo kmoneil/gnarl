@@ -52,7 +52,7 @@ test "every fixture's functions measure as its golden table says" {
         try std.testing.expectEqual(0, tree.errors.len);
 
         var rows: std.ArrayList(Row) = .empty;
-        try measure.file(arena, arena, name, &tree, &rows);
+        try measure.file(arena, arena, name, &tree, .normal, &rows);
         const got = try render(gpa, rows.items);
         defer gpa.free(got);
 

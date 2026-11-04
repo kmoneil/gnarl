@@ -133,7 +133,7 @@ test "the worked example measures as the skill says" {
     var tree = try Ast.parse(gpa, source, .{});
     defer tree.deinit(gpa);
     var rows: std.ArrayList(report.Row) = .empty;
-    try measure.file(arena, arena, "example.zig", &tree, &rows);
+    try measure.file(arena, arena, "example.zig", &tree, .normal, &rows);
 
     const claim_start = (std.mem.findPos(u8, text, end, "gnarl measures ") orelse return error.NoClaim) + "gnarl measures ".len;
     const claim = text[claim_start .. std.mem.findScalarPos(u8, text, claim_start, '\n') orelse return error.NoClaim];

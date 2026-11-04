@@ -23,6 +23,7 @@ const regions = @import("regions.zig");
 const report = @import("report.zig");
 const select = @import("select.zig");
 const suggest = @import("suggest.zig");
+const test_code = @import("test_code.zig");
 const thresholds = @import("thresholds.zig");
 const Class = thresholds.Class;
 const Metric = thresholds.Metric;
@@ -51,6 +52,9 @@ pub const Explanation = struct {
     trips: []const Trip,
     /// A flat dispatch, held to no cyclomatic limit.
     dispatch: bool = false,
+    /// What makes it test code, when it is that and not a test block
+    /// itself.
+    test_code: ?TestCode = null,
     cyclomatic: struct { value: u32, branches: []const Branch },
     cognitive: struct { value: u32, costs: []const Cost },
     nesting: struct { value: u32, chain: []const Level },
@@ -73,6 +77,21 @@ pub const Explanation = struct {
 };
 
 pub const TallyItem = struct { line: u32, column: u32, construct: []const u8 };
+
+/// What makes a function test code, as test_code.zig finds it.
+pub const TestCode = struct {
+    /// The test block, or the declaration only test code uses, that the
+    /// function is declared in; null when only test code uses the
+    /// function itself.
+    in: ?struct {
+        /// `test "name"`, or the declaration's own name.
+        name: []const u8,
+        line: u32,
+    },
+    /// The lines test code uses the function, or `in`, at, each once;
+    /// none when `in` is a test block.
+    used_at: []const u32,
+};
 
 /// The comptime tally of `function`, its places as lines and columns, its
 /// text in `arena`.
@@ -171,12 +190,15 @@ fn build(
     index: LineIndex,
     path: []const u8,
     function: functions.Function,
+    /// What makes it test code, as test_code.zig says; null when it is
+    /// not.
+    reason: ?test_code.Reason,
     /// The file's; the function is held to its own, as
     /// `Class.forFunction` gives it.
     file_class: Class,
     classes: thresholds.Classes,
 ) Allocator.Error!Explanation {
-    const class: Class = .forFunction(file_class, function.kind == .@"test");
+    const class: Class = .forFunction(file_class, reason != null);
     const limits = classes.get(class);
     var raw_branches: std.ArrayList(cyclomatic.Branch) = .empty;
     const cc = try cyclomatic.explain(scratch, tree, function.node, &raw_branches);
@@ -220,6 +242,7 @@ fn build(
         .kind = function.kind,
         .class = class,
         .trips = &.{},
+        .test_code = try testCodeOf(arena, tree, index, function, reason),
         .cyclomatic = .{ .value = cc, .branches = branches },
         .cognitive = .{ .value = cog, .costs = costs },
         .nesting = .{ .value = depth, .chain = chain },
@@ -242,6 +265,28 @@ fn build(
     e.trips = try arena.dupe(Trip, judged.trips());
     e.dispatch = judged.dispatch;
     return e;
+}
+
+/// What makes `function` test code, for an explanation: null when it is
+/// not, or is a test block itself, which its class says.
+fn testCodeOf(arena: Allocator, tree: *const Ast, index: LineIndex, function: functions.Function, reason: ?test_code.Reason) Allocator.Error!?TestCode {
+    const r = reason orelse return null;
+    if (function.kind == .@"test" and r.node == function.node) return null;
+    var used_at: std.ArrayList(u32) = .empty;
+    for (r.uses) |use| {
+        const line = index.ofToken(tree, use).line;
+        if (used_at.getLastOrNull() != line) try used_at.append(arena, line);
+    }
+    if (r.node == function.node) return .{ .in = null, .used_at = used_at.items };
+    var name: std.ArrayList(u8) = .empty;
+    try name.appendSlice(arena, tree.tokenSlice(r.name));
+    if (tree.nodeTag(r.node) == .test_decl) {
+        if (tree.nodeData(r.node).opt_token_and_node[0].unwrap()) |test_name| {
+            try name.append(arena, ' ');
+            try name.appendSlice(arena, tree.tokenSlice(test_name));
+        }
+    }
+    return .{ .in = .{ .name = name.items, .line = index.ofToken(tree, r.name).line }, .used_at = used_at.items };
 }
 
 fn valueOf(e: Explanation, metric: Metric) u32 {
@@ -298,6 +343,7 @@ pub const Search = struct {
     /// names. `class` is the file's; each function is held to its own, as
     /// `Class.forFunction` gives it.
     pub fn file(s: *Search, arena: Allocator, scratch: Allocator, path: []const u8, tree: *const Ast, class: Class, classes: thresholds.Classes) Allocator.Error!void {
+        const listed = try functions.list(scratch, tree);
         const r: Reading = .{
             .arena = arena,
             .scratch = scratch,
@@ -306,7 +352,8 @@ pub const Search = struct {
             .path = path,
             .class = class,
             .classes = classes,
-            .listed = try functions.list(scratch, tree),
+            .listed = listed,
+            .reasons = try test_code.judge(scratch, tree, listed),
         };
         for (s.selectors, s.found) |selector, *found| switch (selector) {
             .at => |at| {
@@ -393,9 +440,14 @@ const Reading = struct {
     class: Class,
     classes: thresholds.Classes,
     listed: []const functions.Function,
+    /// For each of `listed`, what makes it test code.
+    reasons: []const ?test_code.Reason,
 
     fn explain(r: Reading, function: functions.Function) Allocator.Error!Explanation {
-        var e = try build(r.arena, r.scratch, r.tree, r.index, r.path, function, r.class, r.classes);
+        const reason = for (r.listed, r.reasons) |f, reason| {
+            if (f.node == function.node) break reason;
+        } else null;
+        var e = try build(r.arena, r.scratch, r.tree, r.index, r.path, function, reason, r.class, r.classes);
         e.suggestions = try r.suggestions(function, e);
         return e;
     }
@@ -569,6 +621,7 @@ fn writeXml(w: *Writer, explanations: []const Explanation, c: Context) Writer.Er
             try formats.attrInt(w, "limit", trip.limit);
             try w.writeAll("/>\n");
         }
+        if (e.test_code) |t| try writeTestCodeXml(w, t);
         try w.print("      <cyclomatic value=\"{d}\">\n", .{e.cyclomatic.value});
         for (e.cyclomatic.branches) |b| {
             try w.writeAll("        <branch");
@@ -609,6 +662,19 @@ fn writeXml(w: *Writer, explanations: []const Explanation, c: Context) Writer.Er
     try w.writeAll("  </explanations>\n</gnarl>\n");
 }
 
+/// The `<test_code>` element.
+fn writeTestCodeXml(w: *Writer, t: TestCode) Writer.Error!void {
+    try w.writeAll("      <test_code>\n");
+    if (t.in) |in| {
+        try w.writeAll("        <in");
+        try formats.attr(w, "name", in.name);
+        try formats.attrInt(w, "line", in.line);
+        try w.writeAll("/>\n");
+    }
+    for (t.used_at) |line| try w.print("        <used_at line=\"{d}\"/>\n", .{line});
+    try w.writeAll("      </test_code>\n");
+}
+
 fn writeCognitiveXml(w: *Writer, e: Explanation) Writer.Error!void {
     try w.print("      <cognitive value=\"{d}\">\n", .{e.cognitive.value});
     for (e.cognitive.costs) |cost| {
@@ -634,6 +700,12 @@ fn writeDelimited(w: *Writer, kind: formats.Delimited, explanations: []const Exp
     try formats.header(w, kind, &delimited_columns);
     for (explanations) |e| {
         const row: Item = .{ .w = w, .kind = kind, .e = e };
+        if (e.test_code) |t| {
+            var buffer: [512]u8 = undefined;
+            var why: Writer = .fixed(&buffer);
+            writeTestCode(&why, t) catch {};
+            try row.put("test_code", "", "", 0, why.buffered());
+        }
         try row.put("cyclomatic", "total", "", e.cyclomatic.value, "");
         if (e.dispatch) try row.put("cyclomatic", "dispatch", "", 0, "a flat dispatch: its cognitive is within its warning, so no limit holds its cyclomatic");
         try row.put("cyclomatic", "base", "", 1, "");
@@ -987,6 +1059,38 @@ const Item = struct {
     }
 };
 
+/// The class of code it is held to, and what makes it test code when that
+/// is not that it is a test block: `test code: only test code uses it, at
+/// lines 40, 52`.
+fn writeClass(w: *Writer, e: Explanation) Writer.Error!void {
+    try w.writeAll(e.class.text());
+    if (e.test_code) |t| {
+        try w.writeAll(": ");
+        try writeTestCode(w, t);
+    }
+}
+
+/// The lines of a use shown before `and 3 more`.
+const uses_shown = 5;
+
+/// What makes a function test code, as a clause.
+fn writeTestCode(w: *Writer, t: TestCode) Writer.Error!void {
+    if (t.in) |in| {
+        try w.print("declared in {s} at line {d}", .{ in.name, in.line });
+        if (t.used_at.len == 0) return;
+        try w.writeAll(", which only test code uses, at ");
+    } else {
+        try w.writeAll("only test code uses it, at ");
+    }
+    try w.writeAll(if (t.used_at.len == 1) "line " else "lines ");
+    const shown = @min(t.used_at.len, uses_shown);
+    for (t.used_at[0..shown], 0..) |line, i| {
+        if (i > 0) try w.writeAll(", ");
+        try w.print("{d}", .{line});
+    }
+    if (t.used_at.len > shown) try w.print(" and {d} more", .{t.used_at.len - shown});
+}
+
 /// `, over the warning limit (10)` for a metric over one, else nothing.
 fn writeOver(w: *Writer, e: Explanation, metric: Metric) Writer.Error!void {
     if (metric == .cyclomatic and e.dispatch) return w.writeAll(", a flat dispatch held to no limit, its cognitive within its warning");
@@ -1023,7 +1127,9 @@ const Widths = struct {
 };
 
 fn writeText(w: *Writer, e: Explanation) Writer.Error!void {
-    try w.print("{s}:{d}  {s}  ({s})\n\n", .{ e.path, e.line, e.name, e.class.text() });
+    try w.print("{s}:{d}  {s}  (", .{ e.path, e.line, e.name });
+    try writeClass(w, e);
+    try w.writeAll(")\n\n");
     if (e.range) |r| return writeRangeText(w, e, r);
     const ws: Widths = .of(e);
 
@@ -1147,7 +1253,9 @@ fn writeAt(w: *Writer, line: u32, column: u32, width: usize) Writer.Error!void {
 }
 
 fn writeMarkdown(w: *Writer, e: Explanation) Writer.Error!void {
-    try w.print("### `{s}` at `{s}:{d}` ({s})\n\n", .{ e.name, e.path, e.line, e.class.text() });
+    try w.print("### `{s}` at `{s}:{d}` (", .{ e.name, e.path, e.line });
+    try writeClass(w, e);
+    try w.writeAll(")\n\n");
     if (e.range) |r| return writeRangeMarkdown(w, e, r);
 
     try w.print("**cyclomatic {d}**", .{e.cyclomatic.value});
@@ -1489,6 +1597,71 @@ test "write: a flat dispatch says its cyclomatic is held to no limit, in every f
     }
 }
 
+test "write: what makes a function test code, in every format" {
+    const gpa = std.testing.allocator;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source =
+        \\fn helper() void {}
+        \\const Fake = struct {
+        \\    fn send() void {}
+        \\};
+        \\test "t" {
+        \\    const S = struct {
+        \\        fn local() void {}
+        \\    };
+        \\    _ = S;
+        \\    helper();
+        \\    helper();
+        \\    _ = Fake;
+        \\}
+        \\fn used() void {}
+        \\pub fn api() void {
+        \\    used();
+        \\}
+        \\test "u" {
+        \\    used();
+        \\    many(); many();
+        \\    many();
+        \\    many();
+        \\    many();
+        \\    many();
+        \\    many();
+        \\    many();
+        \\}
+        \\fn many() void {}
+    ;
+    var tree = try Ast.parse(gpa, source, .{});
+    defer tree.deinit(gpa);
+    var search: Search = try .init(arena, &.{ "helper", "Fake.send", "local", "used", "many" });
+    try search.file(arena, arena, "a.zig", &tree, .normal, .defaults);
+    var said: Messages = .{ .arena = arena, .echo = false };
+    const explanations = (try search.results(arena, &said)).explanations;
+    try std.testing.expectEqual(5, explanations.len);
+    try std.testing.expectEqual(null, explanations[3].test_code);
+    inline for (.{
+        .{ report.Format.text, "a.zig:1  helper  (test code: only test code uses it, at lines 10, 11)\n" },
+        .{ report.Format.text, "a.zig:3  Fake.send  (test code: declared in Fake at line 2, which only test code uses, at line 12)\n" },
+        .{ report.Format.text, "a.zig:7  test \"t\".S.local  (test code: declared in test \"t\" at line 5)\n" },
+        .{ report.Format.text, "a.zig:14  used  (normal code)\n" },
+        .{ report.Format.text, "a.zig:28  many  (test code: only test code uses it, at lines 20, 21, 22, 23, 24 and 2 more)\n" },
+        .{ report.Format.md, "### `helper` at `a.zig:1` (test code: only test code uses it, at lines 10, 11)\n" },
+        .{ report.Format.json, "\"test_code\":{\"in\":null,\"used_at\":[10,11]}" },
+        .{ report.Format.json, "\"test_code\":{\"in\":{\"name\":\"Fake\",\"line\":2},\"used_at\":[12]}" },
+        .{ report.Format.json, "\"test_code\":null" },
+        .{ report.Format.xml, "      <test_code>\n        <in name=\"test &quot;t&quot;\" line=\"5\"/>\n      </test_code>\n" },
+        .{ report.Format.csv, "a.zig,1,helper,test_code,,,0,\"only test code uses it, at lines 10, 11\"\n" },
+    }) |case| {
+        var out: Writer.Allocating = .init(arena);
+        try write(&out.writer, case[0], explanations, .{ .version = "0.0.0" });
+        if (std.mem.indexOf(u8, out.written(), case[1]) == null) {
+            std.debug.print("{t}: no {s} in:\n{s}\n", .{ case[0], case[1], out.written() });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 test "write: xml, csv and tsv say what json does" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
@@ -1569,10 +1742,10 @@ test "every golden fixture function: the explanation agrees with its golden row"
         var tree = try Ast.parse(gpa, source, .{});
         defer tree.deinit(gpa);
         var rows: std.ArrayList(report.Row) = .empty;
-        try measure.file(arena, arena, entry.name, &tree, &rows);
+        try measure.file(arena, arena, entry.name, &tree, .normal, &rows);
         const index = try LineIndex.init(arena, tree.source);
         for (try functions.list(arena, &tree), rows.items) |function, row| {
-            const e = try build(arena, arena, &tree, index, entry.name, function, .normal, .defaults);
+            const e = try build(arena, arena, &tree, index, entry.name, function, null, .normal, .defaults);
             try std.testing.expectEqual(row.cyclomatic, e.cyclomatic.value);
             try std.testing.expectEqual(row.cognitive, e.cognitive.value);
             var cost: u32 = 0;

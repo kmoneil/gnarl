@@ -307,9 +307,12 @@ only where cognitive is high too.
 
 `*` matches within a path segment, `**` across them, `?` one character.
 A metric named under a class replaces both its limits there.
-A test block is held to `tests` whatever its file's class: Zig keeps
-tests beside the code, so no glob can tell them apart, and a long test
-is usually a table of cases. `.thresholds.tests` changes its limits.
+Test code is held to `tests` whatever its file's class: a test block,
+what is declared in one, and a function neither `pub` nor `export` that
+only test code in its file uses, such as a fuzz property or a fake's
+methods. Zig keeps tests beside the code, so no glob can tell them
+apart, and a long test is usually a table of cases. `--explain` says
+what made a function test code; `.thresholds.tests` changes its limits.
 `.exclude = .{ "test/fixtures" }` leaves out what a glob matches, or
 what is inside it, as what git ignores is: not read under a directory
 named, read when named outright.

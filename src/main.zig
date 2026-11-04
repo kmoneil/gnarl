@@ -68,7 +68,9 @@ const usage = synopsis ++
     \\The thresholds depend on the class of code a file is in, hot, normal
     \\or cold, which complexity.zon in the current directory gives by globs,
     \\with any thresholds of its own. With no such file every file is normal.
-    \\A test block is held to the tests class's thresholds whatever its file.
+    \\Test code is held to the tests class's thresholds whatever its file:
+    \\a test block, and a function neither pub nor export that only test
+    \\code in its file uses.
     \\Its .exclude globs leave out what they match, as what git ignores is:
     \\not read under a directory named, read when named outright.
     \\
@@ -311,9 +313,7 @@ const ReportSink = struct {
     arena: std.mem.Allocator,
 
     pub fn file(s: ReportSink, scratch: std.mem.Allocator, path: []const u8, tree: *const Ast, class: Class) !void {
-        const first = s.rows.items.len;
-        try measure.file(s.arena, scratch, path, tree, s.rows);
-        for (s.rows.items[first..]) |*row| row.class = .forFunction(class, row.kind == .@"test");
+        try measure.file(s.arena, scratch, path, tree, class, s.rows);
     }
 };
 
@@ -1220,6 +1220,24 @@ test "--check fails on a critical threshold, by the class complexity.zon gives t
         try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "\"within_limits\":1") != null);
     }
+    // So is a function only a test calls. Made `pub`, another file may
+    // call it, and it is hot code again.
+    const called = "test \"t\" {\n    f(true);\n}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "hot.zig", .data = thirteen ++ called });
+    {
+        const result = try runGnarl(tmp.dir, &.{ "--check", "--json", "hot.zig" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "\"within_limits\":2") != null);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "hot.zig", .data = "pub " ++ thirteen ++ called });
+    {
+        const result = try runGnarl(tmp.dir, &.{ "--check", "hot.zig" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+    }
     try tmp.dir.writeFile(io, .{ .sub_path = "hot.zig", .data = thirteen });
     // Excluded, hot.zig is not read under `.`, and is when named.
     try tmp.dir.writeFile(io, .{ .sub_path = "complexity.zon", .data = ".{ .hot = .{\"hot.zig\"}, .exclude = .{\"hot.zig\"} }\n" });
@@ -1678,6 +1696,7 @@ test {
     _ = @import("report.zig");
     _ = @import("select.zig");
     _ = @import("skill.zig");
+    _ = @import("test_code.zig");
     _ = @import("thresholds.zig");
     _ = @import("walk.zig");
 }
