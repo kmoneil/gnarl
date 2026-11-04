@@ -64,7 +64,8 @@ lists only what needs attention; `--all` lists everything.
   dispatch and holds it to no cyclomatic limit, so a new prong never
   fails CI; cognitive complexity says what is hard to read.
 - **It knows hot code from cold.** Classes of code by path glob, each
-  with its own limits; test blocks are held as tests wherever they live.
+  with its own limits; test code (test blocks, and the helpers and fakes
+  only tests use) is held as tests wherever it lives.
 - **It speaks every format.** text, Markdown, JSON, XML, csv and tsv;
   the JSON and XML carry everything stderr says, versioned.
 - **It teaches itself to AI agents.** `gnarl skill` prints what an agent
@@ -304,8 +305,12 @@ each with its own limits, and leaves out what should not be read:
 }
 ```
 
-Test blocks are held as tests wherever they live: a long test is usually
-a table of cases, so only a test with real logic in it is flagged.
+Test code is held as tests wherever it lives: a long test is usually a
+table of cases, so only a test with real logic in it is flagged. Test
+code is a test block, what is declared in one, and a function neither
+`pub` nor `export` that only test code in its file uses: the property a
+fuzz test hands the fuzzer, a fake and its methods. `gnarl --explain`
+says what made a function test code.
 
 ## Output for people and for programs
 

@@ -252,9 +252,9 @@ const Side = struct {
     texts: []const []const u8 = &.{},
 };
 
-fn side(arena: Allocator, scratch: Allocator, path: []const u8, tree: *const Ast) Allocator.Error!Side {
+fn side(arena: Allocator, scratch: Allocator, path: []const u8, tree: *const Ast, file_class: Class) Allocator.Error!Side {
     var rows: std.ArrayList(report.Row) = .empty;
-    try measure.file(arena, scratch, path, tree, &rows);
+    try measure.file(arena, scratch, path, tree, file_class, &rows);
     // Only the rows outlive the file; the keys and texts are compared and
     // dropped.
     const listed = try functions.list(scratch, tree);
@@ -307,8 +307,8 @@ pub fn compareFile(
     classes: thresholds.Classes,
     out: *Collected,
 ) Allocator.Error!void {
-    const old: Side = if (before) |t| try side(arena, scratch, path, t) else .{};
-    const new: Side = if (after) |t| try side(arena, scratch, path, t) else .{};
+    const old: Side = if (before) |t| try side(arena, scratch, path, t, file_class) else .{};
+    const new: Side = if (after) |t| try side(arena, scratch, path, t, file_class) else .{};
     var index: std.StringHashMapUnmanaged(usize) = .empty;
     for (old.keys, 0..) |key, i| try index.put(scratch, key, i);
     const matched = try scratch.alloc(bool, old.rows.len);
@@ -324,14 +324,13 @@ pub fn compareFile(
             was = Values.of(old.rows[i]);
             change = compare(was.?, now);
         }
-        const class: Class = .forFunction(file_class, row.kind == .@"test");
         var values: std.EnumArray(Metric, u32) = .initUndefined();
         for (metrics) |m| values.set(m, now.get(m));
-        const judged = classes.get(class).judge(values);
-        try out.add(arena, .{ .path = path, .line = row.line, .name = row.name, .kind = row.kind, .class = class, .change = change, .before = was, .after = now, .trips = try arena.dupe(Trip, judged.trips()), .dispatch = judged.dispatch }, text);
+        const judged = classes.get(row.class).judge(values);
+        try out.add(arena, .{ .path = path, .line = row.line, .name = row.name, .kind = row.kind, .class = row.class, .change = change, .before = was, .after = now, .trips = try arena.dupe(Trip, judged.trips()), .dispatch = judged.dispatch }, text);
     }
     for (old.rows, old.texts, matched) |row, text, m| if (!m) {
-        try out.add(arena, .{ .path = path, .line = row.line, .name = row.name, .kind = row.kind, .class = .forFunction(file_class, row.kind == .@"test"), .change = .removed, .before = Values.of(row), .after = null, .trips = &.{} }, text);
+        try out.add(arena, .{ .path = path, .line = row.line, .name = row.name, .kind = row.kind, .class = row.class, .change = .removed, .before = Values.of(row), .after = null, .trips = &.{} }, text);
     };
 }
 

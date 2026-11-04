@@ -51,9 +51,10 @@ only where cognitive is high too.
   A path both a hot and a cold glob match is hot.
 - A metric named under a class replaces both its limits there; the rest
   keep their defaults.
-- A test block is held to `tests` wherever it lives: Zig keeps tests
-  beside the code, so no glob could tell them apart, and a long test is
-  usually a table of cases.
+- Test code is held to `tests` wherever it lives: a test block, what is
+  declared in one, and a function neither `pub` nor `export` that only
+  test code in its file uses. Zig keeps tests beside the code, so no glob
+  could tell them apart, and a long test is usually a table of cases.
 - `.exclude` leaves out what a glob matches, or what is inside it, as
   what git ignores is: not read under a directory named, read when named
   outright.
@@ -134,7 +135,7 @@ A released binary, pinned and checked against its release's checksums:
 ```yaml
 - name: install gnarl
   env:
-    GNARL: v0.5.0
+    GNARL: v0.6.0
   run: |
     dir="$RUNNER_TEMP/gnarl" && mkdir -p "$dir" && cd "$dir"
     base="https://github.com/kmoneil/gnarl/releases/download/$GNARL"

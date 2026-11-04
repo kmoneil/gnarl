@@ -76,8 +76,10 @@ names, and elements for what is a list or an object in json.
   - `column`: the column of its name, from 1, in bytes.
   - `name`: its qualified name, as `Validator.record`.
   - `kind`: `fn` or `test`.
-  - `class`: `hot`, `normal` or `cold`, by its file; `tests` for a test
-    block, whatever its file.
+  - `class`: `hot`, `normal` or `cold`, by its file; `tests` for test
+    code, whatever its file: a test block, what is declared in one, and
+    a function neither `pub` nor `export` that only test code in its
+    file uses.
   - `cyclomatic`: its cyclomatic complexity.
   - `cognitive`: its cognitive complexity, by the rules in
     docs/cognitive.md.
@@ -108,6 +110,14 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
   named:
   - `path`, `line`, `end_line`, `column`, `name`, `kind`, `class`,
     `trips`, `dispatch`: as in the report's `functions`.
+  - `test_code`: what makes it test code, when it is that and not a test
+    block itself; null otherwise:
+    - `in`: the test block, or the declaration only test code uses (a
+      fake, a table of cases), that it is declared in, by `name` (`test
+      "name"`, or the declaration's own) and `line`; null when only test
+      code uses the function itself.
+    - `used_at`: the lines test code uses it, or `in`, at, each once;
+      empty when `in` is a test block.
   - `cyclomatic`: the count and what made it:
     - `value`: the count: 1, and the `adds` of each branch.
     - `branches`: each construct counted, and each that a reader may
@@ -280,8 +290,10 @@ not have), `over`, `from` (`path:line`, or empty) and `dispatch`.
 
 In csv and tsv, an explanation is a row per item, with the columns
 `path`, `line`, `name` (the function's), `metric`, `item`, `at`
-(`line:column`, when the item is a place), `value` and `why`. Each metric
-has a `total` row but `comptime`, whose rows are each construct counted
+(`line:column`, when the item is a place), `value` and `why`. A function
+test code by what uses it has a `test_code` row first (value 0), `why`
+saying so as the text does. Each metric has a `total` row but
+`comptime`, whose rows are each construct counted
 (value 1), `returns a type` when it does, and each `unknown` (value 0,
 said in `why`); cyclomatic's other rows (`base`, 1, and the branches)
 add up to it, as cognitive's (the costs) do, their `why` saying how much

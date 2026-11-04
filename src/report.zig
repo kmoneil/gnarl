@@ -37,7 +37,8 @@ pub const Row = struct {
     nesting: u32,
     params: u32,
     params_weighted: u32,
-    /// The class of code its file is in, which picks its thresholds.
+    /// The class of code it is held to, which picks its thresholds: its
+    /// file's, or `tests` for test code.
     class: Class = .normal,
     /// The limits it is over, each metric once at its worst. Set by `rank`.
     trips: []const Trip = &.{},

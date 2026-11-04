@@ -145,12 +145,13 @@ test "docs/output.md lists every field of an explanation, and no other" {
     const arena = arena_state.allocator();
     const doc = try std.Io.Dir.cwd().readFileAlloc(io, doc_path, arena, .limited(1 << 20));
 
-    // A function with a branch, a level, and a parameter, over a limit.
-    const source = "fn f(x: u8) void {\n    if (x > 0) {}\n}\n";
+    // A function with a branch, a level, and a parameter, over a limit,
+    // and one only a test calls.
+    const source = "fn f(x: u8) void {\n    if (x > 0) {}\n}\nfn g() void {}\ntest {\n    g();\n}\n";
     var tree = try Ast.parse(std.testing.allocator, source, .{});
     defer tree.deinit(std.testing.allocator);
     // By name, and by a range of lines.
-    var search: explain.Search = try .init(arena, &.{ "f", "a.zig:2-2" });
+    var search: explain.Search = try .init(arena, &.{ "f", "a.zig:2-2", "g" });
     var classes: thresholds.Classes = .defaults;
     classes.normal = .{ .cyclomatic = .{ .warning = 1 } };
     try search.file(arena, arena, "a.zig", &tree, .normal, classes);
