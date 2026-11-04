@@ -33,7 +33,7 @@ jobs:
       # did not make.
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.17.0
+          version: 0.17.1
           use-cache: false
       - name: the tag is build.zig.zon's version
         if: github.event_name == 'push'
@@ -78,7 +78,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.17.0
+          version: 0.17.1
           use-cache: false
       # The six targets and their names are build.zig's release_targets,
       # the same list ci.yml builds on every change.
