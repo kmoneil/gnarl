@@ -90,6 +90,47 @@ jobs:
         run: |
           ./zig-out/release/gnarl-linux-amd64 --version
           ./zig-out/release/gnarl-linux-amd64 --check .
+      # kmoneil/homebrew-tap moves its formula to a release only once the
+      # formula's own test passes against the released binary, and that runs
+      # after the tag, which cannot move. So the same checks run here first,
+      # on a dry run too: a change to gnarl's output that the formula's test
+      # would reject fails before anything is published. They are a copy of
+      # the `test do` block in the tap's gnarl.rb, and change when it does.
+      # Like brew, it runs in an empty directory: no complexity.zon there.
+      - name: the tap formula's test passes
+        run: |
+          bin="$PWD/zig-out/release/gnarl-linux-amd64"
+          version="$(sed -n 's/^ *\.version = "\(.*\)",$/\1/p' build.zig.zon)"
+          fail() { printf 'The tap formula'\''s test would fail: %s\n%s\n' "$1" "$2" >&2; exit 1; }
+          dir="$RUNNER_TEMP/formula-test"
+          mkdir -p "$dir" && cd "$dir"
+
+          # The version, which the formula says it installed.
+          got="$("$bin" --version)"
+          [ "$got" = "gnarl $version" ] || fail "--version is not 'gnarl $version'" "$got"
+
+          # An if and an `and`: cyclomatic 3, cognitive 2, 3 lines, nested 1,
+          # 2 parameters, within every limit. The row is matched up to its
+          # empty `over` column only, so columns added after it pass.
+          printf 'fn pick(a: bool, b: bool) u8 {\n    if (a and b) return 1;\n    return 0;\n}\n' > pick.zig
+          got="$("$bin" --all --format tsv "$dir/pick.zig")"
+          printf '%s\n' "$got" | grep -qE $'\tpick\tfn\tnormal\t3\t2\t3\t1\t2\t2\t(\t|$)' ||
+            fail "no tsv row for pick with the numbers it expects" "$got"
+
+          # Sixteen ifs: cyclomatic 17, over the critical 15, so --check
+          # exits 1 and says so.
+          {
+            printf 'fn many(x: u8) u8 {\n    var n: u8 = 0;\n'
+            for i in $(seq 1 16); do printf '    if (x == %d) n += 1;\n' "$i"; done
+            printf '    return n;\n}\n'
+          } > many.zig
+          status=0
+          got="$("$bin" --check "$dir/many.zig" 2>&1)" || status=$?
+          [ "$status" = 1 ] || fail "--check on many.zig exited $status, not 1" "$got"
+          case "$got" in
+            *"--check: 1 function over a critical threshold"*) ;;
+            *) fail "--check on many.zig does not say it fails" "$got" ;;
+          esac
       - name: checksums
         run: cd zig-out/release && sha256sum gnarl-* > SHA256SUMS && cat SHA256SUMS
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
