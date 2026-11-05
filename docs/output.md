@@ -66,6 +66,9 @@ names, and elements for what is a list or an object in json.
     about a place in one.
   - `text`: what is wrong.
   - `more`: further lines, such as the functions a name fits.
+- `warnings`: what is not wrong but may change what the document means,
+  such as a `complexity.zon` that asks for a gnarl that counts
+  differently, with the same fields as `errors`.
 - `notes`: what is worth knowing and is not wrong, with the same fields
   as `errors`.
 - `functions`: the functions listed, worst first; under `--check`, those
@@ -105,7 +108,7 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
 
 ## An explanation
 
-- `schema`, `gnarl`, `errors`, `notes`: as in the report.
+- `schema`, `gnarl`, `errors`, `warnings`, `notes`: as in the report.
 - `explanations`: one for each function `--explain` names, in the order
   named:
   - `path`, `line`, `end_line`, `column`, `name`, `kind`, `class`,
@@ -232,7 +235,7 @@ a file, relative to the importing one; anything else is a module (`std`,
 `builtin`, a build option, a named module), which the source alone
 cannot place, and which gnarl lists rather than follows.
 
-- `schema`, `gnarl`, `errors`, `notes`: as in the report.
+- `schema`, `gnarl`, `errors`, `warnings`, `notes`: as in the report.
 - `files`: each file read, the most coupled first (the most imports in
   and out, then out, then by path):
   - `path`: as gnarl prints paths.
@@ -247,7 +250,7 @@ lists `imports`, `imported_by` and `modules`, each separated by spaces.
 
 ## A diff
 
-- `schema`, `gnarl`, `thresholds`, `errors`, `notes`: as in the report.
+- `schema`, `gnarl`, `thresholds`, `errors`, `warnings`, `notes`: as in the report.
 - `ref`: the commit the work tree was compared with.
 - `files`: how many files the change touched.
 - `critical`: how many of the functions touched are over a critical

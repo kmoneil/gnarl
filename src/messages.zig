@@ -1,5 +1,6 @@
 //! What gnarl has to say besides its report: errors, which make the exit
-//! status 2, and notes. Each is written to stderr as it is added, and kept
+//! status 2, warnings, which do not but may change what the report means,
+//! and notes. Each is written to stderr as it is added, and kept
 //! for the formats that carry everything (json and xml), so a program
 //! reading stdout never needs stderr.
 
@@ -9,7 +10,7 @@ const Writer = std.Io.Writer;
 
 const formats = @import("formats.zig");
 
-pub const Level = enum { @"error", note };
+pub const Level = enum { @"error", warning, note };
 
 pub const Message = struct {
     level: Level,
@@ -63,15 +64,20 @@ pub fn format(w: *std.Io.Writer, message: Message) std.Io.Writer.Error!void {
         if (message.column) |column| try w.print(":{d}", .{column});
         try w.writeAll(": ");
     }
-    if (message.level == .note) try w.writeAll("note: ");
+    switch (message.level) {
+        .@"error" => {},
+        .warning => try w.writeAll("warning: "),
+        .note => try w.writeAll("note: "),
+    }
     try w.print("{s}\n", .{message.text});
     for (message.more) |more| try w.print("  {s}\n", .{more});
 }
 
-/// `,"errors":[...],"notes":[...]`, for a json document: each message by
-/// its level, as an object with the same fields but `level`.
+/// `,"errors":[...],"warnings":[...],"notes":[...]`, for a json document:
+/// each message by its level, as an object with the same fields but
+/// `level`.
 pub fn writeJson(w: *Writer, items: []const Message) Writer.Error!void {
-    inline for (.{ .{ "errors", Level.@"error" }, .{ "notes", Level.note } }) |pair| {
+    inline for (.{ .{ "errors", Level.@"error" }, .{ "warnings", Level.warning }, .{ "notes", Level.note } }) |pair| {
         try w.print(",\"{s}\":[", .{pair[0]});
         var first = true;
         for (items) |m| if (m.level == pair[1]) {
@@ -83,11 +89,11 @@ pub fn writeJson(w: *Writer, items: []const Message) Writer.Error!void {
     }
 }
 
-/// `<errors>` and `<notes>`, for an xml document: each message an element
-/// with its fields as attributes, and a `<more text="..."/>` for each
-/// further line.
+/// `<errors>`, `<warnings>` and `<notes>`, for an xml document: each
+/// message an element with its fields as attributes, and a
+/// `<more text="..."/>` for each further line.
 pub fn writeXml(w: *Writer, items: []const Message) Writer.Error!void {
-    inline for (.{ .{ "errors", "error", Level.@"error" }, .{ "notes", "note", Level.note } }) |names| {
+    inline for (.{ .{ "errors", "error", Level.@"error" }, .{ "warnings", "warning", Level.warning }, .{ "notes", "note", Level.note } }) |names| {
         const any = for (items) |m| {
             if (m.level == names[2]) break true;
         } else false;
@@ -126,10 +132,12 @@ test "format: as much of the place as there is, then the further lines" {
     defer out.deinit();
     try format(&out.writer, .{ .level = .@"error", .path = "a.zig", .line = 3, .column = 7, .text = "expected ';'" });
     try format(&out.writer, .{ .level = .@"error", .path = "nope", .text = "FileNotFound" });
+    try format(&out.writer, .{ .level = .warning, .path = "complexity.zon", .text = "counts otherwise" });
     try format(&out.writer, .{ .level = .note, .text = "plain", .more = &.{ "a.zig:1  f", "b.zig:2  S.f" } });
     try std.testing.expectEqualStrings(
         \\gnarl: a.zig:3:7: expected ';'
         \\gnarl: nope: FileNotFound
+        \\gnarl: complexity.zon: warning: counts otherwise
         \\gnarl: note: plain
         \\  a.zig:1  f
         \\  b.zig:2  S.f

@@ -1548,7 +1548,7 @@ test "write: Markdown and JSON" {
     const said = [_]Message{.{ .level = .@"error", .path = "nope", .text = "no function by that name in the files read" }};
     try write(&json.writer, .json, (try explainSample(arena, &.{"pick"})).explanations, .{ .version = "0.0.0", .messages = &said });
     const JsonMessage = struct { path: []const u8, line: ?u32, column: ?u32, text: []const u8, more: []const []const u8 };
-    const Doc = struct { schema: u32, gnarl: []const u8, errors: []const JsonMessage, notes: []const JsonMessage, explanations: []const Explanation };
+    const Doc = struct { schema: u32, gnarl: []const u8, errors: []const JsonMessage, warnings: []const JsonMessage, notes: []const JsonMessage, explanations: []const Explanation };
     const doc = try std.json.parseFromSliceLeaky(Doc, arena, json.written(), .{});
     try std.testing.expectEqual(report.schema, doc.schema);
     try std.testing.expectEqualStrings("nope", doc.errors[0].path);

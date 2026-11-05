@@ -5,7 +5,8 @@
 //! The numbers were checked when each table was written; this keeps them
 //! from moving unnoticed. When a counting rule changes on purpose,
 //! `zig build test -Dupdate` rewrites the tables, and the diff shows what
-//! the change moved.
+//! the change moved; the release it goes out in joins `changes` in
+//! counting.zig.
 
 const std = @import("std");
 const Io = std.Io;

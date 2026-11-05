@@ -2,6 +2,7 @@
 //! that differ from the defaults.
 //!
 //!     .{
+//!         .gnarl = "0.7.0",
 //!         .hot = .{ "src/scan.zig", "src/parse/**" },
 //!         .cold = .{ "build.zig", "test/**" },
 //!         .exclude = .{ "test/fixtures", "**/*_gen.zig" },
@@ -20,10 +21,15 @@
 //! is held to `.tests`, whatever its file's class. What an `.exclude` glob
 //! matches, or what is inside it, is not read when gnarl walks a directory
 //! above it, as what git ignores is not; named outright, it is read.
+//!
+//! `.gnarl` names the release the code is judged by. A gnarl that counts
+//! otherwise (counting.zig) will not run `--check`, and warns on every
+//! other run.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const counting = @import("counting.zig");
 const glob = @import("glob.zig");
 const thresholds = @import("thresholds.zig");
 const Class = thresholds.Class;
@@ -35,6 +41,8 @@ const Metric = thresholds.Metric;
 pub const default_path = "complexity.zon";
 
 pub const Config = struct {
+    /// The release the code is judged by, if the file names one.
+    gnarl: ?std.SemanticVersion = null,
     hot: []const []const u8 = &.{},
     cold: []const []const u8 = &.{},
     exclude: []const []const u8 = &.{},
@@ -49,6 +57,7 @@ pub const Config = struct {
 
 /// The file as written.
 const File = struct {
+    gnarl: ?[]const u8 = null,
     hot: []const []const u8 = &.{},
     cold: []const []const u8 = &.{},
     exclude: []const []const u8 = &.{},
@@ -83,6 +92,7 @@ pub fn parse(
 ) error{ OutOfMemory, ParseZon, Invalid }!Config {
     const file = try std.zon.parse.fromSlice(File, .{ .gpa = gpa, .arena = arena, .source = source, .diagnostics = diagnostics });
     var config: Config = .{ .hot = file.hot, .cold = file.cold, .exclude = file.exclude };
+    config.gnarl = try release(arena, file.gnarl, problem);
     inline for (comptime std.enums.values(Class)) |class| {
         const overrides = @field(file.thresholds, @tagName(class));
         const t = config.classes.getPtr(class);
@@ -97,6 +107,22 @@ pub fn parse(
         }
     }
     return config;
+}
+
+/// `.gnarl`'s text as a release, or null for none: a whole version, with
+/// no pre-release or build part, and not before the first release.
+fn release(arena: Allocator, given: ?[]const u8, problem: *Problem) error{ OutOfMemory, Invalid }!?std.SemanticVersion {
+    const text = given orelse return null;
+    const version = std.SemanticVersion.parse(text) catch null;
+    if (version == null or version.?.pre != null or version.?.build != null) {
+        problem.message = try std.fmt.allocPrint(arena, ".gnarl = \"{s}\" is not a release: write one as gnarl --version prints it, three numbers and nothing else", .{text});
+        return error.Invalid;
+    }
+    if (counting.since(version.?) == null) {
+        problem.message = try std.fmt.allocPrint(arena, ".gnarl = \"{s}\" is before every release: the first is 0.1.0", .{text});
+        return error.Invalid;
+    }
+    return version.?;
 }
 
 test "an empty file is the defaults: everything normal" {
@@ -167,4 +193,26 @@ test "a misspelled field is an error that says where; a warning not below its cr
 
     try std.testing.expectError(error.Invalid, parse(std.testing.allocator, arena, ".{ .thresholds = .{ .cold = .{ .lines = .{ .warning = 90, .critical = 90 } } } }", &diagnostics, &problem));
     try std.testing.expectEqualStrings("thresholds.cold.lines: the warning limit, 90, is not below the critical one, 90", problem.message);
+}
+
+test "gnarl: a release, as --version prints it" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var diagnostics: std.zon.parse.Diagnostics = undefined;
+    var problem: Problem = undefined;
+    const config = try parse(std.testing.allocator, arena, ".{ .gnarl = \"0.6.1\" }", &diagnostics, &problem);
+    try std.testing.expectEqual(std.SemanticVersion{ .major = 0, .minor = 6, .patch = 1 }, config.gnarl.?);
+    try std.testing.expectEqual(null, (try parse(std.testing.allocator, arena, ".{}", &diagnostics, &problem)).gnarl);
+
+    for ([_][]const u8{ "0.6", "v0.6.0", "0.7.0-dev", "0.6.0+abc", "" }) |text| {
+        const source = try std.fmt.allocPrintSentinel(arena, ".{{ .gnarl = \"{s}\" }}", .{text}, 0);
+        try std.testing.expectError(error.Invalid, parse(std.testing.allocator, arena, source, &diagnostics, &problem));
+        try std.testing.expectEqualStrings(
+            try std.fmt.allocPrint(arena, ".gnarl = \"{s}\" is not a release: write one as gnarl --version prints it, three numbers and nothing else", .{text}),
+            problem.message,
+        );
+    }
+    try std.testing.expectError(error.Invalid, parse(std.testing.allocator, arena, ".{ .gnarl = \"0.0.9\" }", &diagnostics, &problem));
+    try std.testing.expectEqualStrings(".gnarl = \"0.0.9\" is before every release: the first is 0.1.0", problem.message);
 }

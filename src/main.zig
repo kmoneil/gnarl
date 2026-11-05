@@ -9,6 +9,7 @@ const build_options = @import("build_options");
 const test_options = @import("test_options");
 const baseline = @import("baseline.zig");
 const config = @import("config.zig");
+const counting = @import("counting.zig");
 const diff = @import("diff.zig");
 const explain = @import("explain.zig");
 const fan = @import("fan.zig");
@@ -73,6 +74,8 @@ const usage = synopsis ++
     \\code in its file uses.
     \\Its .exclude globs leave out what they match, as what git ignores is:
     \\not read under a directory named, read when named outright.
+    \\Its .gnarl names the release the code is judged by: a gnarl that
+    \\counts otherwise will not run --check, and warns on every other run.
     \\
     \\  --exclude <path>  Skip this file or directory, named as gnarl prints
     \\                    paths: relative to the current directory. May be
@@ -127,7 +130,8 @@ const usage = synopsis ++
     \\
     \\Exit status: 0 if every file was read (and, with --check, nothing
     \\fails it); 1 if --check found what does; 2 on a usage error, a
-    \\configuration or baseline that cannot be used or written, a path that
+    \\configuration or baseline that cannot be used or written (or, under
+    \\--check, a .gnarl that counts otherwise than this one), a path that
     \\could not be read or holds no .zig file, a file that does not parse,
     \\or an --explain that names no function or more than one. The files
     \\that could be read are reported either way.
@@ -154,6 +158,7 @@ pub fn main(init: std.process.Init) !u8 {
     var said: messages.Messages = .{ .arena = arena };
     const settings = try loadConfig(init.gpa, arena, init.io, cwd, run.config, &said) orelse
         return stopEarly(&stdout_writer, run, said.items.items);
+    if (try judgedOtherwise(arena, run, settings, &said)) return stopEarly(&stdout_writer, run, said.items.items);
     const c: Context = .{
         .gpa = init.gpa,
         .arena = arena,
@@ -592,6 +597,40 @@ fn loadConfig(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: Io, dir: Io.
             return null;
         },
     };
+}
+
+/// The release gnarl is, as `gnarl --version` prints it.
+const this_release = std.SemanticVersion.parse(build_options.version) catch @compileError("build.zig.zon's version is not a release: " ++ build_options.version);
+
+/// Whether the run stops because the configuration asks for a gnarl that
+/// counts otherwise. `--check`, the gate, will not hold code to rules
+/// other than the ones it asks for: that is an error, and it stops. Every
+/// other run is warned, and goes on.
+fn judgedOtherwise(arena: std.mem.Allocator, run: Run, settings: config.Config, said: *messages.Messages) std.mem.Allocator.Error!bool {
+    const asked = settings.gnarl orelse return false;
+    if (counting.alike(asked, this_release)) return false;
+    const asks = if (asked.order(this_release) == .gt)
+        try arena.print("asks for gnarl {f}, newer than this one, {s}, which cannot say how it counts", .{ asked, build_options.version })
+    else
+        try arena.print("asks for gnarl {f}, which counts differently from this one, {s}", .{ asked, build_options.version });
+    const path = run.config orelse config.default_path;
+    if (run.check) {
+        try said.add(.{
+            .level = .@"error",
+            .path = path,
+            .text = try arena.print("{s}: --check holds code only to the gnarl it asks for", .{asks}),
+            .more = try arena.dupe([]const u8, &.{
+                try arena.print("run gnarl {f}, or set .gnarl to \"{s}\" and rewrite the baseline with this one: gnarl --update-baseline <path>...", .{ asked, build_options.version }),
+            }),
+        });
+        return true;
+    }
+    try said.add(.{
+        .level = .warning,
+        .path = path,
+        .text = try arena.print("{s}: these numbers may not be the ones gnarl {f} gives", .{ asks, asked }),
+    });
+    return false;
 }
 
 /// A reader that stops early, as `gnarl src | head` does, closes the pipe:
@@ -1324,7 +1363,7 @@ test "a configuration that cannot be used is an error, and nothing is measured" 
     try expectRun(tmp.dir, &.{ "--config=limits.zon", "." }, 2, "", "gnarl: limits.zon: thresholds.hot.lines: the warning limit, 9, is not below the critical one, 9\n");
     try expectRun(tmp.dir, &.{ "--config", "typo.zon", "." }, 2, "",
         \\gnarl: typo.zon:1:5: unexpected field 'hott'
-        \\gnarl: typo.zon:1:5: note: supported: 'hot', 'cold', 'exclude', 'thresholds'
+        \\gnarl: typo.zon:1:5: note: supported: 'gnarl', 'hot', 'cold', 'exclude', 'thresholds'
         \\
     );
 
@@ -1338,7 +1377,73 @@ test "a configuration that cannot be used is an error, and nothing is measured" 
     try std.testing.expectEqual(0, doc.value.functions.len);
     try std.testing.expectEqualStrings("unexpected field 'hott'", doc.value.errors[0].text);
     try std.testing.expectEqual(5, doc.value.errors[0].column.?);
-    try std.testing.expectEqualStrings("supported: 'hot', 'cold', 'exclude', 'thresholds'", doc.value.notes[0].text);
+    try std.testing.expectEqualStrings("supported: 'gnarl', 'hot', 'cold', 'exclude', 'thresholds'", doc.value.notes[0].text);
+}
+
+test "complexity.zon's .gnarl: a gnarl that counts otherwise will not --check, and warns on the rest" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = "fn a() void {}\n" });
+    const all =
+        \\cyclomatic  cognitive  lines  nesting  params  weighted  location  function
+        \\       1          0      1        0       0         0    a.zig:1   a
+        \\
+        \\1 function in 1 file: 0 over a critical threshold (!!), 0 more over a warning one (!).
+        \\
+    ++ thresholds_line;
+
+    // This release: nothing to say.
+    try tmp.dir.writeFile(io, .{ .sub_path = "complexity.zon", .data = ".{ .gnarl = \"" ++ build_options.version ++ "\" }\n" });
+    try expectRun(tmp.dir, &.{ "--check", "." }, 0, "", "");
+    try expectRun(tmp.dir, &.{ "--all", "." }, 0, all, "");
+
+    // 0.5.0 held a flat dispatch to no cyclomatic limit and nothing as
+    // tests that only test code uses: --check will not judge by this one,
+    // and the rest go on, warned.
+    try tmp.dir.writeFile(io, .{ .sub_path = "complexity.zon", .data = ".{ .gnarl = \"0.5.0\" }\n" });
+    const older = "gnarl: complexity.zon: asks for gnarl 0.5.0, which counts differently from this one, " ++ build_options.version;
+    try expectRun(tmp.dir, &.{ "--check", "." }, 2, "", older ++ ": --check holds code only to the gnarl it asks for\n" ++
+        "  run gnarl 0.5.0, or set .gnarl to \"" ++ build_options.version ++ "\" and rewrite the baseline with this one: gnarl --update-baseline <path>...\n");
+    const warned = "gnarl: complexity.zon: warning: asks for gnarl 0.5.0, which counts differently from this one, " ++ build_options.version ++ ": these numbers may not be the ones gnarl 0.5.0 gives\n";
+    try expectRun(tmp.dir, &.{ "--all", "." }, 0, all, warned);
+    try expectRun(tmp.dir, &.{ "--update-baseline", "." }, 0,
+        \\1 function in 1 file: 0 over a critical threshold (!!), 0 more over a warning one (!).
+        \\1 within limits is not listed; --all lists every function.
+        \\
+    ++ thresholds_line, warned ++ "gnarl: complexity.baseline: note: wrote 0 functions over a critical threshold\n");
+
+    // A release newer than this one may count otherwise: this one cannot
+    // know.
+    try tmp.dir.writeFile(io, .{ .sub_path = "complexity.zon", .data = ".{ .gnarl = \"99.0.0\" }\n" });
+    try expectRun(tmp.dir, &.{ "--check", "." }, 2, "", "gnarl: complexity.zon: asks for gnarl 99.0.0, newer than this one, " ++ build_options.version ++ ", which cannot say how it counts: --check holds code only to the gnarl it asks for\n" ++
+        "  run gnarl 99.0.0, or set .gnarl to \"" ++ build_options.version ++ "\" and rewrite the baseline with this one: gnarl --update-baseline <path>...\n");
+
+    // json carries the warning, and the refusal.
+    try tmp.dir.writeFile(io, .{ .sub_path = "complexity.zon", .data = ".{ .gnarl = \"0.5.0\" }\n" });
+    {
+        const result = try runGnarl(tmp.dir, &.{ "--all", "--json", "." });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+        const doc = try std.json.parseFromSlice(Document, gpa, result.stdout, .{});
+        defer doc.deinit();
+        try std.testing.expectEqual(1, doc.value.warnings.len);
+        try std.testing.expectEqualStrings("complexity.zon", doc.value.warnings[0].path);
+        try std.testing.expectEqual(0, doc.value.errors.len);
+        try std.testing.expectEqual(1, doc.value.functions.len);
+    }
+    {
+        const result = try runGnarl(tmp.dir, &.{ "--check", "--json", "." });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 2 }, result.term);
+        const doc = try std.json.parseFromSlice(Document, gpa, result.stdout, .{});
+        defer doc.deinit();
+        try std.testing.expectEqual(1, doc.value.errors.len);
+        try std.testing.expectEqual(0, doc.value.functions.len);
+    }
 }
 
 /// The report's json document, read back whole: an unknown field is an
@@ -1352,6 +1457,7 @@ const Document = struct {
     check: report.Check,
     thresholds: Classes,
     errors: []const Said,
+    warnings: []const Said,
     notes: []const Said,
     functions: []const report.Row,
 };
@@ -1696,6 +1802,7 @@ test {
     _ = @import("cognitive.zig");
     _ = @import("comptime_tally.zig");
     _ = @import("config.zig");
+    _ = @import("counting.zig");
     _ = @import("diff.zig");
     _ = @import("docs.zig");
     _ = @import("explain.zig");

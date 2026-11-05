@@ -960,7 +960,7 @@ test "write: the table, and the summary saying when nothing got worse" {
     // The others read back.
     var json: Writer.Allocating = .init(arena);
     try write(&json.writer, .json, &touched, context);
-    const Doc = struct { schema: u32, gnarl: []const u8, ref: []const u8, files: usize, changes: Counts, critical: usize, thresholds: Classes, errors: []const std.json.Value, notes: []const std.json.Value, functions: []const Touched };
+    const Doc = struct { schema: u32, gnarl: []const u8, ref: []const u8, files: usize, changes: Counts, critical: usize, thresholds: Classes, errors: []const std.json.Value, warnings: []const std.json.Value, notes: []const std.json.Value, functions: []const Touched };
     const doc = try std.json.parseFromSliceLeaky(Doc, arena, json.written(), .{});
     try std.testing.expectEqual(1, doc.changes.worse);
     try std.testing.expectEqual(1, doc.critical);
