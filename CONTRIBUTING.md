@@ -73,7 +73,8 @@ release before its formula moves to it.
 
 A `v*` tag cannot be moved or deleted, so a mistake in one is a new
 version. Run the release workflow by hand on `main` first: that run builds
-and checks everything and publishes nothing.
+and checks everything, the Homebrew formula's own test among it, and
+publishes nothing.
 
 ## The site
 
