@@ -312,6 +312,12 @@ code is a test block, what is declared in one, and a function neither
 fuzz test hands the fuzzer, a fake and its methods. `gnarl --explain`
 says what made a function test code.
 
+Releases of gnarl that count differently disagree on what passes, so
+`.gnarl = "0.7.0"` in `complexity.zon` names the release the code is
+judged by. A gnarl that counts otherwise will not run `--check`, and
+warns on every other run; CI can install the release the same line
+names (see [docs/ci.md](docs/ci.md)).
+
 ## Output for people and for programs
 
 `--format` takes `text` (the default), `md` (for a pull request comment),

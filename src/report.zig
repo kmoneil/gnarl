@@ -709,6 +709,7 @@ test "write: JSON" {
         check: Check,
         thresholds: Classes,
         errors: []const JsonMessage,
+        warnings: []const JsonMessage,
         notes: []const JsonMessage,
         functions: []const Row,
     };

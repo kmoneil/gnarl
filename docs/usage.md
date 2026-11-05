@@ -71,6 +71,6 @@ gnarl --json src | jq '.functions[0]'  # feed a dashboard
 | --- | --- |
 | 0 | Every file was read, and with `--check`, nothing fails it. |
 | 1 | `--check` found what does. |
-| 2 | A usage error, a configuration or baseline that cannot be used or written, a path that could not be read or holds no `.zig` file, a file that does not parse, or an `--explain` that names no function or more than one. |
+| 2 | A usage error, a configuration or baseline that cannot be used or written (or, under `--check`, a `.gnarl` that counts otherwise than this gnarl), a path that could not be read or holds no `.zig` file, a file that does not parse, or an `--explain` that names no function or more than one. |
 
 The files that could be read are reported either way.

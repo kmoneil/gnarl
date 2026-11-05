@@ -60,6 +60,15 @@ a field added leaves it.
 every example in it against the binary. A new flag, metric or format is
 named there in the same change.
 
+## Counting changes
+
+A change to a number gnarl gives a function, to the class it holds one
+to, or to how it holds one to its limits, adds the release it goes out
+in to `changes` in `src/counting.zig`. That is how a repo whose
+`complexity.zon` names an earlier release hears that this one counts
+otherwise. A change to the golden tables (`zig build test -Dupdate`) is
+one such change.
+
 ## Releasing
 
 A tag is the release. Set `.version` in `build.zig.zon` (what

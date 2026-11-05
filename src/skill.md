@@ -316,12 +316,18 @@ what made a function test code; `.thresholds.tests` changes its limits.
 `.exclude = .{ "test/fixtures" }` leaves out what a glob matches, or
 what is inside it, as what git ignores is: not read under a directory
 named, read when named outright.
+`.gnarl = "0.7.0"` names the release the code is judged by. Releases
+that count differently disagree on what passes, so a gnarl that counts
+otherwise will not run `--check` (exit 2, naming both releases) and
+warns on every other run; one that counts the same says nothing. CI
+installs the release that line names.
 
 ## Exit status
 
 0 when every file was read (and, with `--check`, nothing fails it); 1
 when `--check` found what does; 2 on a usage error, a configuration or
-baseline that cannot be used or written, a path that cannot be read or holds
+baseline that cannot be used or written (or, under `--check`, a `.gnarl`
+that counts otherwise than this gnarl), a path that cannot be read or holds
 no .zig file, a file that does not parse, or a `--function` or
 `--explain` that names no function (or, for `--explain`, more than
 one). gnarl still reports what it could read.
@@ -330,6 +336,12 @@ one). gnarl still reports what it could read.
 
 - A function missing from the report is within its limits: the default
   lists only what is over one. Use `--function` or `--all`.
+- `--check` exits 2 naming complexity.zon's `.gnarl`: the gnarl on the
+  `PATH` counts differently from the release the repo asks for, so its
+  pass or fail would not be CI's. Run that release. Moving the repo to
+  this one is a change of its own: set `.gnarl`, run
+  `gnarl --update-baseline .` (or the paths `--check` is given), and
+  commit both.
 - A long generic type function (`fn List(T: type) type { return struct
   {...}; }`) is short to gnarl: the struct it returns is the type, not
   the function's code. Its methods are their own rows, and its fields and

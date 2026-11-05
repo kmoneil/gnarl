@@ -128,15 +128,39 @@ gnarl --diff origin/main --format md   # what the change did, for the review
 before and after, says plainly when nothing got worse, and ends by saying
 whether any of them is over a critical limit now.
 
+## One gnarl here and in CI
+
+Releases of gnarl that count differently disagree on what passes: 0.4.0
+left a function's return type out of its numbers, 0.5.0 held a flat
+dispatch to no cyclomatic limit, 0.6.0 held what only test code uses as
+tests. A repo whose CI installs one release and whose machines have
+another passes in one place and fails in the other. `complexity.zon`
+names the release the code is judged by:
+
+```zig
+.{
+    .gnarl = "0.7.0",
+    .hot = .{ "src/parse/**" },
+}
+```
+
+A gnarl that counts otherwise will not run `--check`: it exits 2, names
+both releases, and says how to agree. Every other run warns and goes
+on. A release that counts the same as the one named, such as a fix to
+`--diff`, says nothing; a release newer than the gnarl running always
+counts otherwise to it, since it cannot know. Moving to a new release
+is one change: `.gnarl`, and `gnarl --update-baseline .` run with that
+release.
+
 ## In GitHub Actions
 
-A released binary, pinned and checked against its release's checksums:
+A released binary, the one `complexity.zon` names, checked against its
+release's checksums:
 
 ```yaml
 - name: install gnarl
-  env:
-    GNARL: v0.6.0
   run: |
+    GNARL="v$(sed -n 's/.*\.gnarl = "\([^"]*\)".*/\1/p' complexity.zon)"
     dir="$RUNNER_TEMP/gnarl" && mkdir -p "$dir" && cd "$dir"
     base="https://github.com/kmoneil/gnarl/releases/download/$GNARL"
     curl -fsSL --remote-name-all "$base/gnarl-linux-amd64" "$base/SHA256SUMS"
