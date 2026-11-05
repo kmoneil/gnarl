@@ -683,20 +683,28 @@ const Run = struct {
         return r.check or r.all or r.functions.len > 0 or r.baselineFlags() or r.explain.len > 0 or r.diff != null;
     }
 
-    /// Whether the run needs a path it was not given. gnarl reads only
-    /// what it is named, so every run needs one, but for --diff, which
-    /// reads what git says changed, and functions named as `path:line`,
-    /// each of which names its file.
-    fn wantsPath(r: Run, arena: std.mem.Allocator) std.mem.Allocator.Error!bool {
-        if (r.paths.len > 0 or r.diff != null) return false;
+    /// Why the run needs a path it was not given, or null when it needs
+    /// none. gnarl reads only what it is named, so every run needs one,
+    /// but for --diff, which reads what git says changed, and functions
+    /// named as `path:line`, each of which names its file. A function
+    /// named by its name alone could be in any file, so the first such
+    /// is named, with both ways to say where to look.
+    fn noPath(r: Run, arena: std.mem.Allocator) std.mem.Allocator.Error!?[]const u8 {
+        if (r.paths.len > 0 or r.diff != null) return null;
         const named = if (r.explain.len > 0) r.explain else r.functions;
-        for (named) |text| if (try select.Selector.parse(arena, text) == .name) return true;
-        return named.len == 0;
+        for (named) |text| if (try select.Selector.parse(arena, text) == .name) return try noPathFor(arena, text);
+        return if (named.len == 0) no_path else null;
     }
 };
 
 /// Why a run that names no path is not run.
 const no_path = "no path to read: name the files and directories to measure, or . for the current directory";
+
+/// Why a run that names a function by its name alone, and no path, is not
+/// run.
+fn noPathFor(arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error![]const u8 {
+    return arena.print("no path to search for '{s}': name the files and directories to search, or . for the current directory, or name '{s}' as path:line", .{ name, name });
+}
 
 /// The options that stand alone.
 const Flag = enum { @"--json", @"--check", @"--all", @"--no-ignore", @"--update-baseline", @"--files" };
@@ -791,7 +799,7 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
     }
     const run = p.done();
     if (run.conflict()) |message| return .{ .usage_error = message };
-    if (try run.wantsPath(arena)) return .{ .usage_error = no_path };
+    if (try run.noPath(arena)) |message| return .{ .usage_error = message };
     return .{ .run = run };
 }
 
@@ -1440,7 +1448,7 @@ test "--version, --help and usage errors" {
     try expectRun(tmp.dir, &.{}, 2, "", synopsis_and_more);
     // Options with no path: why, and the usage, not the whole --help.
     try expectRun(tmp.dir, &.{"--check"}, 2, "", "gnarl: " ++ no_path ++ "\n\n" ++ synopsis_and_more);
-    try expectRun(tmp.dir, &.{ "--explain", "a" }, 2, "", "gnarl: " ++ no_path ++ "\n\n" ++ synopsis_and_more);
+    try expectRun(tmp.dir, &.{ "--explain", "a" }, 2, "", "gnarl: no path to search for 'a': name the files and directories to search, or . for the current directory, or name 'a' as path:line\n\n" ++ synopsis_and_more);
     // . is the current directory, named.
     try expectRun(tmp.dir, &.{ "--all", "." }, 0,
         \\cyclomatic  cognitive  lines  nesting  params  weighted  location  function
@@ -1656,10 +1664,22 @@ test "parseArgs: a path is needed, but for --diff and functions named path:line"
         &.{"--update-baseline"},
         &.{ "--files", "--top", "3" },
         &.{ "--exclude", "src" },
-        &.{ "--explain", "record" },
-        &.{ "--explain", "a.zig:3", "--explain", "record" },
-        &.{ "--function", "parse" },
     }) |args| try std.testing.expectEqualStrings(no_path, (try parseArgs(arena, args)).usage_error);
+    // A function named alone could be anywhere: the first such is named,
+    // with both ways to say where to look.
+    for ([_]struct { []const []const u8, []const u8 }{
+        .{ &.{ "--explain", "record" }, "record" },
+        .{ &.{ "--explain", "a.zig:3", "--explain", "record" }, "record" },
+        .{ &.{ "--explain", "Parser.next", "--explain", "record" }, "Parser.next" },
+        .{ &.{ "--function", "parse" }, "parse" },
+    }) |case| try std.testing.expectEqualStrings(
+        try noPathFor(arena, case[1]),
+        (try parseArgs(arena, case[0])).usage_error,
+    );
+    try std.testing.expectEqualStrings(
+        "no path to search for 'record': name the files and directories to search, or . for the current directory, or name 'record' as path:line",
+        try noPathFor(arena, "record"),
+    );
 
     // Each function named by its line names its file.
     try std.testing.expectEqual(0, (try parseArgs(arena, &.{ "--explain", "a.zig:3" })).run.paths.len);
