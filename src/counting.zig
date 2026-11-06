@@ -19,6 +19,28 @@ pub const changes = [_]Version{
     .{ .major = 0, .minor = 6, .patch = 0 },
 };
 
+/// The golden fixtures (test/golden/*.zig) and their tables (*.txt) as
+/// the last of `changes` left them, each hashed. Tables that move while
+/// their fixtures do not mean gnarl counts otherwise, and a test in
+/// golden.zig fails until the release that goes out in joins `changes`
+/// and this names it; the test's message gives the hashes to set.
+pub const golden: Golden = .{
+    .release = .{ .major = 0, .minor = 6, .patch = 0 },
+    .fixtures = "eaa119e9be1384a6",
+    .tables = "5377ccb21fdbd781",
+};
+
+pub const Golden = struct {
+    /// The last of `changes` when the hashes were set.
+    release: Version,
+    /// The first 16 hex digits of a SHA-256 over every fixture's name and
+    /// source, in name order.
+    fixtures: []const u8,
+    /// As `fixtures`, over every fixture's name and the table of what
+    /// gnarl measures of it.
+    tables: []const u8,
+};
+
 /// Which of `changes` `v` counts by: the last at or before it, or null for
 /// a version before the first release.
 pub fn since(v: Version) ?usize {

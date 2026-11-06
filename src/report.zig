@@ -52,14 +52,18 @@ pub const Row = struct {
 /// cyclomatic complexity, cognitive complexity, lines, nesting and
 /// parameters, then by path and line.
 pub fn rank(arena: Allocator, rows: []Row, classes: Classes) Allocator.Error!void {
-    for (rows) |*row| {
-        var values: std.EnumArray(Metric, u32) = .initUndefined();
-        inline for (comptime std.enums.values(Metric)) |metric| values.set(metric, @field(row, @tagName(metric)));
-        const judged = classes.get(row.class).judge(values);
-        row.trips = try arena.dupe(Trip, judged.trips());
-        row.dispatch = judged.dispatch;
-    }
+    for (rows) |*row| try judge(arena, row, classes);
     std.mem.sort(Row, rows, {}, worse);
+}
+
+/// Sets `row`'s trips against its class's thresholds, and whether it is a
+/// flat dispatch.
+pub fn judge(arena: Allocator, row: *Row, classes: Classes) Allocator.Error!void {
+    var values: std.EnumArray(Metric, u32) = .initUndefined();
+    inline for (comptime std.enums.values(Metric)) |metric| values.set(metric, @field(row, @tagName(metric)));
+    const judged = classes.get(row.class).judge(values);
+    row.trips = try arena.dupe(Trip, judged.trips());
+    row.dispatch = judged.dispatch;
 }
 
 fn worse(_: void, a: Row, b: Row) bool {

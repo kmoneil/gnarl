@@ -42,10 +42,10 @@ golden fixture.
 ## The golden tables
 
 `test/golden/` holds fixtures and, beside each, the table of every metric
-of every function in it. A change that moves a number fails the golden
-test. When the move is meant, `zig build test -Dupdate` rewrites the
-tables; read the diff before committing it: a table is only as right as
-its reading.
+of every function in it, the class it is held to and the limits it is
+over. A change that moves any of them fails the golden test. When the
+move is meant, `zig build test -Dupdate` rewrites the tables; read the
+diff before committing it: a table is only as right as its reading.
 
 ## Output
 
@@ -67,7 +67,12 @@ to, or to how it holds one to its limits, adds the release it goes out
 in to `changes` in `src/counting.zig`. That is how a repo whose
 `complexity.zon` names an earlier release hears that this one counts
 otherwise. A change to the golden tables (`zig build test -Dupdate`) is
-one such change.
+one such change, and a test holds it to that: `golden` in
+`src/counting.zig` hashes the fixtures and tables as the last of
+`changes` left them, and tables that move while their fixtures do not
+fail until it names a new release. The failure gives the hashes to set.
+Change a fixture apart from a rule, since a rule changed with one goes
+unnoticed.
 
 ## Releasing
 
