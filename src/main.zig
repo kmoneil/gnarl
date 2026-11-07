@@ -410,7 +410,9 @@ fn listing(c: Context, rows: []const report.Row, picks: []const select.Selector,
 fn runCheck(c: Context, rows: []const report.Row, held: ?Held, files: []const []const u8) !report.Check {
     var check: report.Check = .{ .asked = c.run.check, .critical = report.countCritical(rows) };
     if (!c.run.check) return check;
-    const r = try baseline.ratchet(c.arena, rows, c.settings.classes, if (held) |h| h.base else null, files);
+    const roots = try c.arena.alloc([]const u8, c.run.paths.len);
+    for (c.run.paths, roots) |path, *root| root.* = try std.fs.path.resolveAlloc(c.arena, &.{path});
+    const r = try baseline.ratchet(c.arena, rows, c.settings.classes, if (held) |h| h.base else null, .{ .files = files, .roots = roots });
     check.failed = r.failures.len > 0;
     check.failures = r.failures;
     check.improved = r.improved;
@@ -1050,6 +1052,23 @@ test "--update-baseline, then --check holds to it: new or worse fails, debt kept
         if (step.listed.len > 0) try std.testing.expect(std.mem.indexOf(u8, result.stdout, step.listed) != null);
         if (step.unlisted.len > 0) try std.testing.expect(std.mem.indexOf(u8, result.stdout, step.unlisted) == null);
     }
+}
+
+test "--check: a baselined function of a file gone from a path given is gone too" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = "pub fn a() void {}\n" });
+    // One function missing from a file read, one whose file is deleted.
+    try tmp.dir.writeFile(io, .{ .sub_path = "complexity.baseline", .data = "gone.zig\tparse\t24\t29\t45\t3\t1\t1\na.zig\tmissing\t24\t29\t45\t3\t1\t1\n" });
+    try expectRun(tmp.dir, &.{ "--check", "." }, 0, "", "gnarl: complexity.baseline: note: 2 baselined functions are gone (renamed, moved or deleted); gnarl --update-baseline drops them\n");
+    // A file named alone speaks for itself only.
+    try expectRun(tmp.dir, &.{ "--check", "a.zig" }, 0, "", "gnarl: complexity.baseline: note: 1 baselined function is gone (renamed, moved or deleted); gnarl --update-baseline drops it\n");
+    // The documents count both.
+    const result = try runGnarl(tmp.dir, &.{ "--check", "--format", "json", "." });
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "\"gone\":2") != null);
 }
 
 test "a baseline that cannot be used stops the run, and says where" {

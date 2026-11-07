@@ -217,16 +217,26 @@ pub const Ratchet = struct {
     /// hold nothing back but let them grow, and --update-baseline drops
     /// them.
     unneeded: usize,
-    /// Baselined functions of a file read that are no longer there:
-    /// renamed, moved or deleted.
+    /// Baselined functions no longer there: of a file read, renamed, moved
+    /// or deleted; of a file not read under a path given, its file deleted,
+    /// excluded or ignored.
     gone: usize,
 };
 
+/// What a run read, which is all --check may take a baselined function
+/// for gone in: one of a file outside it is not.
+pub const Read = struct {
+    /// The files read.
+    files: []const []const u8,
+    /// The paths the run was given, cleaned: a baselined function of a
+    /// file under one that was not read is gone with its file.
+    roots: []const []const u8,
+};
+
 /// What --check finds in `rows`, ranked worst first, against `base`, or
-/// against the critical limits alone with no baseline. `paths` are the
-/// files read, so that a baselined function of a file not read this time
-/// is not taken for gone.
-pub fn ratchet(arena: Allocator, rows: []const Row, classes: Classes, base: ?Baseline, paths: []const []const u8) Allocator.Error!Ratchet {
+/// against the critical limits alone with no baseline. What the run
+/// `read` bounds what is taken for gone.
+pub fn ratchet(arena: Allocator, rows: []const Row, classes: Classes, base: ?Baseline, read: Read) Allocator.Error!Ratchet {
     const row_keys = try keys(arena, rows);
     var failures: std.ArrayList(Failure) = .empty;
     var improved: usize = 0;
@@ -241,16 +251,39 @@ pub fn ratchet(arena: Allocator, rows: []const Row, classes: Classes, base: ?Bas
             unneeded += 1;
         } else if (s.better) improved += 1;
     }
+    const gone = if (base) |b| try countGone(arena, b, present, read) else 0;
+    return .{ .failures = failures.items, .improved = improved, .unneeded = unneeded, .gone = gone };
+}
+
+/// How many of `base`'s functions are gone: of a file read and not
+/// `present`, or of a file not read under one of the roots.
+fn countGone(arena: Allocator, base: Baseline, present: std.StringHashMapUnmanaged(void), read: Read) Allocator.Error!usize {
+    var files: std.StringHashMapUnmanaged(void) = .empty;
+    for (read.files) |path| try files.put(arena, try slashed(arena, path), {});
+    const roots = try arena.alloc([]const u8, read.roots.len);
+    for (read.roots, roots) |root, *r| r.* = try slashed(arena, root);
     var gone: usize = 0;
-    if (base) |b| {
-        var read: std.StringHashMapUnmanaged(void) = .empty;
-        for (paths) |path| try read.put(arena, try slashed(arena, path), {});
-        for (b.entries) |entry| {
-            const path = entry.key[0..std.mem.findScalar(u8, entry.key, '\t').?];
-            if (read.contains(path) and !present.contains(entry.key)) gone += 1;
+    for (base.entries) |entry| {
+        const path = entry.key[0..std.mem.findScalar(u8, entry.key, '\t').?];
+        const is_gone = if (files.contains(path)) !present.contains(entry.key) else underAny(roots, path);
+        if (is_gone) gone += 1;
+    }
+    return gone;
+}
+
+/// Whether `path` is one of `roots` or inside one, all with `/`. `.`
+/// holds every relative path that does not climb out of it.
+fn underAny(roots: []const []const u8, path: []const u8) bool {
+    for (roots) |root| {
+        if (std.mem.eql(u8, root, ".")) {
+            const climbs = std.mem.eql(u8, path, "..") or std.mem.startsWith(u8, path, "../");
+            if (!climbs and !std.fs.path.isAbsolute(path)) return true;
+        } else if (std.mem.startsWith(u8, path, root)) {
+            // A root that ends in `/` is a file system's root.
+            if (path.len == root.len or root[root.len - 1] == '/' or path[root.len] == '/') return true;
         }
     }
-    return .{ .failures = failures.items, .improved = improved, .unneeded = unneeded, .gone = gone };
+    return false;
 }
 
 /// How a function stands against its limits and its baseline entry.
@@ -306,6 +339,9 @@ pub fn functionsFailing(failures: []const Failure) usize {
 fn sampleRow(path: []const u8, line: u32, name: []const u8, cyclomatic: u32, lines: u32) Row {
     return .{ .path = path, .line = line, .column = 4, .name = name, .kind = .@"fn", .cyclomatic = cyclomatic, .cognitive = 20, .lines = lines, .nesting = 0, .params = 0, .params_weighted = 0 };
 }
+
+/// A run given src/a.zig alone.
+const read_a: Read = .{ .files = &.{"src/a.zig"}, .roots = &.{"src/a.zig"} };
 
 test "write, then read back: the functions over a critical threshold, sorted, a second of one name #2" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -373,7 +409,7 @@ test "ratchet: new over a limit, above its baseline, newly over another; within 
         sampleRow("src/a.zig", 100, "settled", 12, 10),
     };
     try @import("report.zig").rank(arena, &rows, .defaults);
-    const r = try ratchet(arena, &rows, .defaults, base, &.{"src/a.zig"});
+    const r = try ratchet(arena, &rows, .defaults, base, read_a);
     // worse: cyclomatic 31 over its 30. kept: lines 101 crosses 100, which
     // its baseline (60) did not. new: 16 over 15, not baselined.
     try std.testing.expectEqual(3, r.failures.len);
@@ -389,10 +425,39 @@ test "ratchet: new over a limit, above its baseline, newly over another; within 
     try std.testing.expectEqual(1, r.gone);
 
     // With no baseline, every critical crossing fails.
-    const plain = try ratchet(arena, &rows, .defaults, null, &.{"src/a.zig"});
+    const plain = try ratchet(arena, &rows, .defaults, null, read_a);
     // worse and kept on two metrics each, better and new on one.
     try std.testing.expectEqual(6, plain.failures.len);
     try std.testing.expectEqual(4, functionsFailing(plain.failures));
+}
+
+test "ratchet: gone, of a file read, or of a file not read under a path given" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var problem: Problem = undefined;
+    const base = try parse(arena, "src/a.zig\there\t20\t0\t10\t0\t0\t0\n" ++
+        "src/a.zig\tmissing\t20\t0\t10\t0\t0\t0\n" ++
+        "src/deleted.zig\tparse\t20\t0\t10\t0\t0\t0\n" ++
+        "src/core/deleted.zig\tread\t20\t0\t10\t0\t0\t0\n" ++
+        "srcs/b.zig\tbeside\t20\t0\t10\t0\t0\t0\n" ++
+        "build.zig\tbuild\t20\t0\t10\t0\t0\t0\n" ++
+        "../up.zig\tclimbs\t20\t0\t10\t0\t0\t0\n", &problem);
+    var rows = [_]Row{sampleRow("src/a.zig", 1, "here", 20, 10)};
+    try @import("report.zig").rank(arena, &rows, .defaults);
+    const gone = struct {
+        fn of(a: Allocator, rs: []const Row, b: Baseline, roots: []const []const u8) !usize {
+            return (try ratchet(a, rs, .defaults, b, .{ .files = &.{"src/a.zig"}, .roots = roots })).gone;
+        }
+    }.of;
+    // src/a.zig named alone: only its own missing function.
+    try std.testing.expectEqual(1, try gone(arena, &rows, base, &.{"src/a.zig"}));
+    // src: its two deleted files too, at any depth; srcs/ is not in it.
+    try std.testing.expectEqual(3, try gone(arena, &rows, base, &.{"src"}));
+    // .: every relative path but one that climbs out of it.
+    try std.testing.expectEqual(5, try gone(arena, &rows, base, &.{"."}));
+    // No path, only a file of a function named: as src/a.zig alone.
+    try std.testing.expectEqual(1, try gone(arena, &rows, base, &.{}));
 }
 
 test "ratchet: a flat dispatch is held to its other limits, not cyclomatic's" {
@@ -407,7 +472,7 @@ test "ratchet: a flat dispatch is held to its other limits, not cyclomatic's" {
     try @import("report.zig").rank(arena, &rows, .defaults);
     // visit: cyclomatic 37 with cognitive 12, within its warning: nothing
     // fails. table: a dispatch too, but its 244 lines are over 100.
-    const r = try ratchet(arena, &rows, .defaults, null, &.{"src/a.zig"});
+    const r = try ratchet(arena, &rows, .defaults, null, read_a);
     try std.testing.expectEqual(1, r.failures.len);
     try std.testing.expectEqualStrings("table", r.failures[0].name);
     try std.testing.expectEqual(.lines, r.failures[0].metric);
@@ -418,5 +483,5 @@ test "ratchet: a flat dispatch is held to its other limits, not cyclomatic's" {
     const visit = for (&rows, 0..) |row, i| {
         if (std.mem.eql(u8, row.name, "visit")) break i;
     } else unreachable;
-    try std.testing.expectEqual(1, (try ratchet(arena, rows[visit .. visit + 1], .defaults, base, &.{"src/a.zig"})).unneeded);
+    try std.testing.expectEqual(1, (try ratchet(arena, rows[visit .. visit + 1], .defaults, base, read_a)).unneeded);
 }
