@@ -69,7 +69,9 @@ threshold now, with their numbers. From then on `--check` holds to it
 and fails only what is new or worse: a function not in it over a
 critical limit, or one above its number there. A function is known by
 its path and name, so a rename or a move is a new function: update the
-baseline in the same change. `--baseline <file>` names another file.
+baseline in the same change. What the baseline holds of files outside
+the paths given is kept, so `--update-baseline src` leaves `build.zig`'s
+functions as they were. `--baseline <file>` names another file.
 
 gnarl reads only the paths it is given, `.` for the current directory;
 with none, it prints its usage and exits 2. A function given to
