@@ -51,8 +51,10 @@ names, and elements for what is a list or an object in json.
   - `unneeded`: how many baselined functions are within every critical
     limit now, their entries holding nothing back (`--update-baseline`
     drops them).
-  - `gone`: how many baselined functions of a file read are no longer
-    there: renamed, moved or deleted.
+  - `gone`: how many baselined functions are no longer there: renamed,
+    moved or deleted from a file read, or in a file under a path given
+    that was not read (deleted, excluded or ignored), but not in a file
+    outside every path given (`--update-baseline` drops them).
 - `thresholds`: the limits in force, by class of code:
   - `hot`, `normal`, `cold`, `tests`: each class's limits, by metric:
     - `cyclomatic`, `cognitive`, `lines`, `nesting`, `params`,
