@@ -167,30 +167,34 @@ fn slashed(arena: Allocator, path: []const u8) Allocator.Error![]const u8 {
 }
 
 /// Writes the baseline of `rows`, ranked against `classes`: each function
-/// over a critical threshold, sorted. Returns how many it wrote.
-pub fn write(arena: Allocator, w: *Writer, rows: []const Row) (Allocator.Error || Writer.Error)!usize {
+/// over a critical threshold, and the entries `kept`, of files no row is
+/// of, sorted together. Returns how many functions of `rows` it wrote.
+pub fn write(arena: Allocator, w: *Writer, rows: []const Row, kept: []const Entry) (Allocator.Error || Writer.Error)!usize {
     const row_keys = try keys(arena, rows);
-    var kept: std.ArrayList(usize) = .empty;
-    for (rows, 0..) |row, i| {
+    var lines: std.ArrayList(Entry) = .empty;
+    try lines.appendSlice(arena, kept);
+    for (rows, row_keys) |row, key| {
         for (row.trips) |trip| if (trip.level == .critical) {
-            try kept.append(arena, i);
+            var entry: Entry = .{ .key = key, .values = undefined };
+            inline for (metrics, 0..) |metric, m| entry.values[m] = @field(row, @tagName(metric));
+            try lines.append(arena, entry);
             break;
         };
     }
-    std.mem.sort(usize, kept.items, row_keys, byKey);
+    std.mem.sort(Entry, lines.items, {}, byKey);
     try w.writeAll(header);
-    for (kept.items) |i| {
-        const tab = std.mem.findScalar(u8, row_keys[i], '\t').?;
-        try formats.field(w, .tsv, true, row_keys[i][0..tab]);
-        try formats.field(w, .tsv, false, row_keys[i][tab + 1 ..]);
-        inline for (metrics) |metric| try formats.fieldInt(w, .tsv, false, @field(rows[i], @tagName(metric)));
+    for (lines.items) |entry| {
+        const tab = std.mem.findScalar(u8, entry.key, '\t').?;
+        try formats.field(w, .tsv, true, entry.key[0..tab]);
+        try formats.field(w, .tsv, false, entry.key[tab + 1 ..]);
+        for (entry.values) |value| try formats.fieldInt(w, .tsv, false, value);
         try w.writeByte('\n');
     }
-    return kept.items.len;
+    return lines.items.len - kept.len;
 }
 
-fn byKey(row_keys: []const []const u8, a: usize, b: usize) bool {
-    return std.mem.order(u8, row_keys[a], row_keys[b]) == .lt;
+fn byKey(_: void, a: Entry, b: Entry) bool {
+    return std.mem.order(u8, a.key, b.key) == .lt;
 }
 
 /// A metric of a function that --check fails.
@@ -256,20 +260,60 @@ pub fn ratchet(arena: Allocator, rows: []const Row, classes: Classes, base: ?Bas
 }
 
 /// How many of `base`'s functions are gone: of a file read and not
-/// `present`, or of a file not read under one of the roots.
+/// `present`, or of a file not read under a path given.
 fn countGone(arena: Allocator, base: Baseline, present: std.StringHashMapUnmanaged(void), read: Read) Allocator.Error!usize {
-    var files: std.StringHashMapUnmanaged(void) = .empty;
-    for (read.files) |path| try files.put(arena, try slashed(arena, path), {});
-    const roots = try arena.alloc([]const u8, read.roots.len);
-    for (read.roots, roots) |root, *r| r.* = try slashed(arena, root);
+    const reached: Reached = try .init(arena, read);
     var gone: usize = 0;
     for (base.entries) |entry| {
-        const path = entry.key[0..std.mem.findScalar(u8, entry.key, '\t').?];
-        const is_gone = if (files.contains(path)) !present.contains(entry.key) else underAny(roots, path);
+        const is_gone = switch (reached.of(entry)) {
+            .read => !present.contains(entry.key),
+            .under => true,
+            .outside => false,
+        };
         if (is_gone) gone += 1;
     }
     return gone;
 }
+
+/// The entries of `base` of a file outside what the run `read`: not read,
+/// and under no path given. The run says nothing of them, so
+/// --update-baseline keeps them.
+pub fn outside(arena: Allocator, base: Baseline, read: Read) Allocator.Error![]const Entry {
+    const reached: Reached = try .init(arena, read);
+    var out: std.ArrayList(Entry) = .empty;
+    for (base.entries) |entry| if (reached.of(entry) == .outside) try out.append(arena, entry);
+    return out.items;
+}
+
+/// Where the file of a baselined function stands in what a run read.
+const Reach = enum {
+    /// Read: its functions are among the rows.
+    read,
+    /// Not read, but under a path given: deleted, excluded or ignored.
+    under,
+    /// Not read, and under no path given.
+    outside,
+};
+
+/// What a run read, with `/`, to say where a file stands in it.
+const Reached = struct {
+    files: std.StringHashMapUnmanaged(void),
+    roots: []const []const u8,
+
+    fn init(arena: Allocator, read: Read) Allocator.Error!Reached {
+        var files: std.StringHashMapUnmanaged(void) = .empty;
+        for (read.files) |path| try files.put(arena, try slashed(arena, path), {});
+        const roots = try arena.alloc([]const u8, read.roots.len);
+        for (read.roots, roots) |root, *r| r.* = try slashed(arena, root);
+        return .{ .files = files, .roots = roots };
+    }
+
+    fn of(r: Reached, entry: Entry) Reach {
+        const path = entry.key[0..std.mem.findScalar(u8, entry.key, '\t').?];
+        if (r.files.contains(path)) return .read;
+        return if (underAny(r.roots, path)) .under else .outside;
+    }
+};
 
 /// Whether `path` is one of `roots` or inside one, all with `/`. `.`
 /// holds every relative path that does not climb out of it.
@@ -356,7 +400,7 @@ test "write, then read back: the functions over a critical threshold, sorted, a 
     };
     try @import("report.zig").rank(arena, &rows, .defaults);
     var out: std.Io.Writer.Allocating = .init(arena);
-    try std.testing.expectEqual(4, try write(arena, &out.writer, &rows));
+    try std.testing.expectEqual(4, try write(arena, &out.writer, &rows, &.{}));
     try std.testing.expectEqualStrings(header ++
         "src/a.zig\tS.a\t20\t20\t120\t0\t0\t0\n" ++
         "src/a.zig\tS.a#2\t16\t20\t10\t0\t0\t0\n" ++
@@ -368,6 +412,22 @@ test "write, then read back: the functions over a critical threshold, sorted, a 
     try std.testing.expectEqual(4, b.entries.len);
     try std.testing.expectEqual(16, b.get("src/a.zig\tS.a#2").?.values[0]);
     try std.testing.expectEqual(40, b.get("src/a.zig\ttest \"tab\there\"").?.values[0]);
+
+    // Entries kept from files no row is of go in among them, in order,
+    // escaped as they were read, and are not counted as written.
+    const kept = [_]Entry{
+        .{ .key = "build.zig\tbuild", .values = .{ 16, 17, 18, 1, 1, 1 } },
+        .{ .key = "src/aa.zig\tf\tg", .values = .{ 20, 0, 0, 0, 0, 0 } },
+    };
+    var again: std.Io.Writer.Allocating = .init(arena);
+    try std.testing.expectEqual(4, try write(arena, &again.writer, &rows, &kept));
+    try std.testing.expectEqualStrings(header ++
+        "build.zig\tbuild\t16\t17\t18\t1\t1\t1\n" ++
+        "src/a.zig\tS.a\t20\t20\t120\t0\t0\t0\n" ++
+        "src/a.zig\tS.a#2\t16\t20\t10\t0\t0\t0\n" ++
+        "src/a.zig\ttest \"tab\\there\"\t40\t20\t3\t0\t0\t0\n" ++
+        "src/aa.zig\tf\\tg\t20\t0\t0\t0\t0\t0\n" ++
+        "src/b.zig\tparse\t30\t20\t20\t0\t0\t0\n", again.written());
 }
 
 test "parse: a bad line says which and why" {
@@ -458,6 +518,14 @@ test "ratchet: gone, of a file read, or of a file not read under a path given" {
     try std.testing.expectEqual(5, try gone(arena, &rows, base, &.{"."}));
     // No path, only a file of a function named: as src/a.zig alone.
     try std.testing.expectEqual(1, try gone(arena, &rows, base, &.{}));
+
+    // What is neither read nor gone is outside: --update-baseline keeps it.
+    const kept = try outside(arena, base, .{ .files = &.{"src/a.zig"}, .roots = &.{"src"} });
+    try std.testing.expectEqual(3, kept.len);
+    try std.testing.expectEqualStrings("srcs/b.zig\tbeside", kept[0].key);
+    try std.testing.expectEqualStrings("build.zig\tbuild", kept[1].key);
+    try std.testing.expectEqualStrings("../up.zig\tclimbs", kept[2].key);
+    try std.testing.expectEqual(1, (try outside(arena, base, .{ .files = &.{"src/a.zig"}, .roots = &.{"."} })).len);
 }
 
 test "ratchet: a flat dispatch is held to its other limits, not cyclomatic's" {
