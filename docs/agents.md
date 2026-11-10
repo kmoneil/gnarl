@@ -31,18 +31,25 @@ given. gnarl is built for that as much as for people:
 The binary teaches its own use:
 
 ```sh
-gnarl skill                       # print the guide
-gnarl skill --install ~/.skills   # write it to ~/.skills/gnarl/SKILL.md
+gnarl skill                       # the guide
+gnarl skill counts output         # those topics of it
+gnarl skill --all                 # the whole guide
+gnarl skill --install ~/.skills   # write ~/.skills/gnarl/SKILL.md
 ```
 
-The guide covers the loop, the counting rules with measured examples, the
-output, the thresholds, the exit statuses, and what catches agents out.
-It is embedded in the binary and tested against it: every example in it
-is measured as it says, and every metric, format and flag gnarl has is
-named in it.
+`gnarl skill` prints the loop, the names gnarl gives functions, the exit
+statuses and what catches agents out, and a line on each topic it leaves
+out until asked: `counts`, the counting rules with measured examples;
+`output`, every field of each format; `thresholds`, the limits and
+complexity.zon. So a load costs less than half the whole guide, and the
+reference is there when the job needs it. What `--install` writes has
+the agent run `gnarl skill`, so it is never older than the gnarl
+installed. The guide is embedded in the binary and tested against it:
+every example in it is measured as it says, and every metric, format and
+flag gnarl has is named in it.
 
 {: .tip }
-An agent given only `gnarl skill` and a copy of a function at cognitive
+An agent given only gnarl's guide and a copy of a function at cognitive
 48 brought it to 5, with two helpers, using the regions and range
 estimates to choose the cuts before making them. Its estimates matched
 the result exactly.

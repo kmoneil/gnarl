@@ -56,9 +56,12 @@ the document lists and the JSON does not hold. The JSON and XML carry a
 `schema` number that goes up when a field is renamed, moved or taken away;
 a field added leaves it.
 
-`src/skill.md` is what `gnarl skill` prints, and `src/skill.zig` tests
-every example in it against the binary. A new flag, metric or format is
-named there in the same change.
+`src/skill.md` is what `gnarl skill --all` prints. `gnarl skill` prints
+it up to the first topic, a `## ` heading ending `: gnarl skill <name>`,
+and `gnarl skill <name>` that topic. `src/skill.zig` tests every example
+in it against the binary, and holds the short guide and each topic under
+a size. A new flag, metric or format is named there in the same change:
+in a topic when an agent needs it only for some jobs.
 
 ## Counting changes
 

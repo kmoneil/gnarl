@@ -339,12 +339,21 @@ every number can be explained, every message says what to do next, and
 `--json` never needs a line of stderr scraped.
 
 ```sh
-gnarl skill                       # print the guide an agent needs
-gnarl skill --install ~/.skills   # write it to ~/.skills/gnarl/SKILL.md
+gnarl skill                       # the guide an agent needs
+gnarl skill counts output         # those topics of it
+gnarl skill --all                 # the whole guide
+gnarl skill --install ~/.skills   # write ~/.skills/gnarl/SKILL.md
 ```
 
-The skill is embedded in the binary and tested against it: every example
-in it is measured as it says.
+`gnarl skill` prints the loop, the names gnarl gives functions, the exit
+statuses and what catches agents out, and a line on each topic it leaves
+out until asked: `counts` (what each metric counts, with measured
+examples), `output` (every field of each format) and `thresholds` (the
+limits and complexity.zon). So a load costs less than half the whole
+guide, and the reference is there when the job needs it. What
+`--install` writes has the agent run `gnarl skill`, so it is never older
+than the gnarl installed. The skill is embedded in the binary and tested
+against it: every example in it is measured as it says.
 
 ## gnarl measures itself
 

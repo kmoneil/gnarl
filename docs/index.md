@@ -87,4 +87,5 @@ gnarl --check .                 # in CI: exit 1 on what is new or worse
 
 {: .tip }
 Run `gnarl skill` to print the guide an AI agent needs to work with gnarl;
-`gnarl skill --install <dir>` writes it where your agent reads skills.
+`gnarl skill --install <dir>` writes a skill where your agent reads them,
+which has it run `gnarl skill`, so it is never out of date.
