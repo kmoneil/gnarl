@@ -32,7 +32,7 @@ const synopsis =
     \\       gnarl --explain <function>... [<path>...]
     \\       gnarl --diff <ref> [<path>...]
     \\       gnarl --files [--top <n>] <path>...
-    \\       gnarl skill [--install <dir>]
+    \\       gnarl skill [<topic>... | --all | --install <dir>]
     \\       gnarl --version | --help
     \\
 ;
@@ -63,8 +63,12 @@ const usage = synopsis ++
     \\whole work tree when no path is given.
     \\
     \\gnarl skill prints what an AI agent needs to work with gnarl: the
-    \\loop, the rules with examples, the output; --install <dir> writes it
-    \\to <dir>/gnarl/SKILL.md.
+    \\loop, the names it gives, what catches agents out, and a line on each
+    \\topic. gnarl skill <topic> prints a topic: counts (what each metric
+    \\counts, with examples), output (every format's fields) or thresholds
+    \\(the limits and complexity.zon). --all prints the whole guide.
+    \\--install <dir> writes <dir>/gnarl/SKILL.md, which has the agent run
+    \\gnarl skill, so it is never out of date.
     \\
     \\The thresholds depend on the class of code a file is in, hot, normal
     \\or cold, which complexity.zon in the current directory gives by globs,
@@ -184,17 +188,36 @@ fn answer(arena: std.mem.Allocator, io: Io, stdout_writer: *Io.File.Writer, comm
         .run => unreachable,
         .help => try out.writeAll(usage),
         .version => try out.print("gnarl {s}\n", .{build_options.version}),
-        .skill => |install_dir| if (install_dir) |dir| {
+        .skill => |what| return printSkill(arena, io, stdout_writer, what),
+        .usage_error => |message| {
+            if (message.len > 0) std.debug.print("gnarl: {s}\n\n", .{message});
+            std.debug.print("{s}", .{synopsis_and_more});
+            return 2;
+        },
+    }
+    out.flush() catch |err| return closedEarly(err, stdout_writer, 0);
+    return 0;
+}
+
+/// `gnarl skill`: prints what of the guide was asked for, or installs the
+/// stub. Returns the exit status.
+fn printSkill(arena: std.mem.Allocator, io: Io, stdout_writer: *Io.File.Writer, what: Skill) !u8 {
+    const out = &stdout_writer.interface;
+    switch (what) {
+        // Without the blank line under it in the guide, before the first topic.
+        .short => try out.writeAll(skill.short[0 .. skill.short.len - 1]),
+        .all => try out.writeAll(skill.text),
+        // Checked when parsed. A blank line between two, as in the guide.
+        .topics => |wanted| for (wanted, 0..) |name, i| {
+            if (i > 0) try out.writeByte('\n');
+            try out.print("{s}\n", .{std.mem.trimEnd(u8, skill.topicOf(name).?, "\n")});
+        },
+        .install => |dir| {
             const path = skill.install(arena, io, dir) catch |err| {
                 std.debug.print("gnarl: {s}: {t}\n", .{ dir, err });
                 return 2;
             };
             try out.print("{s}\n", .{path});
-        } else try out.writeAll(skill.text),
-        .usage_error => |message| {
-            if (message.len > 0) std.debug.print("gnarl: {s}\n\n", .{message});
-            std.debug.print("{s}", .{synopsis_and_more});
-            return 2;
         },
     }
     out.flush() catch |err| return closedEarly(err, stdout_writer, 0);
@@ -697,13 +720,24 @@ fn sayParseErrors(said: *messages.Messages, path: []const u8, tree: *const Ast) 
     }
 }
 
+/// What of the skill `gnarl skill` asks for.
+const Skill = union(enum) {
+    /// The guide up to its first topic.
+    short,
+    /// The whole guide.
+    all,
+    /// These topics, in the order named.
+    topics: []const []const u8,
+    /// The directory to install the stub under.
+    install: []const u8,
+};
+
 /// What the command line asks for.
 const Command = union(enum) {
     run: Run,
     help,
     version,
-    /// `gnarl skill`, and the directory to install it under, if any.
-    skill: ?[]const u8,
+    skill: Skill,
     /// Why the command line cannot be run; empty when the usage alone says.
     usage_error: []const u8,
 };
@@ -860,7 +894,7 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
     // Nothing at all: the usage, and nothing read.
     if (args.len == 0) return .{ .usage_error = "" };
     // A path named skill is ./skill.
-    if (std.mem.eql(u8, args[0], "skill")) return parseSkill(args[1..]);
+    if (std.mem.eql(u8, args[0], "skill")) return parseSkill(arena, args[1..]);
     var p: Parsing = .{};
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -882,14 +916,27 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
 }
 
 /// `gnarl skill`, given what follows `skill`.
-fn parseSkill(args: []const []const u8) Command {
-    if (args.len == 0) return .{ .skill = null };
+fn parseSkill(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocator.Error!Command {
+    const takes = "gnarl skill takes topics, --all or --install <dir>, or nothing";
+    if (args.len == 0) return .{ .skill = .short };
+    if (std.mem.eql(u8, args[0], "--all")) return if (args.len == 1) .{ .skill = .all } else .{ .usage_error = takes };
     var i: usize = 0;
     if (optionValue(args, &i, "--install")) |dir| {
         if (dir.len == 0) return .{ .usage_error = "--install needs a directory" };
-        if (i + 1 == args.len) return .{ .skill = dir };
+        return if (i + 1 == args.len) .{ .skill = .{ .install = dir } } else .{ .usage_error = takes };
     }
-    return .{ .usage_error = "gnarl skill takes --install <dir>, or nothing" };
+    return parseTopics(arena, args, takes);
+}
+
+/// `gnarl skill <topic>...`: each name given must be a topic. `takes` is
+/// what to say of an option among them.
+fn parseTopics(arena: std.mem.Allocator, args: []const []const u8, takes: []const u8) std.mem.Allocator.Error!Command {
+    for (args) |name| {
+        if (std.mem.startsWith(u8, name, "-")) return .{ .usage_error = takes };
+        if (skill.topicOf(name) == null)
+            return .{ .usage_error = try arena.print("skill has no topic named '{s}'; it has {s}", .{ name, try skill.names(arena) }) };
+    }
+    return .{ .skill = .{ .topics = args } };
 }
 
 /// The option `args[i.*]` is, and its value, moving `i` past a value given
@@ -1720,19 +1767,34 @@ test "parseArgs: --config and --check" {
     try std.testing.expectEqualStrings("--config needs a file", (try parseArgs(arena, &.{ "src", "--config" })).usage_error);
 }
 
-test "gnarl skill prints the skill; --install writes it" {
+test "gnarl skill prints the short guide, a topic, or the whole; --install writes the stub" {
     const io = std.testing.io;
+    const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try expectRun(tmp.dir, &.{"skill"}, 0, skill.text, "");
+
+    const counts = skill.topicOf("counts").?;
+    const thresholds_part = skill.topicOf("thresholds").?;
+    // In the guide a topic ends with the blank line before the next; the
+    // last ends with its last line.
+    try std.testing.expect(std.mem.endsWith(u8, counts, "\n\n"));
+    try std.testing.expect(!std.mem.endsWith(u8, thresholds_part, "\n\n"));
+    const two = try std.mem.concat(gpa, u8, &.{ thresholds_part, "\n", counts[0 .. counts.len - 1] });
+    defer gpa.free(two);
+    try expectRun(tmp.dir, &.{"skill"}, 0, skill.short[0 .. skill.short.len - 1], "");
+    try expectRun(tmp.dir, &.{ "skill", "--all" }, 0, skill.text, "");
+    try expectRun(tmp.dir, &.{ "skill", "counts" }, 0, counts[0 .. counts.len - 1], "");
+    try expectRun(tmp.dir, &.{ "skill", "thresholds", "counts" }, 0, two, "");
+    try expectRun(tmp.dir, &.{ "skill", "loop" }, 2, "", "gnarl: skill has no topic named 'loop'; it has counts, output, thresholds\n\n" ++ synopsis_and_more);
+
     const result = try runGnarl(tmp.dir, &.{ "skill", "--install", "agents" });
-    defer std.testing.allocator.free(result.stdout);
-    defer std.testing.allocator.free(result.stderr);
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
     try std.testing.expectEqualStrings("agents" ++ std.fs.path.sep_str ++ "gnarl" ++ std.fs.path.sep_str ++ "SKILL.md\n", result.stdout);
-    const written = try tmp.dir.readFileAlloc(io, "agents/gnarl/SKILL.md", std.testing.allocator, .limited(1 << 20));
-    defer std.testing.allocator.free(written);
-    try std.testing.expectEqualStrings(skill.text, written);
+    const written = try tmp.dir.readFileAlloc(io, "agents/gnarl/SKILL.md", gpa, .limited(1 << 20));
+    defer gpa.free(written);
+    try std.testing.expectEqualStrings(skill.stub, written);
 }
 
 test "the skill names every flag gnarl takes, and no other" {
@@ -1808,10 +1870,20 @@ test "parseArgs: gnarl skill" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    try std.testing.expectEqual(null, (try parseArgs(arena, &.{"skill"})).skill);
-    try std.testing.expectEqualStrings("d", (try parseArgs(arena, &.{ "skill", "--install", "d" })).skill.?);
-    try std.testing.expectEqualStrings("d", (try parseArgs(arena, &.{ "skill", "--install=d" })).skill.?);
-    try std.testing.expectEqualStrings("gnarl skill takes --install <dir>, or nothing", (try parseArgs(arena, &.{ "skill", "src" })).usage_error);
+    const takes = "gnarl skill takes topics, --all or --install <dir>, or nothing";
+    try std.testing.expect((try parseArgs(arena, &.{"skill"})).skill == .short);
+    try std.testing.expect((try parseArgs(arena, &.{ "skill", "--all" })).skill == .all);
+    const two = (try parseArgs(arena, &.{ "skill", "output", "counts" })).skill.topics;
+    try std.testing.expectEqual(2, two.len);
+    try std.testing.expectEqualStrings("output", two[0]);
+    try std.testing.expectEqualStrings("counts", two[1]);
+    try std.testing.expectEqualStrings("d", (try parseArgs(arena, &.{ "skill", "--install", "d" })).skill.install);
+    try std.testing.expectEqualStrings("d", (try parseArgs(arena, &.{ "skill", "--install=d" })).skill.install);
+    try std.testing.expectEqualStrings("skill has no topic named 'src'; it has counts, output, thresholds", (try parseArgs(arena, &.{ "skill", "counts", "src" })).usage_error);
+    try std.testing.expectEqualStrings(takes, (try parseArgs(arena, &.{ "skill", "--all", "counts" })).usage_error);
+    try std.testing.expectEqualStrings(takes, (try parseArgs(arena, &.{ "skill", "counts", "--all" })).usage_error);
+    try std.testing.expectEqualStrings(takes, (try parseArgs(arena, &.{ "skill", "--install", "d", "src" })).usage_error);
+    try std.testing.expectEqualStrings(takes, (try parseArgs(arena, &.{ "skill", "-h" })).usage_error);
     try std.testing.expectEqualStrings("--install needs a directory", (try parseArgs(arena, &.{ "skill", "--install" })).usage_error);
     // A path called skill is given as ./skill.
     try std.testing.expectEqualStrings("./skill", (try parseArgs(arena, &.{"./skill"})).run.paths[0]);

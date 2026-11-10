@@ -10,12 +10,26 @@ no semantic analysis, and measures every function and test block. It is
 fast (all of Zig's standard library in a quarter of a second), so run it
 as often as it helps.
 
+`gnarl skill` prints this guide without three parts, each printed when
+asked for by its name (several names print several);
+`gnarl skill --all` prints the whole:
+
+- `gnarl skill counts`: what each metric counts and what it does not,
+  with examples gnarl measures as shown. For a number you did not
+  expect, or a change aimed at one construct.
+- `gnarl skill output`: every field of each format, and taking a
+  function's lines from a report to read or replace it whole. Before
+  parsing a report.
+- `gnarl skill thresholds`: hot, normal, cold and test code, the
+  default limits, flat dispatches and complexity.zon. Before writing
+  complexity.zon, or when `--check` fails a limit you did not expect.
+
 ## The loop
 
 1. `gnarl --json src` lists the functions over a threshold, worst first.
    The summary says how many more are within limits; `--all` lists every
    function and `--top <n>` keeps the worst n. To read many rows cheaply,
-   `--format tsv`.
+   `--format tsv`; `gnarl skill output` has every field of each format.
 2. `gnarl --explain <function>` for the one to work on. `<function>` is
    `path:line` as the report prints it, any line inside the function, or
    its name (or the end of it: `record` finds `Validator.record`). It
@@ -26,6 +40,7 @@ as often as it helps.
    parts, a switch's prongs, a loop's statements), the deepest nesting
    chain, how
    the lines divide, and each parameter: aim the refactor at those lines.
+   What counts and what does not, with examples: `gnarl skill counts`.
    `gnarl --explain path:A-B` says what lines A to B cost and about what
    moving them into a function of their own would leave, before you do,
    and names each return, break or continue that leaves them, and what
@@ -48,7 +63,8 @@ as often as it helps.
    src` measures one function again, whatever its numbers.
 4. `gnarl --check src` in CI exits 1 when a function is over a critical
    threshold, and names the `--explain` to run for the worst. It lists
-   only what fails, so a pass prints nothing.
+   only what fails, so a pass prints nothing. The limits, and setting
+   them: `gnarl skill thresholds`.
 
 `--explain` also tallies what of a function runs at compile time:
 `comptime` blocks, `inline` loops and prongs, reflection builtins,
@@ -93,7 +109,63 @@ Without `setCwd`, gnarl does not find `complexity.zon` or the baseline.
 Without `has_side_effects`, a step that captures the output or checks
 the exit code is cached and skipped, and a regression passes.
 
-## What it counts
+## Names
+
+A function is named after what it is declared in: a method of `const
+Validator = struct {...}` is `Validator.record`; one in a container
+declared in a function body is `f.Local.g`; the methods of the struct a
+generic function returns are `List.append`; a test is `test "its name"`.
+Tests are measured like functions, with `kind` `test`.
+
+## Exit status
+
+0 when every file was read (and, with `--check`, nothing fails it); 1
+when `--check` found what does; 2 on a usage error, a configuration or
+baseline that cannot be used or written (or, under `--check`, a `.gnarl`
+that counts otherwise than this gnarl), a path that cannot be read or holds
+no .zig file, a file that does not parse, or a `--function` or
+`--explain` that names no function (or, for `--explain`, more than
+one). gnarl still reports what it could read.
+
+## What catches agents out
+
+- A function missing from the report is within its limits: the default
+  lists only what is over one. Use `--function` or `--all`.
+- `--check` exits 2 naming complexity.zon's `.gnarl`: the gnarl on the
+  `PATH` counts differently from the release the repo asks for, so its
+  pass or fail would not be CI's. Run that release. Moving the repo to
+  this one is a change of its own: set `.gnarl`, run
+  `gnarl --update-baseline .` (or the paths `--check` is given), and
+  commit both.
+- A long generic type function (`fn List(T: type) type { return struct
+  {...}; }`) is short to gnarl: the struct it returns is the type, not
+  the function's code. Its methods are their own rows, and its fields and
+  declarations count toward no function, so adding a field moves nothing.
+- Extracting a helper can move the cost into its parameters: the context
+  the code needed becomes the helper's arguments. Measure the helper too
+  (`--function` takes several), and prefer passing a struct over six
+  values. `--diff` shows such a function as mixed: read which numbers
+  fell before calling the change a loss.
+- A flat `switch` of many prongs scores high cyclomatic and 1 cognitive:
+  it has many paths but reads as one decision, so gnarl calls it a flat
+  dispatch and holds it to no cyclomatic limit. Do not split one to
+  bring cyclomatic down. Cognitive complexity is the better guide to
+  what is hard to read; what raises it is depth, so guard clauses and
+  extracting an inner loop bring it down most.
+- `try` adds nothing, so a function of many `try`s can score 1; the
+  explanation lists them, adding 0, to show they were seen.
+- Paths are as gnarl prints them, relative to the current directory:
+  pass `--explain` and `--function` the same form.
+- `--exclude <path>` skips a file or directory; hidden directories,
+  `zig-out` and `zig-pkg` are always skipped. In a git work tree, what
+  git ignores is skipped too, unless named outright; `--no-ignore` reads
+  it. A file you expect and do not see may be ignored.
+- `gnarl --help` prints every flag and `gnarl --version` the version (the
+  json's `gnarl`); `gnarl skill --install <dir>` writes
+  `<dir>/gnarl/SKILL.md`, which has the agent run `gnarl skill`, so it
+  is never older than the gnarl installed.
+
+## What it counts: gnarl skill counts
 
 Cyclomatic complexity is 1, and 1 for each `if` (so each `else if`, and
 an `if` written as a value), `while`, `for`, `and`, `or`, `orelse`,
@@ -199,15 +271,7 @@ const S = struct {
 
 gnarl measures S.pick: cyclomatic 5, cognitive 8, lines 5, nesting 3, params 1, weighted 1.
 
-## Names
-
-A function is named after what it is declared in: a method of `const
-Validator = struct {...}` is `Validator.record`; one in a container
-declared in a function body is `f.Local.g`; the methods of the struct a
-generic function returns are `List.append`; a test is `test "its name"`.
-Tests are measured like functions, with `kind` `test`.
-
-## Reading the output
+## Reading the output: gnarl skill output
 
 `--format` takes `text` (the default, a table), `md`, `json`, `xml`,
 `csv` or `tsv`; `--json` is `--format json`. In the table, a number over
@@ -273,7 +337,7 @@ The summary counts every function measured, whatever is listed: with
 `--function` or `--top` the table has fewer rows than the summary
 counts, and the footer says how many are left out.
 
-## Thresholds and complexity.zon
+## Thresholds and complexity.zon: gnarl skill thresholds
 
 Code is hot, normal or cold, by globs in `complexity.zon` in the
 directory gnarl runs in (or the file `--config` names); with no file,
@@ -323,50 +387,3 @@ that count differently disagree on what passes, so a gnarl that counts
 otherwise will not run `--check` (exit 2, naming both releases) and
 warns on every other run; one that counts the same says nothing. CI
 installs the release that line names.
-
-## Exit status
-
-0 when every file was read (and, with `--check`, nothing fails it); 1
-when `--check` found what does; 2 on a usage error, a configuration or
-baseline that cannot be used or written (or, under `--check`, a `.gnarl`
-that counts otherwise than this gnarl), a path that cannot be read or holds
-no .zig file, a file that does not parse, or a `--function` or
-`--explain` that names no function (or, for `--explain`, more than
-one). gnarl still reports what it could read.
-
-## What catches agents out
-
-- A function missing from the report is within its limits: the default
-  lists only what is over one. Use `--function` or `--all`.
-- `--check` exits 2 naming complexity.zon's `.gnarl`: the gnarl on the
-  `PATH` counts differently from the release the repo asks for, so its
-  pass or fail would not be CI's. Run that release. Moving the repo to
-  this one is a change of its own: set `.gnarl`, run
-  `gnarl --update-baseline .` (or the paths `--check` is given), and
-  commit both.
-- A long generic type function (`fn List(T: type) type { return struct
-  {...}; }`) is short to gnarl: the struct it returns is the type, not
-  the function's code. Its methods are their own rows, and its fields and
-  declarations count toward no function, so adding a field moves nothing.
-- Extracting a helper can move the cost into its parameters: the context
-  the code needed becomes the helper's arguments. Measure the helper too
-  (`--function` takes several), and prefer passing a struct over six
-  values. `--diff` shows such a function as mixed: read which numbers
-  fell before calling the change a loss.
-- A flat `switch` of many prongs scores high cyclomatic and 1 cognitive:
-  it has many paths but reads as one decision, so gnarl calls it a flat
-  dispatch and holds it to no cyclomatic limit. Do not split one to
-  bring cyclomatic down. Cognitive complexity is the better guide to
-  what is hard to read; what raises it is depth, so guard clauses and
-  extracting an inner loop bring it down most.
-- `try` adds nothing, so a function of many `try`s can score 1; the
-  explanation lists them, adding 0, to show they were seen.
-- Paths are as gnarl prints them, relative to the current directory:
-  pass `--explain` and `--function` the same form.
-- `--exclude <path>` skips a file or directory; hidden directories,
-  `zig-out` and `zig-pkg` are always skipped. In a git work tree, what
-  git ignores is skipped too, unless named outright; `--no-ignore` reads
-  it. A file you expect and do not see may be ignored.
-- `gnarl --help` prints every flag and `gnarl --version` the version (the
-  json's `gnarl`); `gnarl skill --install <dir>` writes this file to
-  `<dir>/gnarl/SKILL.md`.

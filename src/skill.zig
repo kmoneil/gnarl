@@ -1,6 +1,15 @@
 //! `gnarl skill`: what an agent needs to work with gnarl, printed by the
 //! binary itself, and tested here against what gnarl does: every example
 //! in it measures as it says.
+//!
+//! The guide is printed in parts. An agent reads it as a command's
+//! output, and every load costs all of it, though most jobs need the
+//! loop and not the reference: what each metric counts, each format's
+//! fields, the thresholds. So `gnarl skill` prints the guide up to its
+//! first topic, `gnarl skill counts` that topic, and `--all` the whole.
+//! skill.md stays one file: a topic is a `## ` heading ending
+//! `: gnarl skill <name>` and what follows it, up to the next, and every
+//! section from the first topic on is one.
 
 const std = @import("std");
 const Io = std.Io;
@@ -17,15 +26,95 @@ const params = @import("params.zig");
 const report = @import("report.zig");
 const thresholds = @import("thresholds.zig");
 
+/// The whole guide, frontmatter first: `gnarl skill --all` prints it.
 pub const text = @embedFile("skill.md");
 
-/// Writes the skill to `dir/gnarl/SKILL.md`, making the directories, and
+/// The frontmatter, from its first `---` line through its last.
+const frontmatter = text[0 .. (std.mem.find(u8, text[4..], "\n---\n") orelse @compileError("skill.md: no end to the frontmatter")) + 4 + "\n---\n".len];
+
+/// Where the guide starts after its frontmatter and the blank line under it.
+const body_start = std.mem.findNonePos(u8, text, frontmatter.len, "\n") orelse text.len;
+
+/// What a topic's heading ends with, before the topic's name.
+const topic_mark = ": gnarl skill ";
+
+/// Where the topics start: the first `## ` heading that names one.
+const topics_start = blk: {
+    @setEvalBranchQuota(1_000_000);
+    var at: usize = body_start;
+    while (std.mem.findPos(u8, text, at, "\n## ")) |start| : (at = start + 1) {
+        const line_end = std.mem.findScalarPos(u8, text, start + 1, '\n') orelse text.len;
+        if (std.mem.find(u8, text[start + 1 .. line_end], topic_mark) != null) break :blk start + 1;
+    }
+    @compileError("skill.md: no heading ends `: gnarl skill <topic>`");
+};
+
+/// What `gnarl skill` prints: the guide after its frontmatter, up to the
+/// first topic.
+pub const short = text[body_start..topics_start];
+
+/// What `gnarl skill --install` writes: the frontmatter, so an agent knows
+/// when to load the skill, and a line handing over to `gnarl skill`, so an
+/// installed skill is never older than the gnarl that prints it.
+pub const stub = frontmatter ++
+    \\
+    \\Run `gnarl skill` and follow what it prints: it is the guide to the gnarl installed on this machine, current for its version.
+    \\
+;
+
+/// A topic's part of the guide: its `## ` heading and what follows it, up
+/// to the next.
+pub const Topic = struct {
+    /// What follows `: gnarl skill ` in the heading; empty when the heading
+    /// names no topic, which the tests do not allow.
+    name: []const u8,
+    text: []const u8,
+};
+
+/// The topics, in the guide's order.
+pub const Topics = struct {
+    at: usize = topics_start,
+
+    pub fn next(it: *Topics) ?Topic {
+        if (it.at >= text.len) return null;
+        const end = if (std.mem.findPos(u8, text, it.at + 1, "\n## ")) |at| at + 1 else text.len;
+        const part = text[it.at..end];
+        it.at = end;
+        const heading = part[0 .. std.mem.findScalar(u8, part, '\n') orelse part.len];
+        const mark = std.mem.find(u8, heading, topic_mark) orelse return .{ .name = "", .text = part };
+        return .{ .name = heading[mark + topic_mark.len ..], .text = part };
+    }
+};
+
+/// The part of the topic named `name`, or null when there is no such topic.
+pub fn topicOf(name: []const u8) ?[]const u8 {
+    if (name.len == 0) return null;
+    var it: Topics = .{};
+    while (it.next()) |topic| {
+        if (std.mem.eql(u8, topic.name, name)) return topic.text;
+    }
+    return null;
+}
+
+/// Every topic's name, in the guide's order, for a message:
+/// `counts, output, thresholds`.
+pub fn names(arena: Allocator) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var it: Topics = .{};
+    while (it.next()) |topic| {
+        if (out.items.len > 0) try out.appendSlice(arena, ", ");
+        try out.appendSlice(arena, topic.name);
+    }
+    return out.items;
+}
+
+/// Writes the stub to `dir/gnarl/SKILL.md`, making the directories, and
 /// returns the path written.
 pub fn install(arena: Allocator, io: Io, dir: []const u8) ![]const u8 {
     const sub = try std.fs.path.join(arena, &.{ dir, "gnarl" });
     try Io.Dir.cwd().createDirPath(io, sub);
     const path = try std.fs.path.join(arena, &.{ sub, "SKILL.md" });
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = text });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = stub });
     return path;
 }
 
@@ -197,7 +286,78 @@ test "every metric and format gnarl has is named in the skill" {
     }
 }
 
-test "install writes SKILL.md under the directory named" {
+test "the short guide and the topics, in order, are the guide" {
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(std.testing.allocator);
+    try joined.appendSlice(std.testing.allocator, text[0..body_start]);
+    try joined.appendSlice(std.testing.allocator, short);
+    var it: Topics = .{};
+    var count: usize = 0;
+    while (it.next()) |topic| : (count += 1) {
+        try std.testing.expect(std.mem.startsWith(u8, topic.text, "## "));
+        try std.testing.expect(std.mem.find(u8, topic.text, "\n## ") == null);
+        if (topic.name.len == 0 or std.mem.findScalar(u8, topic.name, ' ') != null) {
+            std.debug.print("skill: a section after the first topic names no topic: {s}\n", .{topic.text[0 .. std.mem.findScalar(u8, topic.text, '\n') orelse topic.text.len]});
+            return error.TestUnexpectedResult;
+        }
+        try std.testing.expectEqualStrings(topic.text, topicOf(topic.name).?);
+        try joined.appendSlice(std.testing.allocator, topic.text);
+    }
+    try std.testing.expectEqualStrings(text, joined.items);
+    try std.testing.expectEqual(3, count);
+    // The short guide is the whole guide up to the first topic.
+    try std.testing.expect(std.mem.startsWith(u8, short, "# gnarl"));
+    try std.testing.expect(std.mem.endsWith(u8, short, "\n\n"));
+    try std.testing.expect(std.mem.find(u8, short, "## The loop\n") != null);
+    try std.testing.expect(std.mem.find(u8, short, "## What catches agents out\n") != null);
+    try std.testing.expectEqual(null, topicOf(""));
+    try std.testing.expectEqual(null, topicOf("loop"));
+    try std.testing.expectEqual(null, topicOf("What it counts"));
+}
+
+test "the short guide names every topic in a line, in the guide's order" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Each `- `gnarl skill name`: ` line.
+    var listed: Io.Writer.Allocating = .init(arena);
+    var lines = std.mem.splitScalar(u8, short, '\n');
+    while (lines.next()) |line| {
+        const item = std.mem.cutPrefix(u8, line, "- `gnarl skill ") orelse continue;
+        const close = std.mem.find(u8, item, "`: ") orelse continue;
+        try listed.writer.print("{s}{s}", .{ if (listed.written().len == 0) "" else ", ", item[0..close] });
+    }
+    try std.testing.expectEqualStrings(try names(arena), listed.written());
+}
+
+test "the short guide and each topic are held under a size" {
+    // An agent reads them as a command's output: the short guide on every
+    // load, and a topic when the job needs it. Raise a limit only after
+    // cutting what can go.
+    const short_cap = 12_000;
+    const topic_cap = 7_000;
+    if (short.len > short_cap) {
+        std.debug.print("skill: the short guide is {d} bytes, over {d}\n", .{ short.len, short_cap });
+        return error.TestUnexpectedResult;
+    }
+    var it: Topics = .{};
+    while (it.next()) |topic| {
+        if (topic.text.len > topic_cap) {
+            std.debug.print("skill: {s} is {d} bytes, over {d}\n", .{ topic.name, topic.text.len, topic_cap });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "the stub is the frontmatter and a line handing over to gnarl skill" {
+    try std.testing.expect(std.mem.startsWith(u8, stub, "---\nname: gnarl\ndescription: "));
+    try std.testing.expect(std.mem.startsWith(u8, text, frontmatter));
+    try std.testing.expectEqualStrings(frontmatter, stub[0..frontmatter.len]);
+    try std.testing.expect(std.mem.find(u8, stub[frontmatter.len..], "`gnarl skill`") != null);
+}
+
+test "install writes the stub as SKILL.md under the directory named" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -209,5 +369,5 @@ test "install writes SKILL.md under the directory named" {
     const path = try install(arena, io, dir);
     try std.testing.expect(std.mem.endsWith(u8, path, "gnarl" ++ std.fs.path.sep_str ++ "SKILL.md"));
     const written = try tmp.dir.readFileAlloc(io, "skills/gnarl/SKILL.md", arena, .limited(1 << 20));
-    try std.testing.expectEqualStrings(text, written);
+    try std.testing.expectEqualStrings(stub, written);
 }

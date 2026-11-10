@@ -20,7 +20,7 @@ nav_order: 3
 | `gnarl --check <path>...` | Exit 1 if a function is over a critical limit, or, held to a baseline, new or worse. Lists only what fails, so a pass prints nothing. |
 | `gnarl --update-baseline <path>...` | Write `complexity.baseline`: each function now over a critical limit, with its numbers. What it held of files outside the paths given is kept. |
 | `gnarl --files <path>...` | Each file's fan-out, fan-in and the modules it imports, the most coupled first. |
-| `gnarl skill` | Print the guide an AI agent needs; `--install <dir>` writes it to `<dir>/gnarl/SKILL.md`. |
+| `gnarl skill [<topic>...]` | Print the guide an AI agent needs, or the topics named: `counts`, `output`, `thresholds`. `--all` prints the whole guide; `--install <dir>` writes `<dir>/gnarl/SKILL.md`, which has the agent run `gnarl skill`. |
 
 ## Naming a function
 
