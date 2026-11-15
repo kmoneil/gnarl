@@ -87,7 +87,12 @@ critical limit, or one above its number there. A function is known by
 its path and name, so a rename or a move is a new function: update the
 baseline in the same change. What the baseline holds of files outside
 the paths given is kept, so `--update-baseline src` leaves `build.zig`'s
-functions as they were. `--baseline <file>` names another file.
+functions as they were. `--baseline <file>` names another file. Over a
+baseline already there, the update says what it tightened, raised, added
+and dropped, and names each function it raised or added: those are debt
+let in, which `--check` failed. A number that moved within its critical
+limit is counted apart, since it holds nothing back; read the note rather
+than the diff of the file.
 
 gnarl reads only the paths it is given, `.` for the current directory;
 with none, it prints its usage and exits 2. A function given to

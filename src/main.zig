@@ -553,11 +553,13 @@ fn loadBaseline(arena: std.mem.Allocator, io: Io, dir: Io.Dir, named: ?[]const u
 
 /// Writes the baseline of `rows`, keeping what the one there holds of
 /// files outside what the run `read`, unless a file could not be read:
-/// then what it held would be left out.
+/// then what it held would be left out. Says what it changed of the one
+/// there.
 fn updateBaseline(c: Context, rows: []const report.Row, read: baseline.Read) !void {
     const path = c.run.baseline orelse baseline.default_path;
     if (c.said.errors() > 0) return c.said.fail(path, "not written: a file that could not be read would be left out of it", .{});
-    const kept = try keptOutside(c, path, read);
+    const old = try replaced(c, path);
+    const kept: []const baseline.Entry = if (old) |b| try baseline.outside(c.arena, b, read) else &.{};
     var text: Io.Writer.Allocating = .init(c.arena);
     const n = baseline.write(c.arena, &text.writer, rows, kept) catch return error.OutOfMemory;
     c.cwd.writeFile(c.io, .{ .sub_path = path, .data = text.written() }) catch |err| return c.said.fail(path, "{t}", .{err});
@@ -565,30 +567,90 @@ fn updateBaseline(c: Context, rows: []const report.Row, read: baseline.Read) !vo
         kept.len, if (kept.len == 1) "a file" else "files",
     });
     try c.said.add(.{ .level = .note, .path = path, .text = try std.fmt.allocPrint(c.arena, "wrote {d} function{s} over a critical threshold{s}", .{ n, plural(n), also }) });
+    const b = old orelse return;
+    try sayReplaced(c, path, try baseline.ratchet(c.arena, rows, c.settings.classes, b, read));
 }
 
-/// The entries of the baseline at `path` of files outside what the run
-/// `read`, which --update-baseline keeps. None when there is no baseline
-/// there, or it cannot be read, which is said.
-fn keptOutside(c: Context, path: []const u8, read: baseline.Read) ![]const baseline.Entry {
+/// The baseline at `path` that --update-baseline replaces. Null when
+/// there is none, or it cannot be read, which is said: then what it held
+/// of files outside the paths given is lost.
+fn replaced(c: Context, path: []const u8) !?baseline.Baseline {
     const lost = "no baselined function of a file outside the paths given is kept";
     const text = c.cwd.readFileAlloc(c.io, path, c.arena, .limited(1 << 28)) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
-        error.FileNotFound => return &.{},
+        error.FileNotFound => return null,
         else => {
             try c.said.add(.{ .level = .warning, .path = path, .text = try std.fmt.allocPrint(c.arena, "{t}, so " ++ lost, .{err}) });
-            return &.{};
+            return null;
         },
     };
     var problem: baseline.Problem = undefined;
-    const base = baseline.parse(c.arena, text, &problem) catch |err| switch (err) {
+    return baseline.parse(c.arena, text, &problem) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         error.Invalid => {
             try c.said.add(.{ .level = .warning, .path = path, .line = problem.line, .text = "could not be read, so " ++ lost });
-            return &.{};
+            return null;
         },
     };
-    return baseline.outside(c.arena, base, read);
+}
+
+/// What --update-baseline changed of the baseline it replaced, `r` being
+/// --check held to that one: how many functions it tightened, raised,
+/// added and dropped, naming each raised or added, since --check failed
+/// those, and how many more moved only where a number holds nothing back.
+fn sayReplaced(c: Context, path: []const u8, r: baseline.Ratchet) !void {
+    const l = try loosened(c.arena, r.failures);
+    const counts = [_]struct { []const u8, usize }{
+        .{ "tightened", r.improved }, .{ "raised", l.raised }, .{ "added", l.added }, .{ "dropped", r.unneeded + r.gone },
+    };
+    var parts: std.ArrayList([]const u8) = .empty;
+    for (counts) |count| if (count[1] > 0) try parts.append(c.arena, try std.fmt.allocPrint(c.arena, "{s} {d}", count));
+    const changed = try andList(c.arena, parts.items);
+    const idle = if (r.idle == 0) "" else try std.fmt.allocPrint(c.arena, "{d} {s} changed only in numbers within {s} limits, which hold nothing back", .{
+        r.idle, if (changed.len > 0) "more" else if (r.idle == 1) "function" else "functions", if (r.idle == 1) "its" else "their",
+    });
+    const what: []const u8 = if (changed.len > 0 and idle.len > 0)
+        try std.fmt.allocPrint(c.arena, "{s}; {s}", .{ changed, idle })
+    else if (changed.len > 0) changed else if (idle.len > 0) idle else "no change";
+    try c.said.add(.{ .level = .note, .path = path, .text = try std.fmt.allocPrint(c.arena, "against the baseline it replaced: {s}", .{what}), .more = l.lines });
+}
+
+/// What --update-baseline let grow, from the `failures` of --check held to
+/// the baseline it replaced: a line per function, raised (the baseline
+/// held it) or added (it did not), and how many of each.
+fn loosened(arena: std.mem.Allocator, failures: []const baseline.Failure) !struct { lines: []const []const u8, raised: usize, added: usize } {
+    var lines: std.ArrayList([]const u8) = .empty;
+    var added: usize = 0;
+    var i: usize = 0;
+    while (i < failures.len) {
+        const f = failures[i];
+        added += @intFromBool(f.baselined == null);
+        var line: std.ArrayList(u8) = .empty;
+        try line.print(arena, "{s}:{d}  {s}: {s} ", .{ f.path, f.line, f.name, if (f.baselined == null) "added at" else "raised to" });
+        try grown(arena, &line, f);
+        i += 1;
+        while (i < failures.len and failures[i].sameFunction(f)) : (i += 1) {
+            try line.appendSlice(arena, ", ");
+            try grown(arena, &line, failures[i]);
+        }
+        try lines.append(arena, line.items);
+    }
+    return .{ .lines = lines.items, .raised = lines.items.len - added, .added = added };
+}
+
+/// `f`'s metric and number now, and what the baseline it was held to let
+/// it be, appended to `line`.
+fn grown(arena: std.mem.Allocator, line: *std.ArrayList(u8), f: baseline.Failure) !void {
+    try line.print(arena, "{t} {d}", .{ f.metric, f.value });
+    if (f.baselined) |b| if (b > f.limit) return line.print(arena, " (was {d})", .{b});
+    try line.print(arena, " (over the critical limit {d})", .{f.limit});
+}
+
+/// `items` as a phrase: `a`, `a and b`, `a, b and c`; "" for none.
+fn andList(arena: std.mem.Allocator, items: []const []const u8) ![]const u8 {
+    if (items.len <= 1) return if (items.len == 0) "" else items[0];
+    const head = try std.mem.join(arena, ", ", items[0 .. items.len - 1]);
+    return std.fmt.allocPrint(arena, "{s} and {s}", .{ head, items[items.len - 1] });
 }
 
 /// Each of `paths` cleaned, as `walk.collect` cleans the paths it lists.
@@ -610,8 +672,7 @@ fn sayFailures(check: report.Check) void {
     };
     std.debug.print("gnarl: --check: {d} function{s} fail{s} against {s}:", .{ n, plural(n), if (n == 1) "s" else "", path });
     for (check.failures, 0..) |f, i| {
-        const same = i > 0 and check.failures[i - 1].line == f.line and std.mem.eql(u8, check.failures[i - 1].path, f.path);
-        if (same) {
+        if (i > 0 and check.failures[i - 1].sameFunction(f)) {
             std.debug.print("; ", .{});
         } else std.debug.print("\n  {s}:{d}  {s}: ", .{ f.path, f.line, f.name });
         if (f.baselined) |b| {
@@ -1171,9 +1232,17 @@ test "--update-baseline keeps what the baseline holds of files outside the paths
     const steps = [_]Step{
         .{ .args = &.{"."}, .stderr = "gnarl: complexity.baseline: note: wrote 2 functions over a critical threshold\n", .holds = both },
         // a.zig is outside sub: kept as it was.
-        .{ .args = &.{"sub"}, .stderr = "gnarl: complexity.baseline: note: wrote 1 function over a critical threshold, and kept the 1 baselined in a file outside the paths given\n", .holds = both },
+        .{ .args = &.{"sub"}, .holds = both, .stderr =
+        \\gnarl: complexity.baseline: note: wrote 1 function over a critical threshold, and kept the 1 baselined in a file outside the paths given
+        \\gnarl: complexity.baseline: note: against the baseline it replaced: no change
+        \\
+        },
         // sub/b.zig is under ., left out: dropped.
-        .{ .args = &.{ ".", "--exclude", "sub" }, .stderr = "gnarl: complexity.baseline: note: wrote 1 function over a critical threshold\n", .holds = "a.zig\ta\t17\t17\t18\t1\t1\t1\n" },
+        .{ .args = &.{ ".", "--exclude", "sub" }, .holds = "a.zig\ta\t17\t17\t18\t1\t1\t1\n", .stderr =
+        \\gnarl: complexity.baseline: note: wrote 1 function over a critical threshold
+        \\gnarl: complexity.baseline: note: against the baseline it replaced: dropped 1
+        \\
+        },
     };
     for (steps) |step| {
         const result = try runGnarl(tmp.dir, try std.mem.concat(arena, []const u8, &.{ &.{"--update-baseline"}, step.args }));
@@ -1198,6 +1267,52 @@ test "--update-baseline keeps what the baseline holds of files outside the paths
         \\
     , result.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+}
+
+test "--update-baseline says what it changed of the baseline it replaced, naming what it let grow" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Each over its cyclomatic limit, 15, at 17; lines 18.
+    const held = "# held\na.zig\tf\t17\t17\t18\t1\t1\t1\na.zig\tg\t17\t17\t18\t1\t1\t1\na.zig\th\t17\t17\t18\t1\t1\t1\n";
+    // g a line longer, and no more complex.
+    const longer = try std.mem.replaceOwned(u8, arena, try branchy(arena, "g", 16), "errdefer {}\n", "errdefer {}\n    _ = c;\n");
+    const Step = struct { source: []const []const u8, stderr: []const u8, holds: []const u8 };
+    const steps = [_]Step{
+        // What --check said to tighten, f, and g's lines up within their
+        // limit: counted apart, since a number there holds nothing back.
+        .{ .source = &.{ try branchy(arena, "f", 15), longer, try branchy(arena, "h", 16) }, .stderr =
+        \\gnarl: complexity.baseline: note: wrote 3 functions over a critical threshold
+        \\gnarl: complexity.baseline: note: against the baseline it replaced: tightened 1; 1 more changed only in numbers within its limits, which hold nothing back
+        \\
+        , .holds = "a.zig\tf\t16\t16\t17\t1\t1\t1\na.zig\tg\t17\t17\t19\t1\t1\t1\na.zig\th\t17\t17\t18\t1\t1\t1\n" },
+        // What --check fails is raised (f, past its baseline on one metric
+        // and its limit on another) or added (k), each named; g
+        // tightened; h, within every limit now, dropped.
+        .{ .source = &.{ try branchy(arena, "f", 25), try branchy(arena, "g", 15), try branchy(arena, "h", 10), try branchy(arena, "k", 15) }, .stderr =
+        \\gnarl: complexity.baseline: note: wrote 3 functions over a critical threshold
+        \\gnarl: complexity.baseline: note: against the baseline it replaced: tightened 1, raised 1, added 1 and dropped 1
+        \\  a.zig:1  f: raised to cyclomatic 26 (was 16), cognitive 26 (over the critical limit 25)
+        \\  a.zig:60  k: added at cyclomatic 16 (over the critical limit 15)
+        \\
+        , .holds = "a.zig\tf\t26\t26\t27\t1\t1\t1\na.zig\tg\t16\t16\t17\t1\t1\t1\na.zig\tk\t16\t16\t17\t1\t1\t1\n" },
+    };
+    try tmp.dir.writeFile(io, .{ .sub_path = "complexity.baseline", .data = held });
+    for (steps) |step| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = try std.mem.concat(arena, u8, step.source) });
+        const result = try runGnarl(tmp.dir, &.{ "--update-baseline", "a.zig" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqualStrings(step.stderr, result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+        var written = try tmp.dir.readFileAlloc(io, "complexity.baseline", arena, .limited(1 << 20));
+        while (std.mem.startsWith(u8, written, "#")) written = written[std.mem.findScalar(u8, written, '\n').? + 1 ..];
+        try std.testing.expectEqualStrings(step.holds, written);
+    }
 }
 
 test "a baseline that cannot be used stops the run, and says where" {

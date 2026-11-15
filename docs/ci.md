@@ -95,6 +95,23 @@ When a frozen function gets better, `--check` says so, and
 `gnarl --update-baseline .` tightens the ratchet; when it is within every
 limit again, the update drops it. Debt can only shrink.
 
+The update says what it changed of the baseline it replaced. A function
+it raised or added is one `--check` failed, so each is named:
+
+```console
+$ gnarl --update-baseline .
+gnarl: complexity.baseline: note: wrote 3 functions over a critical threshold
+gnarl: complexity.baseline: note: against the baseline it replaced: tightened 1, raised 1 and added 1
+  tally.zig:7  tally: raised to cognitive 34 (was 33)
+  parse.zig:40  parse: added at cyclomatic 16 (over the critical limit 15)
+```
+
+A number in the baseline holds a function back only where it is over its
+critical limit. One that moved within its limit (lines 49 to 50, with a
+limit of 100) changes nothing `--check` lets through, so the update counts
+those apart: "1 more changed only in numbers within its limits, which
+hold nothing back".
+
 {: .note }
 A function is known by its path and its name, so a rename or a move to
 another file is a new function: update the baseline in the same change.

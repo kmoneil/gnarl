@@ -274,7 +274,9 @@ gnarl --explain tally.zig:7 says why the first scores what it does
 ```
 
 When a frozen function improves, `--check` says so, and
-`--update-baseline` tightens the ratchet. Debt can only shrink.
+`--update-baseline` tightens the ratchet. Debt can only shrink. The update
+says what it changed of the baseline it replaced, and names each function
+it raised or added, since `--check` failed those.
 
 To run it with `zig build test`, add a step to `build.zig`:
 

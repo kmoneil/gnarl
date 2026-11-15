@@ -175,9 +175,7 @@ pub fn write(arena: Allocator, w: *Writer, rows: []const Row, kept: []const Entr
     try lines.appendSlice(arena, kept);
     for (rows, row_keys) |row, key| {
         for (row.trips) |trip| if (trip.level == .critical) {
-            var entry: Entry = .{ .key = key, .values = undefined };
-            inline for (metrics, 0..) |metric, m| entry.values[m] = @field(row, @tagName(metric));
-            try lines.append(arena, entry);
+            try lines.append(arena, .{ .key = key, .values = values(row) });
             break;
         };
     }
@@ -197,6 +195,13 @@ fn byKey(_: void, a: Entry, b: Entry) bool {
     return std.mem.order(u8, a.key, b.key) == .lt;
 }
 
+/// `row`'s numbers, in the order a baseline entry holds them.
+fn values(row: Row) [metrics.len]u32 {
+    var out: [metrics.len]u32 = undefined;
+    inline for (metrics, 0..) |metric, m| out[m] = @field(row, @tagName(metric));
+    return out;
+}
+
 /// A metric of a function that --check fails.
 pub const Failure = struct {
     path: []const u8,
@@ -208,6 +213,12 @@ pub const Failure = struct {
     limit: u32,
     /// The baseline's number for it, when the baseline holds the function.
     baselined: ?u32,
+
+    /// Whether `a` and `b` are of one function: failures are grouped by
+    /// function, so the next of `a`'s.
+    pub fn sameFunction(a: Failure, b: Failure) bool {
+        return a.line == b.line and std.mem.eql(u8, a.path, b.path);
+    }
 };
 
 pub const Ratchet = struct {
@@ -221,6 +232,12 @@ pub const Ratchet = struct {
     /// hold nothing back but let them grow, and --update-baseline drops
     /// them.
     unneeded: usize,
+    /// Baselined functions still over a critical limit, neither worse nor
+    /// better, whose numbers moved where a number holds nothing back:
+    /// within a metric's critical limit, or on one with none.
+    /// --update-baseline writes the new numbers, which change nothing
+    /// --check lets through.
+    idle: usize,
     /// Baselined functions no longer there: of a file read, renamed, moved
     /// or deleted; of a file not read under a path given, its file deleted,
     /// excluded or ignored.
@@ -245,18 +262,22 @@ pub fn ratchet(arena: Allocator, rows: []const Row, classes: Classes, base: ?Bas
     var failures: std.ArrayList(Failure) = .empty;
     var improved: usize = 0;
     var unneeded: usize = 0;
+    var idle: usize = 0;
     var present: std.StringHashMapUnmanaged(void) = .empty;
     for (rows, row_keys) |row, key| {
         try present.put(arena, key, {});
         const held = if (base) |b| b.get(key) else null;
         const s = try judge(arena, row, held, classes.get(row.class), &failures);
-        if (held == null or s.failed) continue;
+        const h = held orelse continue;
+        if (s.failed) continue;
         if (!s.over) {
             unneeded += 1;
-        } else if (s.better) improved += 1;
+        } else if (s.better) {
+            improved += 1;
+        } else if (!std.mem.eql(u32, &h.values, &values(row))) idle += 1;
     }
     const gone = if (base) |b| try countGone(arena, b, present, read) else 0;
-    return .{ .failures = failures.items, .improved = improved, .unneeded = unneeded, .gone = gone };
+    return .{ .failures = failures.items, .improved = improved, .unneeded = unneeded, .idle = idle, .gone = gone };
 }
 
 /// How many of `base`'s functions are gone: of a file read and not
@@ -373,7 +394,7 @@ fn judge(arena: Allocator, row: Row, held: ?Entry, limits: thresholds.Thresholds
 pub fn functionsFailing(failures: []const Failure) usize {
     var n: usize = 0;
     for (failures, 0..) |f, i| {
-        if (i == 0 or failures[i - 1].line != f.line or !std.mem.eql(u8, failures[i - 1].path, f.path)) n += 1;
+        if (i == 0 or !failures[i - 1].sameFunction(f)) n += 1;
     }
     return n;
 }
@@ -489,6 +510,31 @@ test "ratchet: new over a limit, above its baseline, newly over another; within 
     // worse and kept on two metrics each, better and new on one.
     try std.testing.expectEqual(6, plain.failures.len);
     try std.testing.expectEqual(4, functionsFailing(plain.failures));
+}
+
+test "ratchet: a held function whose numbers move only within their limits is idle" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var problem: Problem = undefined;
+    // Each over its cyclomatic limit, 15, at 20, as it was.
+    const base = try parse(arena, "src/a.zig\tdrifts\t20\t20\t49\t0\t0\t0\n" ++
+        "src/a.zig\tstill\t20\t20\t10\t0\t0\t0\n" ++
+        "src/a.zig\tboth\t20\t20\t10\t0\t0\t0\n", &problem);
+    var rows = [_]Row{
+        // Lines 49 to 50, far under their limit, 100: idle.
+        sampleRow("src/a.zig", 1, "drifts", 20, 50),
+        // Nothing moved: not idle.
+        sampleRow("src/a.zig", 20, "still", 20, 10),
+        // Better on cyclomatic, lines up within their limit: improved,
+        // not idle.
+        sampleRow("src/a.zig", 40, "both", 19, 60),
+    };
+    try @import("report.zig").rank(arena, &rows, .defaults);
+    const r = try ratchet(arena, &rows, .defaults, base, read_a);
+    try std.testing.expectEqual(0, r.failures.len);
+    try std.testing.expectEqual(1, r.idle);
+    try std.testing.expectEqual(1, r.improved);
 }
 
 test "ratchet: gone, of a file read, or of a file not read under a path given" {
