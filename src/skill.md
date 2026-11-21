@@ -62,9 +62,10 @@ asked for by its name (several names print several);
    `gnarl --function <function>
    src` measures one function again, whatever its numbers.
 4. `gnarl --check src` in CI exits 1 when a function is over a critical
-   threshold, and names the `--explain` to run for the worst. It lists
-   only what fails, so a pass prints nothing. The limits, and setting
-   them: `gnarl skill thresholds`.
+   threshold, and names the `--explain` to run for the worst; with a
+   `.normal` list in complexity.zon, also when a file read is in no
+   class, naming it. It lists only what fails, so a pass prints nothing.
+   The limits, and setting them: `gnarl skill thresholds`.
 
 `--explain` also tallies what of a function runs at compile time:
 `comptime` blocks, `inline` loops and prongs, reflection builtins,
@@ -74,10 +75,11 @@ generic is instantiated, what an anytype must provide) it names as
 unknown, rather than leaving out.
 
 `gnarl --files src` lists files rather than functions: the files each
-imports (fan-out), the files read that import it (fan-in), and the
-modules it imports (`std`, named modules), which gnarl does not follow;
-the most coupled first. A file many import is risky to change; one that
-imports many knows too much.
+imports (fan-out), the files read that import it (fan-in), the modules
+it imports (`std`, named modules), which gnarl does not follow, and its
+class with the glob of complexity.zon that gave it; the most coupled
+first. A file many import is risky to change; one that imports many
+knows too much.
 
 On code with debt already, `gnarl --update-baseline src` writes
 `complexity.baseline` (commit it): the functions over a critical
@@ -142,6 +144,13 @@ one). gnarl still reports what it could read.
   this one is a change of its own: set `.gnarl`, run
   `gnarl --update-baseline .` (or the paths `--check` is given), and
   commit both.
+- `--check` fails naming a file "in no class": complexity.zon has a
+  `.normal` list, so every file is to be named in `.hot`, `.normal` or
+  `.cold`. Add the file to the one it belongs in (code that runs per
+  byte, row, request or item is hot), not a glob that takes in
+  everything: the list is there so a new hot file is not held to
+  normal's limits unseen. `gnarl --files .` shows each file's class and
+  the glob that gave it.
 - A long generic type function (`fn List(T: type) type { return struct
   {...}; }`) is short to gnarl: the struct it returns is the type, not
   the function's code. Its methods are their own rows, and its fields and
@@ -377,7 +386,18 @@ only where cognitive is high too.
 ```
 
 `*` matches within a path segment, `**` across them, `?` one character.
-A metric named under a class replaces both its limits there.
+A path both a hot and a cold glob match is hot. A metric named under a
+class replaces both its limits there.
+A file no glob matches is normal. `.normal = .{ "src/cli/**" }` names
+normal code as `.hot` and `.cold` name theirs, and asks that every file
+read be in a class (`.normal = .{}` asks it too): one in none is
+unclassed, held to normal's limits, failed by `--check` (exit 1, naming
+each file) and warned of on every other run. A project that names its
+hot files one by one sees a new one left off the list, rather than
+holding it to normal's limits unseen. A hot or cold glob wins over a
+normal one, so `.normal = .{"src/**"}` with hot files named inside it
+still classes them hot (and leaves nothing in `src` unclassed).
+`gnarl --files` lists each file's class and the glob that gave it.
 Test code is held to `tests` whatever its file's class: a test block,
 what is declared in one, and a function neither `pub` nor `export` that
 only test code in its file uses, such as a fuzz property or a fake's

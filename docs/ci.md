@@ -49,6 +49,17 @@ only where cognitive is high too.
 
 - `*` matches within a path segment, `**` across them, `?` one character.
   A path both a hot and a cold glob match is hot.
+- `.normal` names normal code by globs, as `.hot` and `.cold` name
+  theirs, and a hot or cold glob wins over a normal one. With a
+  `.normal` list (`.normal = .{}` too), every file read is to be in a
+  class: one no glob matches is unclassed, still held to normal's
+  limits, and `--check` fails it (exit 1, naming each such file after
+  the report), while every other run warns of it. A project that names
+  each hot file in the commit that adds it sees one left off, which
+  would otherwise pass as normal code. Without a `.normal` list nothing
+  changes: a file no glob matches is normal, and nothing is said.
+  `gnarl --files .` lists each file's class and the glob that gave it,
+  to check `complexity.zon` against the tree.
 - A metric named under a class replaces both its limits there; the rest
   keep their defaults.
 - Test code is held to `tests` wherever it lives: a test block, what is
