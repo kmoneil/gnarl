@@ -234,14 +234,14 @@ Cognitive 33 to 8, nesting 5 to 3, and nothing left over a limit.
 `inline` loops, reflection builtins, comptime and `anytype` parameters)
 and names what the source alone cannot show, such as the members of an
 inferred error set, rather than leaving it out. `gnarl --files` lists
-each file's fan-out and fan-in:
+each file's fan-out and fan-in, and its class:
 
 ```console
 $ gnarl --files --top 3 .
-fan-out  fan-in  modules  file
-     27       0        4  src/main.zig
-     16       2        1  src/explain.zig
-      1      15        1  src/functions.zig
+fan-out  fan-in  modules  class   file
+     29       0        4  normal  src/main.zig
+     17       2        1  normal  src/explain.zig
+      1      16        1  normal  src/functions.zig
 ```
 
 The cognitive rules, each with a worked example the tests are held to,
@@ -313,6 +313,13 @@ code is a test block, what is declared in one, and a function neither
 `pub` nor `export` that only test code in its file uses: the property a
 fuzz test hands the fuzzer, a fake and its methods. `gnarl --explain`
 says what made a function test code.
+
+A file no glob matches is normal. A `.normal` list names normal code as
+`.hot` and `.cold` name theirs, and asks that every file read be in a
+class: then a file in none, such as a hot file left off the list in the
+commit that adds it, fails `--check`, named, and every other run warns
+of it. `gnarl --files .` shows each file's class and the glob that gave
+it.
 
 Releases of gnarl that count differently disagree on what passes, so
 `.gnarl = "0.7.0"` in `complexity.zon` names the release the code is

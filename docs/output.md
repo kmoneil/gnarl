@@ -55,6 +55,10 @@ names, and elements for what is a list or an object in json.
     moved or deleted from a file read, or in a file under a path given
     that was not read (deleted, excluded or ignored), but not in a file
     outside every path given (`--update-baseline` drops them).
+  - `unclassed`: the files read that no glob of `.hot`, `.normal` or
+    `.cold` matches, when complexity.zon has a `.normal` list: each fails
+    `--check`. Empty with no `.normal` list, and with no `--check`, when a
+    warning names them instead.
 - `thresholds`: the limits in force, by class of code:
   - `hot`, `normal`, `cold`, `tests`: each class's limits, by metric:
     - `cyclomatic`, `cognitive`, `lines`, `nesting`, `params`,
@@ -70,7 +74,8 @@ names, and elements for what is a list or an object in json.
   - `more`: further lines, such as the functions a name fits.
 - `warnings`: what is not wrong but may change what the document means,
   such as a `complexity.zon` that asks for a gnarl that counts
-  differently, with the same fields as `errors`.
+  differently, or files read in no class when it has a `.normal` list
+  (in `more`), with the same fields as `errors`.
 - `notes`: what is worth knowing and is not wrong, with the same fields
   as `errors`.
 - `functions`: the functions listed, worst first; under `--check`, those
@@ -231,24 +236,31 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
 
 ## Files
 
-`--files` lists files rather than functions: what each imports, and
-what imports it. An `@import` of a string ending in `.zig` or `.zon` is
-a file, relative to the importing one; anything else is a module (`std`,
-`builtin`, a build option, a named module), which the source alone
-cannot place, and which gnarl lists rather than follows.
+`--files` lists files rather than functions: what each imports, what
+imports it, and its class. An `@import` of a string ending in `.zig` or
+`.zon` is a file, relative to the importing one; anything else is a
+module (`std`, `builtin`, a build option, a named module), which the
+source alone cannot place, and which gnarl lists rather than follows.
 
 - `schema`, `gnarl`, `errors`, `warnings`, `notes`: as in the report.
 - `files`: each file read, the most coupled first (the most imports in
   and out, then out, then by path):
   - `path`: as gnarl prints paths.
+  - `class`: `hot`, `normal` or `cold`, by complexity.zon. Test code in
+    it is held as `tests` whatever this says.
+  - `glob`: the glob of complexity.zon that gave its class; null when
+    none matches it, and it is normal by default (with a `.normal` list,
+    such a file is unclassed: a warning names it, and `--check` fails it).
   - `fan_out`: how many files it imports.
   - `fan_in`: how many of the files read import it.
   - `imports`: the files it imports, each once.
   - `imported_by`: the files read that import it.
   - `modules`: the modules it imports, each once.
 
-In csv and tsv, the columns are `path`, `fan_out`, `fan_in`, and the
-lists `imports`, `imported_by` and `modules`, each separated by spaces.
+In csv and tsv, the columns are `path`, `fan_out`, `fan_in`, the lists
+`imports`, `imported_by` and `modules`, each separated by spaces, then
+`class` and `glob` (empty for none). The text and Markdown tables have a
+`class` column, and a `glob` column when some file listed has one.
 
 ## A diff
 

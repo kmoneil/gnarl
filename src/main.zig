@@ -18,7 +18,6 @@ const messages = @import("messages.zig");
 const report = @import("report.zig");
 const select = @import("select.zig");
 const skill = @import("skill.zig");
-const Class = @import("thresholds.zig").Class;
 const Classes = @import("thresholds.zig").Classes;
 const walk = @import("walk.zig");
 
@@ -73,6 +72,10 @@ const usage = synopsis ++
     \\The thresholds depend on the class of code a file is in, hot, normal
     \\or cold, which complexity.zon in the current directory gives by globs,
     \\with any thresholds of its own. With no such file every file is normal.
+    \\A file no glob matches is normal too; but with a .normal list, which
+    \\names normal code as .hot and .cold name theirs, every file read is to
+    \\be in a class, and one in none fails --check and is warned of on every
+    \\other run, so a file left off the lists is seen.
     \\Test code is held to the tests class's thresholds whatever its file:
     \\a test block, and a function neither pub nor export that only test
     \\code in its file uses.
@@ -90,6 +93,7 @@ const usage = synopsis ++
     \\  --check           Exit 1 if a function is over a critical threshold,
     \\                    or with a baseline, over its critical limit and
     \\                    above the baseline's number for it: new or worse.
+    \\                    With a .normal list, a file read in no class too.
     \\                    Lists only what fails, so a pass prints nothing.
     \\  --baseline <file> The baseline --check holds to, or --update-baseline
     \\                    writes, rather than complexity.baseline (which
@@ -124,9 +128,9 @@ const usage = synopsis ++
     \\                    removed. With no path, the whole work tree.
     \\  --files           Rather than report functions, list each file: the
     \\                    files it imports (fan-out), the files read that
-    \\                    import it (fan-in), and the modules it imports,
-    \\                    which gnarl does not follow; the most coupled
-    \\                    first. Takes --top.
+    \\                    import it (fan-in), the modules it imports, which
+    \\                    gnarl does not follow, and its class with the glob
+    \\                    that gave it; the most coupled first. Takes --top.
     \\  --format <format> text (the default, a table); md (a Markdown table,
     \\                    for a review); json or xml (every field and all
     \\                    that stderr says, versioned); csv or tsv (a header,
@@ -240,6 +244,12 @@ const Context = struct {
         return &c.stdout_writer.interface;
     }
 
+    /// The configuration file read, or looked for: what a message about
+    /// it names.
+    fn configPath(c: Context) []const u8 {
+        return c.run.config orelse config.default_path;
+    }
+
     /// Flushes what was written, and returns `status`: a reader that
     /// stopped early is no failure.
     fn finish(c: Context, status: u8) !u8 {
@@ -306,21 +316,46 @@ fn collectPath(c: Context, arg: []const u8, files: *std.ArrayList([]const u8)) !
     }
 }
 
+/// What `readFiles` read.
+const Measured = struct {
+    /// How many files were measured.
+    files: usize = 0,
+    /// The files measured that are in no class, when complexity.zon asks
+    /// that each be in one.
+    unclassed: []const []const u8 = &.{},
+};
+
 /// Reads and parses each of `files` and hands each tree to `sink.file`,
 /// with the file's class and memory freed before the next file is read.
-/// Returns how many files were measured.
-fn readFiles(c: Context, files: []const []const u8, sink: anytype) !usize {
+fn readFiles(c: Context, files: []const []const u8, sink: anytype) !Measured {
     var file_arena: std.heap.ArenaAllocator = .init(c.gpa);
     defer file_arena.deinit();
     var measured: usize = 0;
+    var unclassed: std.ArrayList([]const u8) = .empty;
     for (files) |path| {
         _ = file_arena.reset(.retain_capacity);
         var tree = try c.readTree(file_arena.allocator(), path) orelse continue;
         defer tree.deinit(c.gpa);
         measured += 1;
-        try sink.file(file_arena.allocator(), path, &tree, c.settings.classOf(path));
+        if (c.settings.unclassed(path)) try unclassed.append(c.arena, path);
+        try sink.file(file_arena.allocator(), path, &tree, c.settings.classify(path));
     }
-    return measured;
+    return .{ .files = measured, .unclassed = unclassed.items };
+}
+
+/// Warns of the `unclassed` files read: in no class when complexity.zon's
+/// `.normal` list asks that each be in one. `--check` fails them instead.
+fn warnUnclassed(c: Context, unclassed: []const []const u8) !void {
+    if (unclassed.len == 0) return;
+    const one = unclassed.len == 1;
+    try c.said.add(.{
+        .level = .warning,
+        .path = c.configPath(),
+        .text = try c.arena.print("{d} file{s} read {s} in no class (no glob of .hot, .normal or .cold matches {s}): held to normal's limits for now, and --check fails {s}; add {s} to the class it belongs in", .{
+            unclassed.len, plural(unclassed.len), if (one) "is" else "are", if (one) "it" else "them", if (one) "it" else "them", if (one) "it" else "each",
+        }),
+        .more = unclassed,
+    });
 }
 
 /// What `readFiles` hands each tree to for --explain: the search for the
@@ -330,8 +365,8 @@ const ExplainSink = struct {
     arena: std.mem.Allocator,
     classes: Classes,
 
-    pub fn file(s: ExplainSink, scratch: std.mem.Allocator, path: []const u8, tree: *const Ast, class: Class) !void {
-        try s.search.file(s.arena, scratch, path, tree, class, s.classes);
+    pub fn file(s: ExplainSink, scratch: std.mem.Allocator, path: []const u8, tree: *const Ast, classed: config.Classed) !void {
+        try s.search.file(s.arena, scratch, path, tree, classed.class, s.classes);
     }
 };
 
@@ -341,27 +376,31 @@ const ReportSink = struct {
     rows: *std.ArrayList(report.Row),
     arena: std.mem.Allocator,
 
-    pub fn file(s: ReportSink, scratch: std.mem.Allocator, path: []const u8, tree: *const Ast, class: Class) !void {
-        try measure.file(s.arena, scratch, path, tree, class, s.rows);
+    pub fn file(s: ReportSink, scratch: std.mem.Allocator, path: []const u8, tree: *const Ast, classed: config.Classed) !void {
+        try measure.file(s.arena, scratch, path, tree, classed.class, s.rows);
     }
 };
 
 /// What `readFiles` hands each tree to for --files: what each file
-/// imports.
+/// imports, and its class.
 const FanSink = struct {
     files: *std.ArrayList(fan.File),
     arena: std.mem.Allocator,
 
-    pub fn file(s: FanSink, _: std.mem.Allocator, path: []const u8, tree: *const Ast, _: Class) !void {
-        try s.files.append(s.arena, try fan.of(s.arena, path, tree));
+    pub fn file(s: FanSink, _: std.mem.Allocator, path: []const u8, tree: *const Ast, classed: config.Classed) !void {
+        var f = try fan.of(s.arena, path, tree);
+        f.class = classed.class;
+        f.glob = classed.glob;
+        try s.files.append(s.arena, f);
     }
 };
 
-/// `--files`: each file's imports, and the files read that import it.
+/// `--files`: each file's imports, the files read that import it, and its
+/// class.
 fn runFiles(c: Context) !u8 {
     const files = try collectFiles(c, &.{});
     var found: std.ArrayList(fan.File) = .empty;
-    _ = try readFiles(c, files, FanSink{ .files = &found, .arena = c.arena });
+    try warnUnclassed(c, (try readFiles(c, files, FanSink{ .files = &found, .arena = c.arena })).unclassed);
     try fan.link(c.arena, found.items);
     fan.sort(found.items);
     const status = c.exitStatus(0);
@@ -373,7 +412,7 @@ fn runFiles(c: Context) !u8 {
 fn runExplain(c: Context) !u8 {
     var search: explain.Search = try .init(c.arena, c.run.explain);
     const files = try collectFiles(c, search.selectors);
-    _ = try readFiles(c, files, ExplainSink{ .search = &search, .arena = c.arena, .classes = c.settings.classes });
+    try warnUnclassed(c, (try readFiles(c, files, ExplainSink{ .search = &search, .arena = c.arena, .classes = c.settings.classes })).unclassed);
     const found = try search.results(c.arena, c.said);
     const status = c.exitStatus(0);
     explain.write(c.out(), c.run.format, found.explanations, .{ .version = build_options.version, .messages = c.said.items.items }) catch |err| return closedEarly(err, c.stdout_writer, status);
@@ -396,19 +435,25 @@ fn runReport(c: Context) !u8 {
     const measured = try readFiles(c, files, ReportSink{ .rows = &rows, .arena = c.arena });
     try report.rank(c.arena, rows.items, c.settings.classes);
     const read: baseline.Read = .{ .files = files, .roots = try cleaned(c.arena, c.run.paths) };
-    const check = try runCheck(c, rows.items, held, read);
+    var check = try runCheck(c, rows.items, held, read);
+    // --check fails a file in no class; every other run warns of it.
+    if (c.run.check) {
+        check.unclassed = measured.unclassed;
+        check.failed = check.failed or measured.unclassed.len > 0;
+    } else try warnUnclassed(c, measured.unclassed);
     const listed = try report.list(c.arena, rows.items, try listing(c, rows.items, picks, files, check));
     if (c.run.update_baseline) try updateBaseline(c, rows.items, read);
     const status = c.exitStatus(if (check.failed) 1 else 0);
     report.write(c.out(), c.run.format, rows.items, listed, .{
         .version = build_options.version,
-        .files = measured,
+        .files = measured.files,
         .classes = c.settings.classes,
         .check = check,
         .messages = c.said.items.items,
     }) catch |err| return closedEarly(err, c.stdout_writer, status);
     c.out().flush() catch |err| return closedEarly(err, c.stdout_writer, status);
-    if (check.failed) sayFailures(check);
+    if (check.failures.len > 0) sayFailures(check);
+    if (check.unclassed.len > 0) sayUnclassed(c.configPath(), check.unclassed);
     return status;
 }
 
@@ -473,10 +518,13 @@ fn runDiff(c: Context, ref: []const u8) !u8 {
     var file_arena: std.heap.ArenaAllocator = .init(c.gpa);
     defer file_arena.deinit();
     var collected: diff.Collected = .{};
+    var unclassed: std.ArrayList([]const u8) = .empty;
     for (changed) |file| {
         _ = file_arena.reset(.retain_capacity);
         try diffFile(c, file_arena.allocator(), ref, file, &collected);
+        if (file.status != .removed and c.settings.unclassed(file.path)) try unclassed.append(c.arena, file.path);
     }
+    try warnUnclassed(c, unclassed.items);
     const touched = try diff.pairMoves(c.arena, &collected);
     diff.sort(touched);
     const status = c.exitStatus(0);
@@ -658,6 +706,17 @@ fn cleaned(arena: std.mem.Allocator, paths: []const []const u8) ![]const []const
     const out = try arena.alloc([]const u8, paths.len);
     for (paths, out) |path, *clean| clean.* = try std.fs.path.resolveAlloc(arena, &.{path});
     return out;
+}
+
+/// Says on stderr, after the report, each file --check fails for being in
+/// no class, which the `.normal` list of the configuration at
+/// `config_path` asks of each.
+fn sayUnclassed(config_path: []const u8, unclassed: []const []const u8) void {
+    const one = unclassed.len == 1;
+    std.debug.print("gnarl: --check: {d} file{s} in no class ({s} has a .normal list, and no glob of .hot, .normal or .cold matches {s}); add {s} to the class it belongs in:\n", .{
+        unclassed.len, plural(unclassed.len), config_path, if (one) "it" else "them", if (one) "it" else "each",
+    });
+    for (unclassed) |path| std.debug.print("  {s}\n", .{path});
 }
 
 /// Says on stderr what fails --check, after the report: each function and
@@ -1566,6 +1625,94 @@ test "--check fails on a critical threshold, by the class complexity.zon gives t
     }
 }
 
+test "a .normal list: --check fails a file no glob classes, naming it, and the rest warn" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "src/cli");
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/scan.zig", .data = "fn scan() void {}\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/cli/args.zig", .data = "fn args() void {}\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/fresh.zig", .data = "fn fresh() void {}\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "build.zig", .data = "fn build() void {}\n" });
+    const sep = std.fs.path.sep_str;
+    const fresh = "src" ++ sep ++ "fresh.zig";
+
+    // No .normal list: a file no glob matches is normal, and nothing is
+    // said of it, as before.
+    try tmp.dir.writeFile(io, .{ .sub_path = "complexity.zon", .data = ".{ .hot = .{\"src/scan.zig\"}, .cold = .{\"build.zig\"} }\n" });
+    try expectRun(tmp.dir, &.{ "--check", "." }, 0, "", "");
+    const all_before = try runGnarl(tmp.dir, &.{ "--all", "." });
+    defer gpa.free(all_before.stdout);
+    defer gpa.free(all_before.stderr);
+    try std.testing.expectEqualStrings("", all_before.stderr);
+
+    // With one, the file left off fails --check, named.
+    try tmp.dir.writeFile(io, .{ .sub_path = "complexity.zon", .data = ".{ .hot = .{\"src/scan.zig\"}, .normal = .{\"src/cli/**\"}, .cold = .{\"build.zig\"} }\n" });
+    {
+        const result = try runGnarl(tmp.dir, &.{ "--check", "." });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+        try std.testing.expectEqualStrings("gnarl: --check: 1 file in no class (complexity.zon has a .normal list, and no glob of .hot, .normal or .cold matches it); add it to the class it belongs in:\n  " ++ fresh ++ "\n", result.stderr);
+        try std.testing.expect(std.mem.startsWith(u8, result.stdout, "4 functions in 4 files: 0 over a critical threshold (!!)"));
+    }
+    // json says which, under check.
+    {
+        const result = try runGnarl(tmp.dir, &.{ "--check", "--json", "." });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+        const doc = try std.json.parseFromSlice(Document, gpa, result.stdout, .{});
+        defer doc.deinit();
+        try std.testing.expect(doc.value.check.failed);
+        try std.testing.expectEqual(0, doc.value.check.failures.len);
+        try std.testing.expectEqual(1, doc.value.check.unclassed.len);
+        try std.testing.expectEqualStrings(fresh, doc.value.check.unclassed[0]);
+        try std.testing.expectEqual(0, doc.value.warnings.len);
+    }
+    // Every other run says so and goes on, its report as it was.
+    const warned = "gnarl: complexity.zon: warning: 1 file read is in no class (no glob of .hot, .normal or .cold matches it): held to normal's limits for now, and --check fails it; add it to the class it belongs in\n  " ++ fresh ++ "\n";
+    try expectRun(tmp.dir, &.{ "--all", "." }, 0, all_before.stdout, warned);
+    {
+        const result = try runGnarl(tmp.dir, &.{ "--all", "--json", "." });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        const doc = try std.json.parseFromSlice(Document, gpa, result.stdout, .{});
+        defer doc.deinit();
+        try std.testing.expectEqual(0, doc.value.check.unclassed.len);
+        try std.testing.expectEqualStrings(fresh, doc.value.warnings[0].more[0]);
+    }
+    {
+        const result = try runGnarl(tmp.dir, &.{ "--explain", "scan", "." });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+        try std.testing.expectEqualStrings(warned, result.stderr);
+        try std.testing.expect(std.mem.startsWith(u8, result.stdout, "src" ++ sep ++ "scan.zig:1  scan  (hot code)\n"));
+    }
+    // --files shows each file's class and the glob that gave it.
+    try expectRun(tmp.dir, &.{ "--files", "." }, 0, "fan-out  fan-in  modules  class   glob          file\n" ++
+        "      0       0        0  cold    build.zig     build.zig\n" ++
+        "      0       0        0  normal  src/cli/**    src" ++ sep ++ "cli" ++ sep ++ "args.zig\n" ++
+        "      0       0        0  normal                " ++ fresh ++ "\n" ++
+        "      0       0        0  hot     src/scan.zig  src" ++ sep ++ "scan.zig\n" ++
+        "\n4 files read: 0 imports of files, 0 of modules, which gnarl does not follow (std, build options and named modules).\n", warned);
+
+    // Classed, it passes, saying nothing; an empty list asks it too.
+    try tmp.dir.writeFile(io, .{ .sub_path = "complexity.zon", .data = ".{ .hot = .{\"src/scan.zig\"}, .normal = .{ \"src/cli/**\", \"src/fresh.zig\" }, .cold = .{\"build.zig\"} }\n" });
+    try expectRun(tmp.dir, &.{ "--check", "." }, 0, "", "");
+    try tmp.dir.writeFile(io, .{ .sub_path = "complexity.zon", .data = ".{ .hot = .{\"src/**\"}, .normal = .{} }\n" });
+    try expectRun(tmp.dir, &.{ "--check", "src" }, 0, "", "");
+    {
+        const result = try runGnarl(tmp.dir, &.{ "--check", "." });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+        try std.testing.expect(std.mem.endsWith(u8, result.stderr, "add it to the class it belongs in:\n  build.zig\n"));
+    }
+}
+
 test "--explain: by path:line or by name; a name that fits none or several is an error" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -1626,7 +1773,7 @@ test "a configuration that cannot be used is an error, and nothing is measured" 
     try expectRun(tmp.dir, &.{ "--config=limits.zon", "." }, 2, "", "gnarl: limits.zon: thresholds.hot.lines: the warning limit, 9, is not below the critical one, 9\n");
     try expectRun(tmp.dir, &.{ "--config", "typo.zon", "." }, 2, "",
         \\gnarl: typo.zon:1:5: unexpected field 'hott'
-        \\gnarl: typo.zon:1:5: note: supported: 'gnarl', 'hot', 'cold', 'exclude', 'thresholds'
+        \\gnarl: typo.zon:1:5: note: supported: 'gnarl', 'hot', 'normal', 'cold', 'exclude', 'thresholds'
         \\
     );
 
@@ -1640,7 +1787,7 @@ test "a configuration that cannot be used is an error, and nothing is measured" 
     try std.testing.expectEqual(0, doc.value.functions.len);
     try std.testing.expectEqualStrings("unexpected field 'hott'", doc.value.errors[0].text);
     try std.testing.expectEqual(5, doc.value.errors[0].column.?);
-    try std.testing.expectEqualStrings("supported: 'gnarl', 'hot', 'cold', 'exclude', 'thresholds'", doc.value.notes[0].text);
+    try std.testing.expectEqualStrings("supported: 'gnarl', 'hot', 'normal', 'cold', 'exclude', 'thresholds'", doc.value.notes[0].text);
 }
 
 test "complexity.zon's .gnarl: a gnarl that counts otherwise will not --check, and warns on the rest" {

@@ -128,12 +128,14 @@ instantiated and with what, and what each `anytype` must provide.
 (fan-out), the files read that import it (fan-in), and the modules it
 imports (`std`, build options, named modules), which gnarl names but does
 not follow. A file many import is risky to change; one that imports many
-knows too much.
+knows too much. Each file's class is listed too, and the glob of
+`complexity.zon` that gave it, if one did
+([Limits by class of code](ci.md#limits-by-class-of-code)).
 
 ```console
 $ gnarl --files --top 3 .
-fan-out  fan-in  modules  file
-     27       0        4  src/main.zig
-     16       2        1  src/explain.zig
-      1      15        1  src/functions.zig
+fan-out  fan-in  modules  class   file
+     29       0        4  normal  src/main.zig
+     17       2        1  normal  src/explain.zig
+      1      16        1  normal  src/functions.zig
 ```

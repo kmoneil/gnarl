@@ -6,7 +6,9 @@
 //! `builtin`, `root`, a build option or a named module from build.zig)
 //! names a module, which the source alone cannot place: each is listed as
 //! a module, an import gnarl cannot follow, rather than left out of the
-//! count. Fan-in counts only the files read in the same run.
+//! count. Fan-in counts only the files read in the same run. Each file's
+//! class, and the glob of complexity.zon that gave it, are listed too, so
+//! a complexity.zon can be checked against the tree.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -19,10 +21,16 @@ const formats = @import("formats.zig");
 const messages = @import("messages.zig");
 const Message = messages.Message;
 const report = @import("report.zig");
+const Class = @import("thresholds.zig").Class;
 
 pub const File = struct {
     /// As gnarl prints paths: cleaned, relative to the current directory.
     path: []const u8,
+    /// Its class, test code in it aside.
+    class: Class = .normal,
+    /// The glob of complexity.zon that gave its class; null when none
+    /// matches it, and it is normal by default.
+    glob: ?[]const u8 = null,
     /// The files it imports, each once, sorted.
     imports: []const []const u8,
     /// The files read that import it, sorted. Set by `link`.
@@ -135,13 +143,7 @@ pub fn write(w: *Writer, format: report.Format, files: []const File, c: Context)
 
 fn writeTable(w: *Writer, format: report.Format, all: []const File, listed: []const File) Writer.Error!void {
     if (listed.len > 0) {
-        if (format == .md) {
-            try w.writeAll("| fan-out | fan-in | modules | file |\n| ---: | ---: | ---: | --- |\n");
-            for (listed) |f| try w.print("| {d} | {d} | {d} | `{s}` |\n", .{ f.fanOut(), f.fanIn(), f.modules.len, f.path });
-        } else {
-            try w.writeAll("fan-out  fan-in  modules  file\n");
-            for (listed) |f| try w.print("{d: >7}  {d: >6}  {d: >7}  {s}\n", .{ f.fanOut(), f.fanIn(), f.modules.len, f.path });
-        }
+        if (format == .md) try writeMarkdownRows(w, listed) else try writeTextRows(w, listed);
         try w.writeByte('\n');
     }
     var imports: usize = 0;
@@ -154,6 +156,41 @@ fn writeTable(w: *Writer, format: report.Format, all: []const File, listed: []co
         all.len, plural(all.len), imports, plural(imports), modules,
     });
     if (listed.len < all.len) try w.print("{d} more not listed: --top {d} keeps the most coupled.\n", .{ all.len - listed.len, listed.len });
+}
+
+/// The width of the glob column: 0 when no file listed has a glob, so
+/// the column is left out.
+fn globWidth(listed: []const File) usize {
+    var width: usize = 0;
+    for (listed) |f| if (f.glob) |g| {
+        width = @max(width, g.len, "glob".len);
+    };
+    return width;
+}
+
+fn writeTextRows(w: *Writer, listed: []const File) Writer.Error!void {
+    const width = globWidth(listed);
+    try w.writeAll("fan-out  fan-in  modules  class   ");
+    if (width > 0) try w.print("{[glob]s: <[width]}  ", .{ .glob = "glob", .width = width });
+    try w.writeAll("file\n");
+    for (listed) |f| {
+        try w.print("{d: >7}  {d: >6}  {d: >7}  {s: <6}  ", .{ f.fanOut(), f.fanIn(), f.modules.len, @tagName(f.class) });
+        if (width > 0) try w.print("{[glob]s: <[width]}  ", .{ .glob = f.glob orelse "", .width = width });
+        try w.print("{s}\n", .{f.path});
+    }
+}
+
+fn writeMarkdownRows(w: *Writer, listed: []const File) Writer.Error!void {
+    const globs = globWidth(listed) > 0;
+    try w.writeAll(if (globs)
+        "| fan-out | fan-in | modules | class | glob | file |\n| ---: | ---: | ---: | --- | --- | --- |\n"
+    else
+        "| fan-out | fan-in | modules | class | file |\n| ---: | ---: | ---: | --- | --- |\n");
+    for (listed) |f| {
+        try w.print("| {d} | {d} | {d} | {t} |", .{ f.fanOut(), f.fanIn(), f.modules.len, f.class });
+        if (globs) if (f.glob) |g| try w.print(" `{s}` |", .{g}) else try w.writeAll(" |");
+        try w.print(" `{s}` |\n", .{f.path});
+    }
 }
 
 fn plural(n: usize) []const u8 {
@@ -169,6 +206,8 @@ fn writeJson(w: *Writer, files: []const File, c: Context) Writer.Error!void {
         try w.writeAll(if (i == 0) "\n" else ",\n");
         try std.json.Stringify.value(.{
             .path = f.path,
+            .class = f.class,
+            .glob = f.glob,
             .fan_out = f.fanOut(),
             .fan_in = f.fanIn(),
             .imports = f.imports,
@@ -189,6 +228,8 @@ fn writeXml(w: *Writer, files: []const File, c: Context) Writer.Error!void {
     for (files) |f| {
         try w.writeAll("    <file");
         try formats.attr(w, "path", f.path);
+        try formats.attr(w, "class", @tagName(f.class));
+        if (f.glob) |g| try formats.attr(w, "glob", g);
         try formats.attrInt(w, "fan_out", f.fanOut());
         try formats.attrInt(w, "fan_in", f.fanIn());
         try w.writeAll(">\n");
@@ -204,9 +245,11 @@ fn writeXml(w: *Writer, files: []const File, c: Context) Writer.Error!void {
     try w.writeAll("  </files>\n</gnarl>\n");
 }
 
-pub const delimited_columns = [_][]const u8{ "path", "fan_out", "fan_in", "imports", "imported_by", "modules" };
+/// `class` and `glob` last, so no column of an earlier release moved.
+pub const delimited_columns = [_][]const u8{ "path", "fan_out", "fan_in", "imports", "imported_by", "modules", "class", "glob" };
 
-/// A header, then a row per file; each list separated by spaces.
+/// A header, then a row per file; each list separated by spaces, and an
+/// empty glob for none.
 fn writeDelimited(w: *Writer, kind: formats.Delimited, files: []const File) Writer.Error!void {
     try formats.header(w, kind, &delimited_columns);
     for (files) |f| {
@@ -219,6 +262,8 @@ fn writeDelimited(w: *Writer, kind: formats.Delimited, files: []const File) Writ
             for (@field(f, name), 0..) |item, i| joined.print("{s}{s}", .{ if (i == 0) "" else " ", item }) catch break;
             try formats.field(w, kind, false, joined.buffered());
         }
+        try formats.field(w, kind, false, @tagName(f.class));
+        try formats.field(w, kind, false, f.glob orelse "");
         try w.writeByte('\n');
     }
 }
@@ -263,7 +308,7 @@ test "link and sort: fan-in from the files read, the most coupled first" {
     var files = [_]File{
         .{ .path = "a.zig", .imports = &.{ "b.zig", "c.zig" }, .modules = &.{"std"} },
         .{ .path = "b.zig", .imports = &.{"c.zig"}, .modules = &.{} },
-        .{ .path = "c.zig", .imports = &.{"elsewhere.zig"}, .modules = &.{} },
+        .{ .path = "c.zig", .class = .hot, .glob = "c.zig", .imports = &.{"elsewhere.zig"}, .modules = &.{} },
     };
     try link(arena, &files);
     sort(&files);
@@ -277,14 +322,31 @@ test "link and sort: fan-in from the files read, the most coupled first" {
     var out: Writer.Allocating = .init(arena);
     try write(&out.writer, .text, &files, .{ .version = "0.0.0", .top = 2 });
     try std.testing.expectEqualStrings(
-        \\fan-out  fan-in  modules  file
-        \\      1       2        0  c.zig
-        \\      2       0        1  a.zig
+        \\fan-out  fan-in  modules  class   glob   file
+        \\      1       2        0  hot     c.zig  c.zig
+        \\      2       0        1  normal         a.zig
         \\
         \\3 files read: 4 imports of files, 1 of modules, which gnarl does not follow (std, build options and named modules).
         \\1 more not listed: --top 2 keeps the most coupled.
         \\
     , out.written());
+    // No file listed has a glob: no glob column.
+    var plain: Writer.Allocating = .init(arena);
+    try write(&plain.writer, .text, files[1..], .{ .version = "0.0.0" });
+    try std.testing.expect(std.mem.startsWith(u8, plain.written(),
+        \\fan-out  fan-in  modules  class   file
+        \\      2       0        1  normal  a.zig
+        \\
+    ));
+    var md: Writer.Allocating = .init(arena);
+    try write(&md.writer, .md, files[0..2], .{ .version = "0.0.0" });
+    try std.testing.expect(std.mem.startsWith(u8, md.written(),
+        \\| fan-out | fan-in | modules | class | glob | file |
+        \\| ---: | ---: | ---: | --- | --- | --- |
+        \\| 1 | 2 | 0 | hot | `c.zig` | `c.zig` |
+        \\| 2 | 0 | 1 | normal | | `a.zig` |
+        \\
+    ));
 
     for ([_]report.Format{ .csv, .tsv }) |format| {
         var table: Writer.Allocating = .init(arena);
@@ -292,9 +354,24 @@ test "link and sort: fan-in from the files read, the most coupled first" {
         const rows = try formats.readDelimited(arena, if (format == .csv) .csv else .tsv, table.written());
         try std.testing.expectEqual(4, rows.len);
         try std.testing.expectEqualStrings("a.zig b.zig", rows[1][4]);
+        try std.testing.expectEqualStrings("hot", rows[1][6]);
+        try std.testing.expectEqualStrings("c.zig", rows[1][7]);
+        try std.testing.expectEqualStrings("", rows[2][7]);
     }
     var xml: Writer.Allocating = .init(arena);
     try write(&xml.writer, .xml, &files, .{ .version = "0.0.0" });
     const doc = try formats.readXml(arena, xml.written());
-    try std.testing.expectEqualStrings("2", doc.child("files").?.children[0].get("fan_in").?);
+    const listed = doc.child("files").?.children;
+    try std.testing.expectEqualStrings("2", listed[0].get("fan_in").?);
+    try std.testing.expectEqualStrings("hot", listed[0].get("class").?);
+    try std.testing.expectEqualStrings("c.zig", listed[0].get("glob").?);
+    try std.testing.expectEqual(null, listed[1].get("glob"));
+
+    var json: Writer.Allocating = .init(arena);
+    try write(&json.writer, .json, &files, .{ .version = "0.0.0" });
+    const Doc = struct { files: []const struct { path: []const u8, class: Class, glob: ?[]const u8 } };
+    const read = try std.json.parseFromSliceLeaky(Doc, arena, json.written(), .{ .ignore_unknown_fields = true });
+    try std.testing.expectEqual(.hot, read.files[0].class);
+    try std.testing.expectEqualStrings("c.zig", read.files[0].glob.?);
+    try std.testing.expectEqual(null, read.files[1].glob);
 }

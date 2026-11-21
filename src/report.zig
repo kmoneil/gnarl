@@ -175,7 +175,7 @@ pub const Check = struct {
     /// Whether --check was given.
     asked: bool = false,
     /// Whether it fails the run: asked, and a function is over a critical
-    /// threshold.
+    /// threshold, or a file is in no class (`unclassed`).
     failed: bool = false,
     /// How many functions are over a critical threshold, asked or not.
     critical: usize = 0,
@@ -191,6 +191,9 @@ pub const Check = struct {
     unneeded: usize = 0,
     /// Baselined functions of a file read that are no longer there.
     gone: usize = 0,
+    /// The files read that no glob of complexity.zon matches, when its
+    /// `.normal` list asks that each be in a class: each fails it.
+    unclassed: []const []const u8 = &.{},
 };
 
 /// What a report says besides its rows.
@@ -257,31 +260,8 @@ fn writeXml(w: *Writer, rows: []const Row, listed: Listed, c: Context) Writer.Er
     try formats.attrInt(w, "past_top", listed.not_listed.past_top);
     try formats.attrInt(w, "not_selected", listed.not_listed.not_selected);
     try formats.attrInt(w, "not_failing", listed.not_listed.not_failing);
-    try w.writeAll("/>\n  <check");
-    try formats.attrBool(w, "asked", c.check.asked);
-    try formats.attrBool(w, "failed", c.check.failed);
-    try formats.attrInt(w, "critical", c.check.critical);
-    if (c.check.baseline) |path| try formats.attr(w, "baseline", path);
-    try formats.attrInt(w, "improved", c.check.improved);
-    try formats.attrInt(w, "unneeded", c.check.unneeded);
-    try formats.attrInt(w, "gone", c.check.gone);
-    if (c.check.failures.len == 0) {
-        try w.writeAll("/>\n");
-    } else {
-        try w.writeAll(">\n");
-        for (c.check.failures) |f| {
-            try w.writeAll("    <failure");
-            try formats.attr(w, "path", f.path);
-            try formats.attrInt(w, "line", f.line);
-            try formats.attr(w, "name", f.name);
-            try formats.attr(w, "metric", @tagName(f.metric));
-            try formats.attrInt(w, "value", f.value);
-            try formats.attrInt(w, "limit", f.limit);
-            if (f.baselined) |b| try formats.attrInt(w, "baselined", b);
-            try w.writeAll("/>\n");
-        }
-        try w.writeAll("  </check>\n");
-    }
+    try w.writeAll("/>\n");
+    try writeCheckXml(w, c.check);
     try writeThresholdsXml(w, c.classes);
     try messages.writeXml(w, c.messages);
     try w.writeAll("  <functions>\n");
@@ -313,6 +293,38 @@ fn writeXml(w: *Writer, rows: []const Row, listed: Listed, c: Context) Writer.Er
         try w.writeAll("    </function>\n");
     }
     try w.writeAll("  </functions>\n</gnarl>\n");
+}
+
+/// `<check>`: its counts as attributes, and an element for each failure
+/// and each file in no class.
+fn writeCheckXml(w: *Writer, check: Check) Writer.Error!void {
+    try w.writeAll("  <check");
+    try formats.attrBool(w, "asked", check.asked);
+    try formats.attrBool(w, "failed", check.failed);
+    try formats.attrInt(w, "critical", check.critical);
+    if (check.baseline) |path| try formats.attr(w, "baseline", path);
+    try formats.attrInt(w, "improved", check.improved);
+    try formats.attrInt(w, "unneeded", check.unneeded);
+    try formats.attrInt(w, "gone", check.gone);
+    if (check.failures.len == 0 and check.unclassed.len == 0) return w.writeAll("/>\n");
+    try w.writeAll(">\n");
+    for (check.failures) |f| {
+        try w.writeAll("    <failure");
+        try formats.attr(w, "path", f.path);
+        try formats.attrInt(w, "line", f.line);
+        try formats.attr(w, "name", f.name);
+        try formats.attr(w, "metric", @tagName(f.metric));
+        try formats.attrInt(w, "value", f.value);
+        try formats.attrInt(w, "limit", f.limit);
+        if (f.baselined) |b| try formats.attrInt(w, "baselined", b);
+        try w.writeAll("/>\n");
+    }
+    for (check.unclassed) |path| {
+        try w.writeAll("    <unclassed");
+        try formats.attr(w, "path", path);
+        try w.writeAll("/>\n");
+    }
+    try w.writeAll("  </check>\n");
 }
 
 pub const delimited_columns = [_][]const u8{
@@ -725,6 +737,7 @@ test "write: JSON" {
     try std.testing.expectEqualStrings("complexity.baseline", doc.check.baseline.?);
     try std.testing.expectEqual(16, doc.check.failures[0].value);
     try std.testing.expectEqual(null, doc.check.failures[0].baselined);
+    try std.testing.expectEqualStrings("tools/gen.zig", doc.check.unclassed[0]);
     try std.testing.expectEqualStrings("bad.zig", doc.errors[0].path);
     try std.testing.expectEqual(3, doc.errors[0].line.?);
     try std.testing.expectEqual(null, doc.notes[0].line);
@@ -760,6 +773,7 @@ fn sampleContext() Context {
             .critical = 1,
             .baseline = "complexity.baseline",
             .failures = &.{.{ .path = "src/b.zig", .line = 120, .name = "Parser.next", .metric = .cyclomatic, .value = 16, .limit = 15, .baselined = null }},
+            .unclassed = &.{"tools/gen.zig"},
         },
         .messages = &.{
             .{ .level = .@"error", .path = "bad.zig", .line = 3, .column = 7, .text = "expected ';' after statement" },
@@ -783,6 +797,8 @@ test "write: xml says what json does, and reads back" {
     try std.testing.expectEqualStrings("2", doc.child("not_listed").?.get("within_limits").?);
     try std.testing.expectEqualStrings("true", doc.child("check").?.get("failed").?);
     try std.testing.expectEqualStrings("15", doc.child("check").?.children[0].get("limit").?);
+    try std.testing.expectEqualStrings("unclassed", doc.child("check").?.children[1].name);
+    try std.testing.expectEqualStrings("tools/gen.zig", doc.child("check").?.children[1].get("path").?);
     try std.testing.expectEqual(4, doc.child("thresholds").?.children.len);
     try std.testing.expectEqualStrings("3", doc.child("errors").?.children[0].get("line").?);
     try std.testing.expectEqualStrings("a.zig:1  f", doc.child("notes").?.children[0].children[0].get("text").?);

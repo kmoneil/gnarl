@@ -4,6 +4,7 @@
 //!     .{
 //!         .gnarl = "0.7.0",
 //!         .hot = .{ "src/scan.zig", "src/parse/**" },
+//!         .normal = .{"src/**"},
 //!         .cold = .{ "build.zig", "test/**" },
 //!         .exclude = .{ "test/fixtures", "**/*_gen.zig" },
 //!         .thresholds = .{
@@ -15,8 +16,12 @@
 //!
 //! Every field may be left out. The globs (see glob.zig) are matched
 //! against paths as gnarl prints them, relative to the current directory.
-//! A path both a hot and a cold glob match is hot; one no glob matches is
-//! normal. A metric named under a class replaces both its limits there; a
+//! A path both a hot and a cold glob match is hot; one a `.normal` glob
+//! matches, and no hot or cold one, is normal; one no glob matches is
+//! normal too. With a `.normal` list, even `.{}`, every file is to be
+//! named: one no glob matches is unclassed, which `--check` fails and
+//! every other run warns of, so a new file left off the lists is seen.
+//! A metric named under a class replaces both its limits there; a
 //! metric not named keeps the class's default. Test code (test_code.zig)
 //! is held to `.tests`, whatever its file's class. What an `.exclude` glob
 //! matches, or what is inside it, is not read when gnarl walks a directory
@@ -44,21 +49,47 @@ pub const Config = struct {
     /// The release the code is judged by, if the file names one.
     gnarl: ?std.SemanticVersion = null,
     hot: []const []const u8 = &.{},
+    /// Null when the file has no `.normal` list: then a file no glob
+    /// matches is normal, and nothing is said of it.
+    normal: ?[]const []const u8 = null,
     cold: []const []const u8 = &.{},
     exclude: []const []const u8 = &.{},
     classes: Classes = .defaults,
 
-    pub fn classOf(c: Config, path: []const u8) Class {
-        for (c.hot) |pattern| if (glob.match(pattern, path)) return .hot;
-        for (c.cold) |pattern| if (glob.match(pattern, path)) return .cold;
-        return .normal;
+    /// The class of the file at `path` and the glob that gave it: the
+    /// first hot glob that matches, else the first cold one, else the
+    /// first normal one; normal with no glob when none does.
+    pub fn classify(c: Config, path: []const u8) Classed {
+        inline for (.{ .{ "hot", Class.hot }, .{ "cold", Class.cold } }) |pair| {
+            for (@field(c, pair[0])) |pattern| if (glob.match(pattern, path)) return .{ .class = pair[1], .glob = pattern };
+        }
+        for (c.normal orelse &.{}) |pattern| if (glob.match(pattern, path)) return .{ .class = .normal, .glob = pattern };
+        return .{ .class = .normal };
     }
+
+    pub fn classOf(c: Config, path: []const u8) Class {
+        return c.classify(path).class;
+    }
+
+    /// Whether the file at `path` is in no class when the file asks that
+    /// every one be in one: it has a `.normal` list, and no glob matches.
+    pub fn unclassed(c: Config, path: []const u8) bool {
+        return c.normal != null and c.classify(path).glob == null;
+    }
+};
+
+/// A file's class, and the glob of complexity.zon that gave it.
+pub const Classed = struct {
+    class: Class,
+    /// Null when no glob matches the file: it is normal by default.
+    glob: ?[]const u8 = null,
 };
 
 /// The file as written.
 const File = struct {
     gnarl: ?[]const u8 = null,
     hot: []const []const u8 = &.{},
+    normal: ?[]const []const u8 = null,
     cold: []const []const u8 = &.{},
     exclude: []const []const u8 = &.{},
     thresholds: struct {
@@ -91,7 +122,7 @@ pub fn parse(
     problem: *Problem,
 ) error{ OutOfMemory, ParseZon, Invalid }!Config {
     const file = try std.zon.parse.fromSlice(File, .{ .gpa = gpa, .arena = arena, .source = source, .diagnostics = diagnostics });
-    var config: Config = .{ .hot = file.hot, .cold = file.cold, .exclude = file.exclude };
+    var config: Config = .{ .hot = file.hot, .normal = file.normal, .cold = file.cold, .exclude = file.exclude };
     config.gnarl = try release(arena, file.gnarl, problem);
     inline for (comptime std.enums.values(Class)) |class| {
         const overrides = @field(file.thresholds, @tagName(class));
@@ -151,6 +182,39 @@ test "globs give the classes; hot wins over cold" {
     try std.testing.expectEqual(.cold, config.classOf("src/other.zig"));
     try std.testing.expectEqual(.cold, config.classOf("build.zig"));
     try std.testing.expectEqual(.normal, config.classOf("tools/gen.zig"));
+    // No .normal list: a file no glob matches is normal, and not unclassed.
+    try std.testing.expectEqual(null, config.classify("tools/gen.zig").glob);
+    try std.testing.expect(!config.unclassed("tools/gen.zig"));
+}
+
+test "a .normal list: normal after hot and cold, and a file no glob matches is unclassed" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var diagnostics: std.zon.parse.Diagnostics = undefined;
+    var problem: Problem = undefined;
+    const config = try parse(std.testing.allocator, arena,
+        \\.{
+        \\    .hot = .{ "src/scan.zig" },
+        \\    .normal = .{ "src/**", "build.zig" },
+        \\    .cold = .{ "build.zig", "tools/**" },
+        \\}
+    , &diagnostics, &problem);
+    try std.testing.expectEqualDeep(Classed{ .class = .hot, .glob = "src/scan.zig" }, config.classify("src/scan.zig"));
+    try std.testing.expectEqualDeep(Classed{ .class = .normal, .glob = "src/**" }, config.classify("src/cli/args.zig"));
+    // Cold before normal, as hot before both.
+    try std.testing.expectEqualDeep(Classed{ .class = .cold, .glob = "build.zig" }, config.classify("build.zig"));
+    try std.testing.expectEqualDeep(Classed{ .class = .cold, .glob = "tools/**" }, config.classify("tools/gen.zig"));
+    // Matched by nothing: held to normal's limits, and unclassed.
+    try std.testing.expectEqualDeep(Classed{ .class = .normal }, config.classify("bench/run.zig"));
+    try std.testing.expect(config.unclassed("bench/run.zig"));
+    try std.testing.expect(!config.unclassed("src/scan.zig"));
+    try std.testing.expect(!config.unclassed("build.zig"));
+
+    // An empty list asks it too: every file hot or cold.
+    const empty = try parse(std.testing.allocator, arena, ".{ .hot = .{\"a.zig\"}, .normal = .{} }", &diagnostics, &problem);
+    try std.testing.expect(empty.unclassed("b.zig"));
+    try std.testing.expect(!empty.unclassed("a.zig"));
 }
 
 test "exclude: globs, read as written" {
