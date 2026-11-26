@@ -4,8 +4,10 @@
 //! Counted, each where it is: a `comptime` block or expression, an
 //! `inline for` or `inline while`, an `inline` switch prong, a reflection
 //! builtin (`@typeInfo`, `@Type`, `@hasDecl`, `@hasField`, `@FieldType`),
-//! a `comptime` parameter and an `anytype` parameter; and whether the
-//! function returns a type, whose methods are then measured on their own.
+//! a `comptime` parameter and an `anytype` parameter; each decision made at
+//! compile time outside comptime code (comptime_known.zig), as `comptime
+//! if`, `comptime switch`, `comptime and`; and whether the function
+//! returns a type, whose methods are then measured on their own.
 //!
 //! Not seen from the source, and said rather than left out: the members of
 //! an inferred error set (`!T`), how many times a generic function (one
@@ -24,6 +26,7 @@ const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
 const children = @import("children.zig");
+const comptime_known = @import("comptime_known.zig");
 const functions = @import("functions.zig");
 
 pub const Item = struct {
@@ -58,6 +61,7 @@ pub fn of(arena: Allocator, tree: *const Ast, function: functions.Function) Allo
         if (inferredErrorSet(tree, proto)) try unknown.insert(arena, 0, "the members of its inferred error set");
     }
     try body(arena, tree, function.node, &items);
+    try decisions(arena, tree, function.node, &items);
     std.mem.sort(Item, items.items, {}, before);
     return .{ .items = items.items, .returns_type = returns_type, .unknown = unknown.items };
 }
@@ -93,6 +97,28 @@ fn body(arena: Allocator, tree: *const Ast, function: Node.Index, items: *std.Ar
         }
         if (constructOf(tree, node)) |item| try items.append(arena, item);
         try children.appendCode(arena, tree, node, &stack);
+    }
+}
+
+/// Appends each decision decided at compile time by what it decides on or
+/// by its `@compileError`: `comptime if`, `comptime and`. One in comptime
+/// code is not listed again, as its `comptime`, or the type the function
+/// returns, says it; but an assertion is, as it is one wherever it is.
+fn decisions(arena: Allocator, tree: *const Ast, function: Node.Index, items: *std.ArrayList(Item)) Allocator.Error!void {
+    const decided = try comptime_known.of(arena, tree, function);
+    var it = decided.whys.iterator();
+    while (it.next()) |entry| {
+        switch (tree.nodeTag(entry.key_ptr.*)) {
+            // A prong answers as its switch.
+            .switch_case_one, .switch_case_inline_one, .switch_case, .switch_case_inline => continue,
+            else => {},
+        }
+        switch (entry.value_ptr.*) {
+            .in_comptime, .in_condition => continue,
+            .known, .forced, .assertion => {},
+        }
+        const token = tree.nodeMainToken(entry.key_ptr.*);
+        try items.append(arena, .{ .token = token, .construct = try std.mem.concat(arena, u8, &.{ "comptime ", tree.tokenSlice(token) }) });
     }
 }
 
@@ -158,6 +184,10 @@ test "the tally: each construct where it is, and what the source cannot show" {
         \\fn plain(x: u8) error{Bad}!u8 {
         \\    return x;
         \\}
+        \\fn pick(comptime T: type, x: T) T {
+        \\    if (@sizeOf(T) > 8) @compileError("too big");
+        \\    return if (T == u8 and x > 0) x else 0;
+        \\}
     ;
     var tree = try Ast.parse(arena, source, .{});
     try std.testing.expectEqual(0, tree.errors.len);
@@ -173,12 +203,15 @@ test "the tally: each construct where it is, and what the source cannot show" {
     }
     // get, inside the struct Wrap returns, has its own tally: Wrap's does
     // not hold its inline while. The struct's @typeInfo is the type's, in
-    // neither. plain's error set is written out.
+    // neither. plain's error set is written out. pick's assertion is
+    // decided at compile time, and its and; the if on x is not. An
+    // assertion is listed in comptime code too, as Wrap's is.
     try std.testing.expectEqualStrings(
         \\Wrap, returns a type
         \\  1:9 comptime T
         \\  1:30 anytype w
         \\  2:5 comptime
+        \\  3:9 comptime if
         \\  3:13 @typeInfo
         \\  5:5 inline for
         \\  5:17 @typeInfo
@@ -193,6 +226,11 @@ test "the tally: each construct where it is, and what the source cannot show" {
         \\  unknown: how many times it is instantiated, and with what
         \\  unknown: what `r` must provide
         \\plain
+        \\pick
+        \\  23:9 comptime T
+        \\  24:5 comptime if
+        \\  25:24 comptime and
+        \\  unknown: how many times it is instantiated, and with what
         \\
     , got.items);
 }

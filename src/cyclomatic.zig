@@ -13,6 +13,12 @@
 //! a `catch` or `orelse` with no real handler: `catch unreachable`, `catch
 //! {}`, and `orelse unreachable`, which is `.?`.
 //!
+//! Nor does a decision made at compile time, which goes the same way in
+//! any one instantiation: one in comptime code or in a function that
+//! returns a type, a compile-time assertion (`if (...) @compileError(...)`),
+//! and an `if`, `switch`, `and`, `or`, `orelse` or `catch` on what is known
+//! at compile time. comptime_known.zig says which are.
+//!
 //! A function declared in a container inside this one is counted on its
 //! own, and adds nothing here. Nor does a container the function returns,
 //! as `return struct {...};`: it is the type the function makes, not code
@@ -24,6 +30,7 @@ const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
 const children = @import("children.zig");
+const comptime_known = @import("comptime_known.zig");
 
 /// The cyclomatic complexity of `function`, a `fn_decl` or `test_decl`.
 /// The working memory is allocated with `arena`.
@@ -64,39 +71,50 @@ fn walk(arena: Allocator, tree: *const Ast, function: Node.Index, sink: ?*std.Ar
     // The ifs that are another if's else, which an explanation calls
     // `else if`. An if is visited before its else.
     var else_ifs: std.AutoHashMapUnmanaged(Node.Index, void) = .empty;
+    const decided = try comptime_known.of(arena, tree, function);
     try children.appendCode(arena, tree, function, &stack);
     while (stack.pop()) |node| {
         switch (tree.nodeTag(node)) {
             .fn_decl, .test_decl => continue,
             else => {},
         }
-        const adds = ways(tree, node);
+        const why = decided.get(node);
+        const adds = if (why == null) ways(tree, node) else 0;
         total += adds;
-        if (sink) |branches| try note(arena, tree, node, adds, &else_ifs, branches);
+        if (sink) |branches| try note(arena, tree, node, why, &else_ifs, branches);
         try children.appendCode(arena, tree, node, &stack);
     }
     return total;
 }
 
 /// Appends what `node` is to `branches`, if it is a construct worth naming.
+/// `decided` is why it is decided at compile time, if it is.
 fn note(
     arena: Allocator,
     tree: *const Ast,
     node: Node.Index,
-    adds: u32,
+    decided: ?comptime_known.Why,
     else_ifs: *std.AutoHashMapUnmanaged(Node.Index, void),
     branches: *std.ArrayList(Branch),
 ) Allocator.Error!void {
-    var branch: Branch = switch (tree.nodeTag(node)) {
+    const tag = tree.nodeTag(node);
+    const adds = if (decided == null) ways(tree, node) else 0;
+    var branch: Branch = switch (tag) {
         .if_simple, .@"if" => try ifBranch(arena, tree, node, else_ifs),
         .switch_case_one,
         .switch_case_inline_one,
         .switch_case,
         .switch_case_inline,
-        => try prongBranch(arena, tree, node, adds),
+        // A decided switch names itself, not each prong.
+        => if (decided != null) return else try prongBranch(arena, tree, node, adds),
+        .@"switch", .switch_comma => if (decided != null) .{ .token = tree.nodeMainToken(node), .construct = "switch", .adds = 0 } else return,
         else => plainBranch(tree, node, adds) orelse return,
     };
     branch.adds = adds;
+    // What adds nothing anyway, as a `catch {}` does, keeps its own reason.
+    if (decided) |why| if (branch.why.len == 0 or ways(tree, node) > 0) {
+        branch.why = why.text(tag);
+    };
     try branches.append(arena, branch);
 }
 
@@ -510,7 +528,7 @@ test "labeled blocks, break and continue add nothing" {
     );
 }
 
-test "defer, errdefer and comptime code count as any other; errdefer itself nothing" {
+test "defer and errdefer code count as any other, errdefer itself nothing; comptime code nothing" {
     try expectCounts(
         \\fn deferred(c: bool) !void {
         \\    defer if (c) a();
@@ -520,8 +538,66 @@ test "defer, errdefer and comptime code count as any other; errdefer itself noth
         \\    }
         \\}
     ,
-        // 1 + if + if.
-        \\deferred 3
+        // 1 + the defer's if; the comptime block's is decided at compile
+        // time.
+        \\deferred 2
+        \\
+    );
+}
+
+test "a decision made at compile time adds nothing; one at run time beside it still does" {
+    try expectCounts(
+        \\const Options = struct { optional: bool = false, strict: bool = false };
+        \\fn argument(comptime o: Options, comptime T: type, values: []const u32, comptime n: usize) ?T {
+        \\    if (o.strict) {
+        \\        if (@typeInfo(T) != .int) @compileError("a strict argument is an integer");
+        \\    }
+        \\    const v: ?u32 = if (n < values.len) values[n] else null;
+        \\    if (o.optional) {
+        \\        if (@typeInfo(T) != .optional and @typeInfo(T) != .int) @compileError("take it as an optional");
+        \\        if (v == null) return null;
+        \\    }
+        \\    if (T == u32) return v;
+        \\    return @intCast(v orelse 0);
+        \\}
+        \\fn write(w: *Writer, value: anytype) !void {
+        \\    switch (@typeInfo(@TypeOf(value))) {
+        \\        .int => try w.printInt(value),
+        \\        .bool => try w.writeAll(if (value) "true" else "false"),
+        \\        .optional => if (value) |v| try write(w, v) else try w.writeAll("null"),
+        \\        else => @compileError("no"),
+        \\    }
+        \\}
+        \\fn both(comptime safe: bool, x: u8) bool {
+        \\    return safe and x > 0 or x == 9;
+        \\}
+    ,
+        // argument: 1 + the ifs at run time on n and v + orelse; the four on
+        // o and T decide at compile time. write: 1 + the if on a bool
+        // value + the if on an optional one; the switch on its type, none.
+        // both: 1 + or; the and has a side known.
+        \\argument 4
+        \\write 3
+        \\both 2
+        \\
+    );
+}
+
+test "explain: a decision made at compile time, and why it adds nothing" {
+    try expectBranches(
+        \\fn f(comptime T: type, x: u8) u8 {
+        \\    if (@sizeOf(T) > 8) @compileError("too big");
+        \\    if (T == u8 and x > 0) return 1;
+        \\    return switch (@typeInfo(T)) {
+        \\        .int => 1,
+        \\        else => 0,
+        \\    };
+        \\}
+    ,
+        \\2:5 if 0 a compile-time assertion: its body is only @compileError
+        \\3:5 if 1
+        \\3:17 and 0 a side is known at compile time: at most the other is decided at run time
+        \\4:12 switch 0 its operand is known at compile time: one prong in each instantiation
         \\
     );
 }
@@ -545,7 +621,7 @@ test "a function declared inside counts on its own, not in the one around it" {
     );
 }
 
-test "a container the function returns adds nothing; what comes before it counts" {
+test "a function that returns a type is 1, and the container it returns is the type's" {
     try expectCounts(
         \\fn Ring(comptime T: type, comptime n: usize) type {
         \\    if (n == 0 or n > 64) @compileError("1 to 64 items");
@@ -562,9 +638,10 @@ test "a container the function returns adds nothing; what comes before it counts
         \\    };
         \\}
     ,
-        // Ring: 1 + if + or; the struct's if, and, for and if are the
-        // type's. next: 1 + if.
-        \\Ring 3
+        // Ring: 1; it runs only at compile time, so its if and or are
+        // decided then, and the struct's if, and, for and if are the
+        // type's. next: 1 + if, on i, at run time.
+        \\Ring 1
         \\Ring.next 2
         \\
     );

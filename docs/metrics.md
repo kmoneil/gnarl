@@ -31,6 +31,22 @@ branch already counted; an `else`; a labeled `break` or `continue`; or a
 `catch unreachable`, `catch {}` or `orelse unreachable`, which have no
 other path.
 
+Nor for a decision made at compile time, which goes one way in each
+instantiation: one in comptime code (a `comptime` block, a container's
+declarations, a function that returns a type); a compile-time assertion
+(an `if` with no `else` whose body is only `@compileError`, or an
+`orelse` or `catch` whose handler is); an `if` or `switch` with a branch
+that is only `@compileError`; and an `if`, `switch`, `orelse` or `catch`
+on what is known, or an `and` or `or` with a side known. Known, from the
+source alone: a literal, a type, a `comptime` or `type` parameter and
+its fields, a local `const` of what is known, an `inline for`'s capture
+of it and an `inline` prong's tag, a container's `const` (not a `var`),
+`@import("builtin")`, the reflection builtins (`@typeInfo`, `@sizeOf`,
+`@hasDecl`), a comparison with a type, and operators of what is known.
+Not known: a call, and what else is read through another file's
+namespace (`std.debug.runtime_safety`), which may be a `var`.
+`--explain` names each decision made at compile time, and why.
+
 Cognitive complexity is how hard the function is to follow. A structure
 costs once however many ways it branches, and more the deeper it sits:
 an `if`, `while`, `for`, `switch`, or a `catch` or `orelse` whose handler
@@ -41,9 +57,11 @@ an `if` whose branches are both expressions. Each run of `and` or of
 handler, a labeled block used as a value, a `return` inside a loop or a
 labeled `switch`, a labeled `break` or `continue` that ends a loop or
 block on its way, and an `errdefer`. Nothing for a `try`, a `defer`, a
-capture or a guard clause's `return`. `--explain` shows each cost a
-function was charged and why, and the table below is checked against
-gnarl itself.
+capture, a guard clause's `return` or a compile-time assertion. An `if`
+or `switch` decided at compile time costs as any other but opens no
+level: in any one instantiation, what it holds is not nested.
+`--explain` shows each cost a function was charged and why, and the
+table below is checked against gnarl itself.
 
 | Code | cyclomatic | cognitive |
 | --- | ---: | ---: |
@@ -54,6 +72,7 @@ gnarl itself.
 | `fn f(a: bool, b: bool, c: bool) bool { return a and b and c; }` | 3 | 1 |
 | `fn f(xs: []const u8) ?u8 { for (xs) \|x\| { if (x == 0) return x; } return null; }` | 3 | 4 |
 | `fn f() !void { errdefer undo(); try work(); }` | 1 | 1 |
+| `fn f(comptime T: type, x: T) bool { if (@sizeOf(T) > 8) @compileError("big"); if (T == u8) { if (x > 0) return true; } return false; }` | 2 | 2 |
 
 Nesting depth is how many levels deep the code goes. An `if`, `while`,
 `for` or `switch` opens a level for its branches, as do a labeled block,
@@ -88,7 +107,8 @@ generic type such as `F` does, is the type it makes, not code it runs:
 like a container at the top of a file, it is in no function's numbers.
 It opens no level, nothing in it counts, and its methods are measured on
 their own. What the function does before it returns, such as checking
-its parameters, counts as any code.
+its parameters, runs only at compile time: no decision there is a path,
+and in cognitive complexity none opens a level.
 
 Logical lines are the lines from the signature to the closing brace that
 hold code: not a blank line, a comment-only line, or a line of nothing
@@ -117,7 +137,8 @@ held to, are on [Cognitive complexity](cognitive.md).
 `--explain` tallies what of a function runs at compile time: each
 `comptime` block or expression, `inline` loop or prong, reflection builtin
 (`@typeInfo`, `@Type`, `@hasDecl`, `@hasField`, `@FieldType`), comptime
-and `anytype` parameter, and whether it returns a type. What the source
+and `anytype` parameter, decision made at compile time (`comptime if`,
+`comptime and`), and whether it returns a type. What the source
 alone cannot show it names as unknown rather than leaving out: the
 members of an inferred error set, how many times a generic function is
 instantiated and with what, and what each `anytype` must provide.

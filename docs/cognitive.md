@@ -31,12 +31,14 @@ A function starts at 0.
 | a `return` inside a loop or a labeled `switch` | 1 |
 | a `break` or `continue` that jumps past a loop, a labeled `switch` or a labeled block | 1 |
 | an `errdefer` | 1 |
+| a compile-time assertion: an `if` with no `else` whose body is only `@compileError` | 0 |
 | `try`, a capture, a plain block, `defer`, a `break` or `continue` past nothing, a call | 0 |
 
 These open a level for what is inside them: the branches of an `if`
 (each `else if` and `else` on the `if`'s own level), a loop's body and
 `else`, a `switch`'s prongs, a `catch` or `orelse` handler that is a
-block, and a labeled block used as a value. Nothing else does.
+block, and a labeled block used as a value. Nothing else does, and an
+`if` or `switch` decided at compile time does not either.
 
 A function declared inside another, in a container in its body, is
 measured on its own, starting at 0; it adds nothing to the one around it.
@@ -416,18 +418,19 @@ A function that returns a type is how Zig writes a generic type. The
 container it returns is the type it makes, not code it runs: like a
 container at the top of a file, nothing in it costs any function
 anything, and its methods are measured on their own. What the function
-does before it returns, such as checking its parameters, costs as any
-code does.
+does before it returns runs only at compile time, and costs as code
+decided then does (the next section).
 
 ```zig
 fn Stack(comptime T: type, comptime capacity: usize) type {
-    if (capacity == 0) @compileError("a stack holds at least one item"); // 1
+    if (capacity == 0) @compileError("a stack holds at least one item"); // nothing: an assertion
+    const Item = if (@sizeOf(T) > 16) *const T else T; // 1
     return struct {
         const Len = if (capacity < 256) u8 else usize; // nothing: the type's
-        items: [capacity]T = undefined,
+        items: [capacity]Item = undefined,
         len: Len = 0,
 
-        fn push(s: *@This(), item: T) error{Full}!void {
+        fn push(s: *@This(), item: Item) error{Full}!void {
             if (s.len == capacity) return error.Full; // 1, to push
             s.items[s.len] = item;
             s.len += 1;
@@ -438,14 +441,49 @@ fn Stack(comptime T: type, comptime capacity: usize) type {
 
 Cognitive 1 for `Stack`; `Stack.push` has its own 1.
 
+## Decided at compile time
+
+An `if` or `switch` decided at compile time costs as any other: a reader
+still follows it. But it opens no level, since in any one instantiation
+what it holds is not nested: the code inside is at the depth it would
+be at without it. One is decided at compile time when it is in comptime
+code (a `comptime` block, a function that returns a type), or when what
+it decides on is known then: a `comptime` parameter and its fields, a
+type and what `@typeInfo`, `@sizeOf` and the like say of it, a
+constant. `gnarl skill counts` has the whole of it.
+
+A compile-time assertion, an `if` with no `else` whose body is only
+`@compileError`, costs nothing, as `comptime assert(...)` would not; so
+does an `orelse` or `catch` whose handler is only `@compileError`.
+
+```zig
+fn argument(comptime o: Options, comptime T: type, values: []const u32, comptime n: usize) ?T {
+    if (o.strict) { // 1: decided at compile time
+        if (@typeInfo(T) != .int) @compileError("a strict argument is an integer"); // nothing: an assertion
+    }
+    const v: ?u32 = if (n < values.len) values[n] else null; // 1
+    if (o.optional) { // 1: decided at compile time
+        if (@typeInfo(T) != .optional and @typeInfo(T) != .int) @compileError("take it as an optional"); // 1: the and
+        if (v == null) return null; // 1: not nested for the if around it
+    }
+    if (T == u32) return v; // 1: decided at compile time
+    return @intCast(v orelse 0); // 1
+}
+```
+
+Cognitive 7 for `argument`. Its cyclomatic complexity is 4: one path,
+and one for each decision made at run time (`n < values.len`, `v ==
+null` and the `orelse`).
+
 ## Not counted
 
 - Recursion. A call to the function's own name could be seen, but not a
   call through a pointer, an interface or `@This()`, so counting some
   and not others would mislead.
-- `comptime` itself. An `if`, `inline for` or `switch` evaluated at
-  compile time costs as any other: it is still a decision a reader
-  follows. The comptime tally counts them apart.
+- `comptime` itself. An `if` or `switch` decided at compile time costs
+  as any other, though it opens no level, and an `inline for` costs as
+  any loop: each is still something a reader follows. The comptime
+  tally counts them apart.
 
 ## A worked example
 
