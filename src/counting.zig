@@ -17,6 +17,9 @@ pub const changes = [_]Version{
     .{ .major = 0, .minor = 5, .patch = 0 },
     // What only test code uses is held as tests.
     .{ .major = 0, .minor = 6, .patch = 0 },
+    // A decision made at compile time is no path, an assertion costs
+    // nothing, and a decided if or switch opens no level.
+    .{ .major = 0, .minor = 10, .patch = 0 },
 };
 
 /// The golden fixtures (test/golden/*.zig) and their tables (*.txt) as
@@ -25,9 +28,9 @@ pub const changes = [_]Version{
 /// golden.zig fails until the release that goes out in joins `changes`
 /// and this names it; the test's message gives the hashes to set.
 pub const golden: Golden = .{
-    .release = .{ .major = 0, .minor = 6, .patch = 0 },
+    .release = .{ .major = 0, .minor = 10, .patch = 0 },
     .fixtures = "eaa119e9be1384a6",
-    .tables = "5377ccb21fdbd781",
+    .tables = "8fc6574f0c107c1a",
 };
 
 pub const Golden = struct {

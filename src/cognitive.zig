@@ -19,6 +19,13 @@
 //! `if`'s level), a loop's body and `else`, a `switch`'s prongs, a handler
 //! that is a block or a `switch`, and a labeled block used as a value.
 //!
+//! An `if` or `switch` decided at compile time (comptime_known.zig says
+//! which are) costs as any other, as a reader still follows it, but opens
+//! no level: in any one instantiation what it holds is not nested. A
+//! compile-time assertion, an `if` with no `else` whose body is only
+//! `@compileError`, or an `orelse` or `catch` whose handler is, costs
+//! nothing, as `comptime assert(...)` would not.
+//!
 //! A function declared in a container inside this one is measured on its
 //! own, and adds nothing here; the container costs nothing either. A
 //! container the function returns, as `return struct {...};`, is the type
@@ -30,6 +37,11 @@ const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
 const children = @import("children.zig");
+const comptime_known = @import("comptime_known.zig");
+const Why = comptime_known.Why;
+
+/// Why a decision made at compile time costs what it does.
+const at_compile_time = "decided at compile time: what it holds is not nested for it";
 
 /// The cognitive complexity of `function`, a `fn_decl` or `test_decl`. The
 /// working memory is allocated with `arena`.
@@ -121,8 +133,11 @@ const Walk = struct {
     /// look through for more.
     ops: std.ArrayList(Node.Index) = .empty,
     region: std.ArrayList(Node.Index) = .empty,
+    /// The decisions made at compile time.
+    decided: comptime_known.Decided = .{},
 
     fn run(w: *Walk, function: Node.Index) Allocator.Error!u32 {
+        w.decided = try comptime_known.of(w.arena, w.tree, function);
         try w.frames.append(w.arena, .{ .kind = .function, .label = null, .parent = 0 });
         try w.pushChildren(function, 0, 0, .other);
         while (w.stack.pop()) |item| try w.visit(item);
@@ -152,11 +167,19 @@ const Walk = struct {
         const tree = w.tree;
         const full = tree.fullIf(item.node).?;
         const d = item.depth;
-        if (item.place == .else_if) {
-            try w.add(.{ .token = full.ast.if_token, .construct = "else if", .adds = 1 });
-        } else try w.add(.{ .token = full.ast.if_token, .construct = "if", .adds = 1 + d, .depth = d, .structure = true });
+        const decided = w.decided.get(item.node);
         try w.push(.{ .node = full.ast.cond_expr, .depth = d, .frame = item.frame });
-        try w.push(.{ .node = full.ast.then_expr, .depth = d + 1, .frame = item.frame, .place = .body });
+        if (decided == .assertion) {
+            try w.add(.{ .token = full.ast.if_token, .construct = if (item.place == .else_if) "else if" else "if", .adds = 0, .why = Why.assertion.text(.@"if") });
+            return w.push(.{ .node = full.ast.then_expr, .depth = d, .frame = item.frame, .place = .body });
+        }
+        // What an if decided at compile time holds is at its own depth.
+        const inside = if (decided == null) d + 1 else d;
+        const why = if (decided == null) "" else at_compile_time;
+        if (item.place == .else_if) {
+            try w.add(.{ .token = full.ast.if_token, .construct = "else if", .adds = 1, .why = why });
+        } else try w.add(.{ .token = full.ast.if_token, .construct = "if", .adds = 1 + d, .depth = d, .structure = true, .why = why });
+        try w.push(.{ .node = full.ast.then_expr, .depth = inside, .frame = item.frame, .place = .body });
         const e = full.ast.else_expr.unwrap() orelse return;
         switch (tree.nodeTag(e)) {
             .if_simple, .@"if" => return w.push(.{ .node = e, .depth = d, .frame = item.frame, .place = .else_if }),
@@ -165,7 +188,7 @@ const Walk = struct {
         if (isBlock(tree, full.ast.then_expr) or isBlock(tree, e)) {
             try w.add(.{ .token = full.else_token, .construct = "else", .adds = 1 });
         } else try w.add(.{ .token = full.else_token, .construct = "else", .adds = 0, .why = "both branches are expressions: one choice of two values" });
-        try w.push(.{ .node = e, .depth = d + 1, .frame = item.frame, .place = .body });
+        try w.push(.{ .node = e, .depth = inside, .frame = item.frame, .place = .body });
     }
 
     fn loop(w: *Walk, item: Item) Allocator.Error!void {
@@ -204,15 +227,18 @@ const Walk = struct {
         const tree = w.tree;
         const full = tree.fullSwitch(item.node).?;
         const d = item.depth;
+        // What a switch decided at compile time holds is at its own depth.
+        const decided = w.decided.get(item.node) != null;
+        const inside = if (decided) d else d + 1;
         if (own) {
-            try w.add(.{ .token = full.ast.switch_token, .construct = "switch", .adds = 1 + d, .depth = d, .structure = true });
+            try w.add(.{ .token = full.ast.switch_token, .construct = "switch", .adds = 1 + d, .depth = d, .structure = true, .why = if (decided) at_compile_time else "" });
         } else try w.add(.{ .token = full.ast.switch_token, .construct = "switch", .adds = 0, .why = "the handler: one structure with its catch or orelse" });
         try w.push(.{ .node = full.ast.condition, .depth = d, .frame = item.frame });
         const frame = if (full.label_token) |label| try w.open(item.frame, .@"switch", label) else item.frame;
         for (full.ast.cases) |case| {
             const prong = tree.fullSwitchCase(case).?;
-            for (prong.ast.values) |value| try w.push(.{ .node = value, .depth = d + 1, .frame = frame });
-            try w.push(.{ .node = prong.ast.target_expr, .depth = d + 1, .frame = frame, .place = .body });
+            for (prong.ast.values) |value| try w.push(.{ .node = value, .depth = inside, .frame = frame });
+            try w.push(.{ .node = prong.ast.target_expr, .depth = inside, .frame = frame, .place = .body });
         }
     }
 
@@ -224,6 +250,10 @@ const Walk = struct {
         const name = tree.tokenSlice(keyword);
         const lhs, const rhs = tree.nodeData(item.node).node_and_node;
         try w.push(.{ .node = lhs, .depth = d, .frame = item.frame });
+        if (w.decided.get(item.node) == .assertion) {
+            try w.add(.{ .token = keyword, .construct = name, .adds = 0, .why = Why.assertion.text(.@"catch") });
+            return w.push(.{ .node = rhs, .depth = d, .frame = item.frame });
+        }
         switch (handlerKind(tree, item.node, rhs)) {
             .none => try w.add(.{ .token = keyword, .construct = name, .adds = 0, .why = noHandler(tree, item.node, rhs) }),
             .value => {
@@ -504,7 +534,7 @@ test "every example in docs/cognitive.md: its count, and each line's costs as it
             try std.testing.expectEqual(want, got);
         }
     }
-    try std.testing.expectEqual(22, examples);
+    try std.testing.expectEqual(23, examples);
 }
 
 /// Checks each function in `source` has its expected count, given a line
@@ -632,7 +662,30 @@ test "a jump from a loop's else does not end the loop; one to its own loop is fr
     );
 }
 
-test "comptime code counts as any other; a container inside costs nothing" {
+test "a decision made at compile time opens no level; an assertion costs nothing" {
+    try expectCounts(
+        \\fn write(w: *Writer, value: anytype, xs: []const u8) !void {
+        \\    switch (@typeInfo(@TypeOf(value))) {
+        \\        .int => if (value > 0) try w.printInt(value),
+        \\        else => {
+        \\            for (xs) |x| {
+        \\                if (@sizeOf(@TypeOf(value)) > 8) @compileError("too big");
+        \\                if (x > 0) try w.writeByte(x);
+        \\            }
+        \\        },
+        \\    }
+        \\    const name = @typeName(@TypeOf(value)) orelse @compileError("none");
+        \\    _ = name;
+        \\}
+    ,
+        // switch 1, its prongs at its own depth: if 1, for 1, the assertion
+        // nothing, if one level in, in the for, 2; the orelse nothing.
+        \\write 5
+        \\
+    );
+}
+
+test "comptime code costs as any other, opening no level; a container inside costs nothing" {
     try expectCounts(
         \\fn generic(comptime T: type) void {
         \\    comptime {

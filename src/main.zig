@@ -2235,6 +2235,7 @@ test {
     _ = @import("baseline.zig");
     _ = @import("children.zig");
     _ = @import("cognitive.zig");
+    _ = @import("comptime_known.zig");
     _ = @import("comptime_tally.zig");
     _ = @import("config.zig");
     _ = @import("counting.zig");

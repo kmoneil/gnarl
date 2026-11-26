@@ -177,7 +177,10 @@ the columns `path`, `line`, `end_line`, `column`, `name`, `kind`,
     as its source shows:
     - `items`: each `comptime` block or expression, `inline` loop or
       prong, reflection builtin (`@typeInfo`, `@Type`, `@hasDecl`,
-      `@hasField`, `@FieldType`), and comptime or anytype parameter:
+      `@hasField`, `@FieldType`), comptime or anytype parameter, and
+      decision made at compile time outside comptime code (`comptime
+      if`, `comptime switch`, `comptime and`), or anywhere for a
+      compile-time assertion:
       - `line`, `column`, `construct`: as for a branch.
     - `returns_type`: whether it returns a type, whose methods are then
       measured on their own.

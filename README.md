@@ -231,7 +231,8 @@ Cognitive 33 to 8, nesting 5 to 3, and nothing left over a limit.
 | weighted | the same, a type parameter and an `anytype` counted twice |
 
 `--explain` also tallies what runs at compile time (`comptime` blocks,
-`inline` loops, reflection builtins, comptime and `anytype` parameters)
+`inline` loops, reflection builtins, comptime and `anytype` parameters,
+decisions made at compile time)
 and names what the source alone cannot show, such as the members of an
 inferred error set, rather than leaving it out. `gnarl --files` lists
 each file's fan-out and fan-in, and its class:
